@@ -216,6 +216,28 @@ async def anthropic_slow(request: Request):
 async def anthropic_flaky(request: Request, n: int):
     return await _handle_anthropic(request, "flaky", str(n))
 
+@app.post("/v1/chat/completions/html/{code}")
+async def openai_html_error(request: Request, code: int):
+    """Return an HTML body (like an nginx error page) with the given status code."""
+    from fastapi.responses import HTMLResponse
+    html = f"<html><body><h1>{code} Error</h1><p>Upstream gateway error</p></body></html>"
+    return HTMLResponse(content=html, status_code=code)
+
+
+@app.post("/v1/chat/completions/text/{code}")
+async def openai_text_error(request: Request, code: int):
+    """Return a plain-text body with the given status code."""
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(content=f"upstream error {code}", status_code=code)
+
+
+@app.post("/v1/messages/html/{code}")
+async def anthropic_html_error(request: Request, code: int):
+    from fastapi.responses import HTMLResponse
+    html = f"<html><body><h1>{code} Error</h1></body></html>"
+    return HTMLResponse(content=html, status_code=code)
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
