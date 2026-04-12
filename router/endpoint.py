@@ -190,6 +190,9 @@ class APIEndpoint:
         Eagerly connects to the backend and checks the HTTP status before returning
         so that non-200 errors raise UpstreamError immediately (enabling retry/fallback
         in the caller instead of surfacing the error mid-stream after 200 is sent).
+
+        The returned iterator's aclose() always closes the underlying HTTP response,
+        even if iteration never started (client abandons before first read).
         """
         backend_format = self.cfg.type
         needs_conversion = request_format != backend_format
@@ -207,16 +210,11 @@ class APIEndpoint:
         await self.usage.record_request(success=True)
         await self.retry.on_success()
 
-        async def _stream_body() -> AsyncIterator[bytes]:
-            # Blank lines are included so the output is valid SSE (double-newline
-            # event boundaries are preserved for pass-through streaming).
-            try:
-                async for line in response.aiter_lines():
-                    yield (line + "\n").encode()
-            finally:
-                await response.aclose()
-
-        raw = _stream_body()
+        # Use a class-based wrapper so aclose() always closes the HTTP response
+        # regardless of whether iteration has started. An async-generator-based
+        # wrapper would not close the response if abandoned before iteration begins
+        # (Python only runs generator finally blocks on started generators).
+        raw = _ResponseStream(response)
 
         if not needs_conversion:
             return raw
@@ -295,3 +293,33 @@ class UpstreamError(Exception):
         self.status = status
         self.detail = detail
         super().__init__(f"[{api_id}] upstream error {status}: {detail}")
+
+
+class _ResponseStream:
+    """
+    Wraps an httpx streaming response as an async iterator of SSE lines (bytes).
+
+    Unlike an async-generator wrapper, this class guarantees that
+    response.aclose() is called when aclose() is invoked, even if iteration
+    has not yet started. This prevents HTTP connection leaks when a streaming
+    response is abandoned before the client reads the first byte.
+    """
+
+    def __init__(self, response: httpx.Response) -> None:
+        self._response = response
+        self._lines_iter = response.aiter_lines()
+
+    def __aiter__(self) -> "_ResponseStream":
+        return self
+
+    async def __anext__(self) -> bytes:
+        try:
+            line = await self._lines_iter.__anext__()
+        except StopAsyncIteration:
+            await self._response.aclose()
+            raise
+        # Preserve blank lines so SSE double-newline event boundaries are intact.
+        return (line + "\n").encode()
+
+    async def aclose(self) -> None:
+        await self._response.aclose()

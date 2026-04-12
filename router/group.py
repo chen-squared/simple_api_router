@@ -47,6 +47,8 @@ class Group:
         client: httpx.AsyncClient,
     ) -> Tuple[bool, Any]:
         """Try members in order, skip unavailable ones."""
+        if not self.members:
+            raise RoutingError(f"[{self.group_id}] group has no members configured")
         last_error = None
         for member in self.members:
             available, reason = await _check_available(member)

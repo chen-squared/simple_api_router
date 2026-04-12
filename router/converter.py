@@ -189,58 +189,65 @@ async def stream_openai_to_anthropic(
     """
     Convert an OpenAI SSE stream to Anthropic SSE format.
     Yields raw bytes for each SSE event.
+
+    All yields are inside the try/finally block so the source iterator is
+    closed whether the stream completes normally or is abandoned mid-stream
+    (e.g. client disconnect).
     """
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
-    # Send message_start
-    yield _anthropic_event(
-        "message_start",
-        {
-            "type": "message_start",
-            "message": {
-                "id": msg_id,
-                "type": "message",
-                "role": "assistant",
-                "content": [],
-                "model": "",
-                "stop_reason": None,
-                "stop_sequence": None,
-                "usage": {"input_tokens": 0, "output_tokens": 0},
-            },
-        },
-    )
-    yield _anthropic_event("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
-    yield _anthropic_event("ping", {"type": "ping"})
-
     finish_reason = None
-    async for chunk in source:
-        line = chunk.decode("utf-8", errors="replace").strip()
-        if not line.startswith("data:"):
-            continue
-        data_str = line[5:].strip()
-        if data_str == "[DONE]":
-            break
-        try:
-            data = json.loads(data_str)
-        except json.JSONDecodeError:
-            continue
+    try:
+        # Send message_start
+        yield _anthropic_event(
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "id": msg_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "model": "",
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                },
+            },
+        )
+        yield _anthropic_event("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+        yield _anthropic_event("ping", {"type": "ping"})
 
-        delta = data.get("choices", [{}])[0].get("delta", {})
-        content = delta.get("content", "")
-        finish_reason = data.get("choices", [{}])[0].get("finish_reason") or finish_reason
+        async for chunk in source:
+            line = chunk.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data_str = line[5:].strip()
+            if data_str == "[DONE]":
+                break
+            try:
+                data = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
 
-        if content:
-            yield _anthropic_event(
-                "content_block_delta",
-                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": content}},
-            )
+            delta = data.get("choices", [{}])[0].get("delta", {})
+            content = delta.get("content", "")
+            finish_reason = data.get("choices", [{}])[0].get("finish_reason") or finish_reason
 
-    yield _anthropic_event("content_block_stop", {"type": "content_block_stop", "index": 0})
-    stop_reason = "end_turn" if finish_reason in (None, "stop") else finish_reason
-    yield _anthropic_event(
-        "message_delta",
-        {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": 0}},
-    )
-    yield _anthropic_event("message_stop", {"type": "message_stop"})
+            if content:
+                yield _anthropic_event(
+                    "content_block_delta",
+                    {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": content}},
+                )
+
+        yield _anthropic_event("content_block_stop", {"type": "content_block_stop", "index": 0})
+        stop_reason = "end_turn" if finish_reason in (None, "stop") else finish_reason
+        yield _anthropic_event(
+            "message_delta",
+            {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": 0}},
+        )
+        yield _anthropic_event("message_stop", {"type": "message_stop"})
+    finally:
+        await source.aclose()
 
 
 async def stream_anthropic_to_openai(
@@ -249,44 +256,51 @@ async def stream_anthropic_to_openai(
     """
     Convert an Anthropic SSE stream to OpenAI SSE format.
     Yields raw bytes for each SSE line.
+
+    All yields are inside the try/finally block so the source iterator is
+    closed whether the stream completes normally or is abandoned mid-stream
+    (e.g. client disconnect).
     """
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     model = ""
     created = int(time.time())
 
-    # Send initial role chunk
-    yield _openai_chunk(chat_id, model, created, {"role": "assistant", "content": None})
-
     event_type = None
-    async for chunk in source:
-        line = chunk.decode("utf-8", errors="replace").strip()
-        if line.startswith("event:"):
-            event_type = line[6:].strip()
-            continue
-        if not line.startswith("data:"):
-            continue
-        data_str = line[5:].strip()
-        try:
-            data = json.loads(data_str)
-        except json.JSONDecodeError:
-            continue
+    try:
+        # Send initial role chunk before consuming source
+        yield _openai_chunk(chat_id, model, created, {"role": "assistant", "content": None})
 
-        dtype = data.get("type", "")
+        async for chunk in source:
+            line = chunk.decode("utf-8", errors="replace").strip()
+            if line.startswith("event:"):
+                event_type = line[6:].strip()
+                continue
+            if not line.startswith("data:"):
+                continue
+            data_str = line[5:].strip()
+            try:
+                data = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
 
-        if dtype == "message_start":
-            model = data.get("message", {}).get("model", "")
+            dtype = data.get("type", "")
 
-        elif dtype == "content_block_delta":
-            text = data.get("delta", {}).get("text", "")
-            if text:
-                yield _openai_chunk(chat_id, model, created, {"content": text})
+            if dtype == "message_start":
+                model = data.get("message", {}).get("model", "")
 
-        elif dtype == "message_delta":
-            stop_reason = data.get("delta", {}).get("stop_reason", "end_turn")
-            finish = "stop" if stop_reason in ("end_turn", "stop_sequence") else stop_reason
-            yield _openai_chunk(chat_id, model, created, {}, finish_reason=finish)
+            elif dtype == "content_block_delta":
+                text = data.get("delta", {}).get("text", "")
+                if text:
+                    yield _openai_chunk(chat_id, model, created, {"content": text})
 
-    yield b"data: [DONE]\n\n"
+            elif dtype == "message_delta":
+                stop_reason = data.get("delta", {}).get("stop_reason", "end_turn")
+                finish = "stop" if stop_reason in ("end_turn", "stop_sequence") else stop_reason
+                yield _openai_chunk(chat_id, model, created, {}, finish_reason=finish)
+
+        yield b"data: [DONE]\n\n"
+    finally:
+        await source.aclose()
 
 
 def _anthropic_event(event: str, data: Dict) -> bytes:
