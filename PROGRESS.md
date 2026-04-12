@@ -2,6 +2,42 @@
 
 ---
 
+## Iteration 1 — 2026-04-12T17:34:01Z
+
+### What was done
+Initial implementation from scratch. Built the full API router with:
+- FastAPI server accepting OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`) requests
+- YAML config loading with env var expansion (`${VAR}`)
+- RPM sliding-window rate limiting and daily/5h/weekly token quota tracking (`router/usage.py`)
+- Per-error retry limits and consecutive-failure cooldown (`router/retry.py`)
+- Full OpenAI ↔ Anthropic request/response format conversion including streaming SSE (`router/converter.py`)
+- Single backend proxy with retry loop (`router/endpoint.py`)
+- Sequential and load_balance group routing with nested group support (`router/group.py`)
+- Mock API server simulating success, errors (429/500/502/503), slow responses, and flaky endpoints (`mock_api/server.py`)
+- 35 tests covering unit and integration scenarios
+
+### Bugs fixed
+N/A (initial implementation)
+
+### Test count
+**35 tests passing**
+
+---
+
+## Iteration 2 — 2026-04-12T17:55:00Z
+
+### What was done
+QA Round 1 — sub-agent deep testing. Verified: cooldown recovery, RPM recovery, load balance weight distribution (2:1 ratio confirmed), circular group detection, streaming e2e, cross-format conversion, multiple system message merging. Added 49 new edge-case tests.
+
+### Bugs fixed
+1. **CRITICAL — Streaming errors were silent**: `_call_streaming()` created a lazy async generator that only entered the HTTP context when iterated. On a non-200 response, `UpstreamError` was raised *after* FastAPI had sent HTTP 200 headers, making fallback impossible and leaving clients with a broken stream. Fixed by eagerly connecting inside `call()` and checking status before returning the stream to the caller.
+2. **MEDIUM — SSE blank lines stripped**: Pass-through streaming had `if line:` guard that stripped the blank lines separating SSE events, breaking the `\n\n` event boundary for EventSource clients. Fixed by removing the guard.
+
+### Test count
+**84 tests passing** (+49 new tests)
+
+---
+
 ## Iteration 3 — 2026-04-12T18:24:33Z
 
 ### What was done
@@ -37,3 +73,23 @@ None — all investigated areas were already correctly implemented.
 **129 tests passing** (was 102; +27 new tests)
 
 ---
+
+---
+
+## Iteration 4 (Round 2 QA) — 2026-04-12T18:48:00Z
+
+### What was done
+QA Round 2 — focused on model override, load balance with unavailable members, streaming conversion (Anthropic→OpenAI format), and streaming resource leaks. Added 18 new tests.
+
+### Bugs fixed
+1. **Empty sequential group — unhelpful error**: `_call_sequential()` with 0 members set `last_error = None` and raised `"...: None"`. Fixed with early check in `router/group.py` → now raises `"group has no members configured"`.
+2. **CRITICAL — Streaming resource leak**: HTTP connections were not closed when clients disconnected mid-stream. Two root causes: (a) `_stream_body()` async generator's `finally` block was never entered if the generator was abandoned before iteration; (b) converter functions had `yield` outside `try/finally`. Fixed by replacing the generator with a `_ResponseStream` class with explicit `aclose()`, and moving all converter yields inside `try/finally`.
+
+### Test count
+**102 tests passing** (+18 new tests)
+
+---
+
+## Iteration 5 (Round 3 QA) — 2026-04-12T18:24:33Z
+
+*(See earlier Iteration 3 entry — same round — the sub-agent wrote this entry directly.)*
