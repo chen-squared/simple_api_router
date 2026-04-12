@@ -1,0 +1,76 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+  log_level: "INFO"
+  log_file: "router.log"
+
+# All requests go to the default group
+default_group: main
+
+apis:
+  openai-primary:
+    base_url: "https://api.openai.com/v1"
+    api_key: "sk-xxx"
+    type: openai
+    retry:
+      max_retries: 3        # per-request max retries
+      cooldown_after: 5     # trigger cooldown after this many total failures
+      cooldown_duration: 300  # seconds in cooldown
+      error_limits:         # max retries for each error code per request
+        429: 1
+        500: 3
+        502: 3
+        503: 5
+    usage:
+      rpm: 60
+      daily: 100000
+      per_5h: 30000
+      weekly: 500000
+      no_retry_duration: 3600  # seconds to skip after usage exceeded + 429
+
+  anthropic-primary:
+    base_url: "https://api.anthropic.com"
+    api_key: "sk-ant-xxx"
+    type: anthropic
+    retry:
+      max_retries: 3
+      cooldown_after: 5
+      cooldown_duration: 300
+      error_limits:
+        429: 1
+        500: 3
+        529: 3
+    usage:
+      rpm: 50
+      daily: 50000
+      per_5h: 15000
+      weekly: 200000
+      no_retry_duration: 3600
+
+  openai-backup:
+    base_url: "https://api.openai.com/v1"
+    api_key: "sk-yyy"
+    type: openai
+    retry:
+      max_retries: 2
+      cooldown_after: 3
+      cooldown_duration: 120
+      error_limits:
+        429: 1
+        500: 2
+    usage:
+      rpm: 30
+      daily: 50000
+
+groups:
+  main:
+    strategy: sequential
+    members:
+      - api: openai-primary
+      - group: fallback
+
+  fallback:
+    strategy: load_balance
+    members:
+      - api: anthropic-primary
+      - api: openai-backup
