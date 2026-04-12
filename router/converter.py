@@ -324,10 +324,19 @@ def _openai_chunk(
     return f"data: {json.dumps(payload)}\n\n".encode()
 
 
-def extract_tokens_from_response(body: Dict, api_type: str) -> int:
-    """Extract total token count from a response body."""
+def extract_token_counts(body: Dict, api_type: str) -> tuple[int, int]:
+    """
+    Extract (input_tokens, output_tokens) from a response body.
+    Returns (0, 0) if usage info is absent.
+    """
     usage = body.get("usage", {})
     if api_type == "openai":
-        return usage.get("total_tokens", 0)
+        return usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
     # anthropic
-    return usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+    return usage.get("input_tokens", 0), usage.get("output_tokens", 0)
+
+
+def extract_tokens_from_response(body: Dict, api_type: str) -> int:
+    """Legacy helper — returns total token count (input + output)."""
+    inp, out = extract_token_counts(body, api_type)
+    return inp + out

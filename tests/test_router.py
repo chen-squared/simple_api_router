@@ -170,7 +170,7 @@ class TestBasicRouting(RouterTestCase):
     def _write_config(cls):
         _write_test_config(_server_config(
             apis={
-                "primary": _openai_api(MOCK_BASE_V1, {"usage": {"rpm": 100, "daily": 10000, "per_5h": 5000, "weekly": 50000}}),
+                "primary": _openai_api(MOCK_BASE_V1, {"usage": {"rpm": 100, "daily_requests": 10000, "per_5h_requests": 5000, "weekly_requests": 50000}}),
                 "secondary": _openai_api(MOCK_BASE_V1, {"usage": {"rpm": 50}}),
             },
             groups={
@@ -538,52 +538,54 @@ class TestUsageTracking(unittest.TestCase):
 
         asyncio.run(_run())
 
-    def test_daily_limit(self):
+    def test_daily_requests_limit(self):
         from router.config import UsageConfig
         from router.usage import UsageTracker
-        cfg = UsageConfig(daily=100)
+        cfg = UsageConfig(daily_requests=3)
         tracker = UsageTracker("test", cfg)
 
         async def _run():
-            self.assertFalse(await tracker.is_usage_exceeded())
-            await tracker.record_request(success=True, tokens_used=100)
-            self.assertTrue(await tracker.is_usage_exceeded())
+            self.assertFalse(await tracker.is_request_quota_exceeded())
+            for _ in range(3):
+                await tracker.record_request(success=True)
+            self.assertTrue(await tracker.is_request_quota_exceeded())
 
         asyncio.run(_run())
 
-    def test_per5h_limit(self):
+    def test_per5h_requests_limit(self):
         from router.config import UsageConfig
         from router.usage import UsageTracker
-        cfg = UsageConfig(per_5h=50)
+        cfg = UsageConfig(per_5h_requests=2)
         tracker = UsageTracker("test", cfg)
 
         async def _run():
-            await tracker.record_request(success=True, tokens_used=50)
-            self.assertTrue(await tracker.is_usage_exceeded())
+            await tracker.record_request(success=True)
+            await tracker.record_request(success=True)
+            self.assertTrue(await tracker.is_request_quota_exceeded())
 
         asyncio.run(_run())
 
-    def test_weekly_limit(self):
+    def test_weekly_requests_limit(self):
         from router.config import UsageConfig
         from router.usage import UsageTracker
-        cfg = UsageConfig(weekly=200)
+        cfg = UsageConfig(weekly_requests=1)
         tracker = UsageTracker("test", cfg)
 
         async def _run():
-            await tracker.record_request(success=True, tokens_used=200)
-            self.assertTrue(await tracker.is_usage_exceeded())
+            await tracker.record_request(success=True)
+            self.assertTrue(await tracker.is_request_quota_exceeded())
 
         asyncio.run(_run())
 
     def test_usage_cooldown_on_429(self):
         from router.config import UsageConfig
         from router.usage import UsageTracker
-        cfg = UsageConfig(daily=10, no_retry_duration=60)
+        cfg = UsageConfig(daily_requests=1, no_retry_duration=60)
         tracker = UsageTracker("test", cfg)
 
         async def _run():
-            await tracker.record_request(success=True, tokens_used=10)
-            self.assertTrue(await tracker.is_usage_exceeded())
+            await tracker.record_request(success=True)
+            self.assertTrue(await tracker.is_request_quota_exceeded())
             await tracker.on_usage_exceeded_429()
             self.assertTrue(await tracker.is_blocked())
 
@@ -596,12 +598,92 @@ class TestUsageTracking(unittest.TestCase):
         tracker = UsageTracker("test", cfg)
 
         async def _run():
-            await tracker.record_request(success=True, tokens_used=10)
+            await tracker.record_request(success=True, input_tokens=10, output_tokens=5)
             await tracker.record_request(success=False)
             s = tracker.stats()
             self.assertEqual(s["total_requests"], 2)
             self.assertEqual(s["total_success"], 1)
             self.assertEqual(s["total_failure"], 1)
+            self.assertEqual(s["daily_requests"], 2)
+
+        asyncio.run(_run())
+
+    def test_budget_daily_limit(self):
+        from router.config import UsageConfig, BudgetConfig
+        from router.usage import UsageTracker
+        cfg = UsageConfig(budget=BudgetConfig(
+            input_price_per_1m=1.0, output_price_per_1m=1.0, daily=0.001
+        ))
+        tracker = UsageTracker("test", cfg)
+
+        async def _run():
+            self.assertFalse(await tracker.is_budget_exceeded())
+            # 1000 input + 0 output = $0.001 at $1/1M → hits daily limit
+            await tracker.record_request(success=True, input_tokens=1000, output_tokens=0)
+            self.assertTrue(await tracker.is_budget_exceeded())
+
+        asyncio.run(_run())
+
+    def test_budget_weekly_limit(self):
+        from router.config import UsageConfig, BudgetConfig
+        from router.usage import UsageTracker
+        cfg = UsageConfig(budget=BudgetConfig(
+            input_price_per_1m=0.0, output_price_per_1m=2.0, weekly=0.002
+        ))
+        tracker = UsageTracker("test", cfg)
+
+        async def _run():
+            await tracker.record_request(success=True, input_tokens=0, output_tokens=1000)
+            self.assertTrue(await tracker.is_budget_exceeded())
+
+        asyncio.run(_run())
+
+    def test_budget_monthly_limit(self):
+        from router.config import UsageConfig, BudgetConfig
+        from router.usage import UsageTracker
+        cfg = UsageConfig(budget=BudgetConfig(
+            input_price_per_1m=1.0, output_price_per_1m=3.0, monthly=0.003
+        ))
+        tracker = UsageTracker("test", cfg)
+
+        async def _run():
+            await tracker.record_request(success=True, input_tokens=0, output_tokens=1000)
+            self.assertTrue(await tracker.is_budget_exceeded())
+
+        asyncio.run(_run())
+
+    def test_budget_cooldown_on_429(self):
+        from router.config import UsageConfig, BudgetConfig
+        from router.usage import UsageTracker
+        cfg = UsageConfig(budget=BudgetConfig(
+            input_price_per_1m=1.0, output_price_per_1m=1.0,
+            daily=0.001, no_retry_duration=60,
+        ))
+        tracker = UsageTracker("test", cfg)
+
+        async def _run():
+            await tracker.record_request(success=True, input_tokens=1000, output_tokens=0)
+            self.assertTrue(await tracker.is_budget_exceeded())
+            await tracker.on_budget_exceeded_429()
+            self.assertTrue(await tracker.is_budget_blocked())
+            self.assertTrue(await tracker.is_blocked())
+
+        asyncio.run(_run())
+
+    def test_budget_spend_stats(self):
+        from router.config import UsageConfig, BudgetConfig
+        from router.usage import UsageTracker
+        cfg = UsageConfig(budget=BudgetConfig(
+            input_price_per_1m=2.0, output_price_per_1m=8.0
+        ))
+        tracker = UsageTracker("test", cfg)
+
+        async def _run():
+            # 500K input tokens = $1.00, 250K output = $2.00 → daily = $3.00
+            await tracker.record_request(success=True, input_tokens=500_000, output_tokens=250_000)
+            spend = tracker.current_budget_spend()
+            self.assertAlmostEqual(spend["daily_usd"], 3.0, places=4)
+            self.assertAlmostEqual(spend["total_usd"], 3.0, places=4)
 
         asyncio.run(_run())
 

@@ -12,6 +12,7 @@ from router.config import APIConfig
 from router.converter import (
     anthropic_to_openai_request,
     anthropic_to_openai_response,
+    extract_token_counts,
     extract_tokens_from_response,
     openai_to_anthropic_request,
     openai_to_anthropic_response,
@@ -94,9 +95,13 @@ class APIEndpoint:
                         await self.usage.record_request(success=False)
                         log.warning("[%s] streaming error status=%d", self.api_id, status)
                         # Apply the same retry/fallback logic as non-streaming below
-                        if status == 429 and await self.usage.is_usage_exceeded():
-                            await self.usage.on_usage_exceeded_429()
-                            raise EndpointUnavailableError(self.api_id, "usage exceeded + 429")
+                        if status == 429:
+                            if await self.usage.is_request_quota_exceeded():
+                                await self.usage.on_request_quota_exceeded_429()
+                                raise EndpointUnavailableError(self.api_id, "request quota exceeded + 429")
+                            if await self.usage.is_budget_exceeded():
+                                await self.usage.on_budget_exceeded_429()
+                                raise EndpointUnavailableError(self.api_id, "budget exceeded + 429")
                         if await self.retry.is_in_cooldown():
                             raise EndpointUnavailableError(self.api_id, "cooldown triggered")
                         if status in RETRYABLE_CODES:
@@ -120,12 +125,14 @@ class APIEndpoint:
                 raise
 
             if status == 200:
-                tokens = extract_tokens_from_response(resp_body, self.cfg.type)
-                await self.usage.record_request(success=True, tokens_used=tokens)
+                input_tokens, output_tokens = extract_token_counts(resp_body, self.cfg.type)
+                await self.usage.record_request(
+                    success=True, input_tokens=input_tokens, output_tokens=output_tokens
+                )
                 await self.retry.on_success()
                 # Convert response if needed
                 result = self._convert_response(resp_body, request_format)
-                log.info("[%s] ✓ success tokens=%d", self.api_id, tokens)
+                log.info("[%s] ✓ success in=%d out=%d", self.api_id, input_tokens, output_tokens)
                 return False, result
 
             # Non-200: handle errors
@@ -138,10 +145,14 @@ class APIEndpoint:
                 self.api_id, status, error_counts[status],
             )
 
-            # Check for usage exceeded + 429
-            if status == 429 and await self.usage.is_usage_exceeded():
-                await self.usage.on_usage_exceeded_429()
-                raise EndpointUnavailableError(self.api_id, "usage exceeded + 429")
+            # Check for quota/budget exceeded + 429
+            if status == 429:
+                if await self.usage.is_request_quota_exceeded():
+                    await self.usage.on_request_quota_exceeded_429()
+                    raise EndpointUnavailableError(self.api_id, "request quota exceeded + 429")
+                if await self.usage.is_budget_exceeded():
+                    await self.usage.on_budget_exceeded_429()
+                    raise EndpointUnavailableError(self.api_id, "budget exceeded + 429")
 
             # Check cooldown
             if await self.retry.is_in_cooldown():

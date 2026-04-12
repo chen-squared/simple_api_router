@@ -10,27 +10,34 @@ default_group: main
 apis:
   openai-primary:
     base_url: "https://api.openai.com/v1"
-    api_key: "sk-xxx"
+    api_key: "${OPENAI_API_KEY}"
     type: openai
     retry:
-      max_retries: 3        # per-request max retries
-      cooldown_after: 5     # trigger cooldown after this many total failures
-      cooldown_duration: 300  # seconds in cooldown
-      error_limits:         # max retries for each error code per request
+      max_retries: 3
+      cooldown_after: 5
+      cooldown_duration: 300
+      error_limits:
         429: 1
         500: 3
         502: 3
         503: 5
     usage:
       rpm: 60
-      daily: 100000
-      per_5h: 30000
-      weekly: 500000
-      no_retry_duration: 3600  # seconds to skip after usage exceeded + 429
+      daily_requests: 1000
+      per_5h_requests: 300
+      weekly_requests: 5000
+      no_retry_duration: 3600
+      budget:
+        input_price_per_1m: 2.50
+        output_price_per_1m: 10.00
+        daily: 5.0
+        weekly: 25.0
+        monthly: 80.0
+        no_retry_duration: 3600
 
   anthropic-primary:
     base_url: "https://api.anthropic.com"
-    api_key: "sk-ant-xxx"
+    api_key: "${ANTHROPIC_API_KEY}"
     type: anthropic
     retry:
       max_retries: 3
@@ -42,14 +49,21 @@ apis:
         529: 3
     usage:
       rpm: 50
-      daily: 50000
-      per_5h: 15000
-      weekly: 200000
+      daily_requests: 500
+      per_5h_requests: 150
+      weekly_requests: 2500
       no_retry_duration: 3600
+      budget:
+        input_price_per_1m: 3.00
+        output_price_per_1m: 15.00
+        daily: 5.0
+        weekly: 25.0
+        monthly: 80.0
+        no_retry_duration: 3600
 
   openai-backup:
     base_url: "https://api.openai.com/v1"
-    api_key: "sk-yyy"
+    api_key: "${OPENAI_BACKUP_API_KEY}"
     type: openai
     retry:
       max_retries: 2
@@ -60,7 +74,7 @@ apis:
         500: 2
     usage:
       rpm: 30
-      daily: 50000
+      daily_requests: 500
 
 groups:
   main:

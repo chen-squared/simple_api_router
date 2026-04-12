@@ -17,12 +17,25 @@ class RetryConfig(BaseModel):
     error_limits: Dict[int, int] = Field(default_factory=dict)
 
 
+class BudgetConfig(BaseModel):
+    """Dollar-based budget limits using estimated token costs."""
+    input_price_per_1m: float = 0.0    # USD per 1M input tokens
+    output_price_per_1m: float = 0.0   # USD per 1M output tokens
+    daily: Optional[float] = None       # max USD per day
+    weekly: Optional[float] = None      # max USD per 7 days
+    monthly: Optional[float] = None     # max USD per 30 days
+    no_retry_duration: int = 3600       # seconds to block after budget exceeded + 429
+
+
 class UsageConfig(BaseModel):
     rpm: Optional[int] = None
-    daily: Optional[int] = None
-    per_5h: Optional[int] = None
-    weekly: Optional[int] = None
-    no_retry_duration: int = 3600  # seconds to block after usage exceeded + 429
+    # Request count limits (not token counts)
+    daily_requests: Optional[int] = None
+    per_5h_requests: Optional[int] = None
+    weekly_requests: Optional[int] = None
+    no_retry_duration: int = 3600  # seconds to block after request-quota exceeded + 429
+    # Dollar budget (based on token costs)
+    budget: Optional[BudgetConfig] = None
 
 
 class APIConfig(BaseModel):

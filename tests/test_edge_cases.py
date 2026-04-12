@@ -707,31 +707,30 @@ class TestStreamingSSEFormat(unittest.TestCase):
 # -----------------------------------------------------------------------
 
 class TestStreamingTokenTracking(unittest.TestCase):
-    def test_streaming_does_not_track_tokens(self):
+    def test_streaming_tracks_requests_not_tokens(self):
         """
-        KNOWN LIMITATION: Streaming requests don't track token usage.
-        The usage tracker is called without tokens_used in _call_streaming.
-        Token counts (daily, per_5h, weekly) are never incremented for streaming.
+        Streaming requests increment request counts but no token budget
+        (token counts are not known inline for most streaming APIs).
         """
         from router.config import UsageConfig
         from router.usage import UsageTracker
 
         async def _run():
-            cfg = UsageConfig(daily=100, per_5h=50, weekly=500)
+            cfg = UsageConfig(daily_requests=100, per_5h_requests=50, weekly_requests=500)
             tracker = UsageTracker("test", cfg)
 
             # Simulate what happens in streaming: record_request without tokens
-            await tracker.record_request(success=True)  # no tokens_used
+            await tracker.record_request(success=True)  # no tokens
 
             return tracker.stats()
 
         stats = asyncio.run(_run())
-        self.assertEqual(stats["daily_tokens"], 0,
-            "KNOWN LIMITATION: Streaming doesn't track daily tokens")
-        self.assertEqual(stats["per_5h_tokens"], 0,
-            "KNOWN LIMITATION: Streaming doesn't track per_5h tokens")
-        self.assertEqual(stats["weekly_tokens"], 0,
-            "KNOWN LIMITATION: Streaming doesn't track weekly tokens")
+        self.assertEqual(stats["daily_requests"], 1,
+            "Daily request count should be incremented for streaming")
+        self.assertEqual(stats["total_input_tokens"], 0,
+            "Input tokens should not be incremented without token data")
+        self.assertEqual(stats["total_output_tokens"], 0,
+            "Output tokens should not be incremented without token data")
         self.assertEqual(stats["total_requests"], 1,
             "Total request count should be incremented")
 
