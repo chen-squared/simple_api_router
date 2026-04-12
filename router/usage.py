@@ -114,12 +114,37 @@ class UsageTracker:
     # ────────────────────────────────────────────────────────────────────
 
     async def is_rate_limited(self) -> bool:
-        """True if the RPM limit is currently exceeded."""
+        """True if the RPM limit is currently exceeded (read-only, non-atomic check)."""
         if self.cfg.rpm is None:
             return False
         async with self._lock:
             self._prune_rpm_window()
             return len(self._rpm_window) >= self.cfg.rpm
+
+    async def try_claim_rpm_slot(self) -> bool:
+        """
+        Atomically check the RPM window AND claim a slot if available.
+
+        This is the only authoritative gate for RPM limiting. Unlike
+        ``is_rate_limited()`` (which is a read-only hint), this method both
+        checks and records in a single lock acquisition, preventing the
+        check-then-act race when many coroutines make concurrent requests.
+
+        Returns True if the slot was successfully claimed (request may proceed),
+        False if the RPM limit is already reached.
+
+        Callers must NOT also call ``record_request()``'s RPM path; the slot
+        is recorded here. ``record_request()`` still handles period counters
+        and budget tracking.
+        """
+        if self.cfg.rpm is None:
+            return True
+        async with self._lock:
+            self._prune_rpm_window()
+            if len(self._rpm_window) >= self.cfg.rpm:
+                return False
+            self._rpm_window.append(time.time())
+            return True
 
     async def is_request_quota_exceeded(self) -> bool:
         """True if any request-count limit (daily/per_5h/weekly) is exceeded."""
@@ -196,20 +221,21 @@ class UsageTracker:
         # Legacy arg kept for backward compat (treated as output tokens)
         tokens_used: int = 0,
     ) -> None:
-        """Record a completed request (success or failure)."""
+        """Record a completed request (success or failure).
+
+        Note: RPM slot is NOT recorded here.  It is claimed atomically by
+        ``try_claim_rpm_slot()`` before the HTTP request is dispatched.
+        """
         if tokens_used and not output_tokens:
             output_tokens = tokens_used  # backward compat
 
         async with self._lock:
-            now = time.time()
+            now = time.time()  # noqa: F841  (kept for readability)
             self.total_requests += 1
             if success:
                 self.total_success += 1
             else:
                 self.total_failure += 1
-
-            # RPM
-            self._rpm_window.append(now)
 
             # Request-count period tracking (both success and failure count)
             self._refresh_req_periods()

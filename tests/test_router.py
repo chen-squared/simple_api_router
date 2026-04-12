@@ -533,7 +533,8 @@ class TestUsageTracking(unittest.TestCase):
         async def _run():
             for _ in range(3):
                 self.assertFalse(await tracker.is_rate_limited())
-                await tracker.record_request(success=True)
+                # RPM slots are now claimed atomically via try_claim_rpm_slot()
+                self.assertTrue(await tracker.try_claim_rpm_slot())
             self.assertTrue(await tracker.is_rate_limited())
 
         asyncio.run(_run())

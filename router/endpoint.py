@@ -62,6 +62,13 @@ class APIEndpoint:
         if not available:
             raise EndpointUnavailableError(self.api_id, reason)
 
+        # Atomically claim an RPM slot to prevent concurrent over-dispatch.
+        # is_available() above uses is_rate_limited() as a fast non-atomic hint;
+        # try_claim_rpm_slot() is the authoritative gate that records the slot
+        # inside the same lock acquisition as the check.
+        if not await self.usage.try_claim_rpm_slot():
+            raise EndpointUnavailableError(self.api_id, "RPM limit exceeded")
+
         # Convert request format if needed
         target_body = self._convert_request(request_body, request_format)
 

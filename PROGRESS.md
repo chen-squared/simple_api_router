@@ -93,3 +93,29 @@ QA Round 2 — focused on model override, load balance with unavailable members,
 ## Iteration 5 (Round 3 QA) — 2026-04-12T18:24:33Z
 
 *(See earlier Iteration 3 entry — same round — the sub-agent wrote this entry directly.)*
+
+---
+
+## Iteration 6: Realistic Scenario QA
+
+### What was tested/changed
+Three rounds of scenario testing simulating real user workflows:
+
+**Round 1 (scenarios 1–10):** Daily-request fallback chain (api1→api2→api3), RPM limit fallback, dollar-budget fallback, concurrent RPM distribution, per-5h quota fallback, weekly quota fallback, zero-dollar budget (immediately unavailable), all APIs exhausted → 503, Anthropic-format fallback, combined RPM + daily limits.
+
+**Round 2 (scenarios 11–15):** Streaming requests with quota fallback, retry-failure quota accumulation, high-concurrency RPM ceiling (20 threads, rpm=10), monthly budget exhaustion fallback, load-balance group with RPM-exhausted member.
+
+**Round 3 (scenarios 16–18):** Nested sequential group fallback (main→inner_group→api3), budget exceeded without 429 does NOT set a cooldown timer, RPM slot consumed once per `call()` invocation (not per retry attempt).
+
+### Bugs Found and Fixed
+1. **CRITICAL — RPM race condition in concurrent requests (`router/usage.py`, `router/endpoint.py`)**: The availability check (`is_rate_limited()`) and RPM recording (`record_request()`) were non-atomic. Under concurrent load, multiple coroutines all passed the check before any recorded a slot, allowing more requests than the rpm limit through. Fixed by adding `try_claim_rpm_slot()` which atomically checks AND claims an RPM slot inside a single lock acquisition, then calling it from `endpoint.py` right after `is_available()` before the retry loop. Also removed RPM tracking from `record_request()` to avoid double-counting.
+
+2. **MEDIUM — Unit tests called `record_request()` to populate RPM window**: Three existing unit tests (`test_rpm_limit`, `test_rpm_blocks_at_limit`, `test_rpm_recovers_after_window`) simulated RPM state by calling `record_request()` directly. After the fix, RPM is tracked via `try_claim_rpm_slot()` instead. Updated these tests to use `try_claim_rpm_slot()`.
+
+### Tests Added
+**25 new tests** in `tests/test_scenarios.py`:
+- `TestDailyRequestsFallback` (2), `TestRPMLimitFallback` (2), `TestBudgetFallback` (2), `TestConcurrentRPM` (1), `TestPer5hRequestsFallback` (2), `TestWeeklyRequestsFallback` (2), `TestBudgetZeroImmediate` (1), `TestAllAPIsExhausted` (1), `TestAnthropicFormatDailyFallback` (1), `TestCombinedLimits` (1), `TestStreamingQuotaFallback` (1), `TestRetryCountsTowardQuota` (1), `TestHighConcurrencyRPM` (2), `TestBudgetMonthlyFallback` (1), `TestLoadBalanceRPMExhaustion` (1), `TestNestedGroupFallback` (2), `TestBudgetNoAutoCooldown` (1), `TestRPMOneSlotPerCall` (1).
+
+### Test count
+**159 tests passing** (was 134; +25 new tests, +2 updated existing tests for RPM fix)
+

@@ -483,7 +483,8 @@ class TestRPMSlidingWindow(unittest.TestCase):
 
             for _ in range(3):
                 self.assertFalse(await tracker.is_rate_limited())
-                await tracker.record_request(success=True)
+                # RPM slots are claimed atomically; record_request no longer tracks RPM
+                self.assertTrue(await tracker.try_claim_rpm_slot())
 
             self.assertTrue(await tracker.is_rate_limited(), "Should be rate limited after 3 requests")
 
@@ -498,9 +499,9 @@ class TestRPMSlidingWindow(unittest.TestCase):
             cfg = UsageConfig(rpm=3)
             tracker = UsageTracker("test", cfg)
 
-            # Fill the window
+            # Fill the window via atomic slot claiming
             for _ in range(3):
-                await tracker.record_request(success=True)
+                await tracker.try_claim_rpm_slot()
             self.assertTrue(await tracker.is_rate_limited())
 
             # Age the timestamps to simulate 61s passing
@@ -510,8 +511,8 @@ class TestRPMSlidingWindow(unittest.TestCase):
             # Should no longer be rate limited
             self.assertFalse(await tracker.is_rate_limited(), "Should recover after 60s")
 
-            # New requests should work
-            await tracker.record_request(success=True)
+            # New request should work
+            self.assertTrue(await tracker.try_claim_rpm_slot())
             self.assertFalse(await tracker.is_rate_limited(), "1 request in new window, still under limit")
 
         asyncio.run(_run())
