@@ -82,7 +82,7 @@ async def _post_with_retry(
 
     reason = f"HTTP {last_err.status_code}" if isinstance(last_err, httpx.Response) else str(last_err)
     logger.warning("All %d retries exhausted for %s: %s", max_retries, url, reason)
-    return None, reason
+    return last_err if isinstance(last_err, httpx.Response) else None, reason
 
 
 async def _streaming_request_with_retry(
@@ -131,8 +131,9 @@ async def _streaming_request_with_retry(
             last_err = exc
 
     reason = f"HTTP {last_err.status_code}" if isinstance(last_err, httpx.Response) else str(last_err)
+    status = last_err.status_code if isinstance(last_err, httpx.Response) else 502
     logger.warning("All %d stream retries exhausted for %s: %s", max_retries, url, reason)
-    raise HTTPException(status_code=502, detail=f"Upstream error: {reason}")
+    raise HTTPException(status_code=status, detail=f"Upstream error: {reason}")
 
 
 async def _stream_raw(resp: httpx.Response, url: str) -> AsyncIterator[bytes]:
@@ -320,7 +321,8 @@ async def _proxy_anthropic(
 
     resp, err = await _post_with_retry(client, url, headers, patched, max_retries)
     if err:
-        return JSONResponse(status_code=502, content=_upstream_error_json(err))
+        status = resp.status_code if resp is not None else 502
+        return JSONResponse(status_code=status, content=_upstream_error_json(err))
     if resp.status_code != 200:
         try:
             detail = resp.json()
@@ -363,7 +365,8 @@ async def _proxy_openai(
 
         resp, err = await _post_with_retry(client, url, headers, req_body, max_retries)
         if err:
-            return JSONResponse(status_code=502, content=_upstream_error_json(err))
+            status = resp.status_code if resp is not None else 502
+            return JSONResponse(status_code=status, content=_upstream_error_json(err))
         if resp.status_code != 200:
             try:
                 detail = resp.json()
@@ -386,7 +389,8 @@ async def _proxy_openai(
 
     resp, err = await _post_with_retry(client, url, headers, oai_body, max_retries)
     if err:
-        return JSONResponse(status_code=502, content=_upstream_error_json(err))
+        status = resp.status_code if resp is not None else 502
+        return JSONResponse(status_code=status, content=_upstream_error_json(err))
     if resp.status_code != 200:
         try:
             detail = resp.json()
