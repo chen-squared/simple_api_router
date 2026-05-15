@@ -26,6 +26,35 @@ from .converter import (
     stream_openai_to_anthropic,
     stream_responses_to_anthropic,
 )
+from .logger import get_logger
+
+logger = get_logger("proxy")
+
+# Network-level errors that mean we couldn't reach the upstream at all.
+_UPSTREAM_ERRORS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.TimeoutException,
+    httpx.RemoteProtocolError,
+    httpx.NetworkError,
+)
+
+
+def _upstream_error_json(exc: Exception) -> dict:
+    return {
+        "type": "error",
+        "error": {
+            "type": "api_error",
+            "message": f"Upstream connection error: {exc}",
+        },
+    }
+
+
+def _upstream_error_sse(exc: Exception) -> bytes:
+    data = json.dumps(_upstream_error_json(exc))
+    return f"event: error\ndata: {data}\n\n".encode()
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +193,11 @@ async def _proxy_anthropic(
             },
         )
 
-    resp = await client.post(url, json=patched, headers=headers)
+    try:
+        resp = await client.post(url, json=patched, headers=headers)
+    except _UPSTREAM_ERRORS as exc:
+        logger.warning("Upstream connect error (%s): %s", url, exc)
+        return JSONResponse(status_code=502, content=_upstream_error_json(exc))
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
 
@@ -174,9 +207,13 @@ async def _stream_anthropic(
     headers: Dict[str, str],
     body: Dict[str, Any],
 ) -> AsyncIterator[bytes]:
-    async with client.stream("POST", url, json=body, headers=headers) as resp:
-        async for chunk in resp.aiter_bytes():
-            yield chunk
+    try:
+        async with client.stream("POST", url, json=body, headers=headers) as resp:
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+    except _UPSTREAM_ERRORS as exc:
+        logger.warning("Upstream connect error during stream (%s): %s", url, exc)
+        yield _upstream_error_sse(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +249,11 @@ async def _proxy_openai(
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
-        resp = await client.post(url, json=req_body, headers=headers)
+        try:
+            resp = await client.post(url, json=req_body, headers=headers)
+        except _UPSTREAM_ERRORS as exc:
+            logger.warning("Upstream connect error (%s): %s", url, exc)
+            return JSONResponse(status_code=502, content=_upstream_error_json(exc))
         if resp.status_code != 200:
             try:
                 detail = resp.json()
@@ -232,7 +273,11 @@ async def _proxy_openai(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    resp = await client.post(url, json=oai_body, headers=headers)
+    try:
+        resp = await client.post(url, json=oai_body, headers=headers)
+    except _UPSTREAM_ERRORS as exc:
+        logger.warning("Upstream connect error (%s): %s", url, exc)
+        return JSONResponse(status_code=502, content=_upstream_error_json(exc))
     if resp.status_code != 200:
         try:
             detail = resp.json()
@@ -250,9 +295,13 @@ async def _stream_openai_converted(
     body: Dict[str, Any],
     original_model: str,
 ) -> AsyncIterator[bytes]:
-    async with client.stream("POST", url, json=body, headers=headers) as resp:
-        async for chunk in stream_openai_to_anthropic(resp.aiter_bytes(), original_model):
-            yield chunk
+    try:
+        async with client.stream("POST", url, json=body, headers=headers) as resp:
+            async for chunk in stream_openai_to_anthropic(resp.aiter_bytes(), original_model):
+                yield chunk
+    except _UPSTREAM_ERRORS as exc:
+        logger.warning("Upstream connect error during stream (%s): %s", url, exc)
+        yield _upstream_error_sse(exc)
 
 
 async def _stream_responses_converted(
@@ -262,6 +311,10 @@ async def _stream_responses_converted(
     body: Dict[str, Any],
     original_model: str,
 ) -> AsyncIterator[bytes]:
-    async with client.stream("POST", url, json=body, headers=headers) as resp:
-        async for chunk in stream_responses_to_anthropic(resp.aiter_bytes(), original_model):
-            yield chunk
+    try:
+        async with client.stream("POST", url, json=body, headers=headers) as resp:
+            async for chunk in stream_responses_to_anthropic(resp.aiter_bytes(), original_model):
+                yield chunk
+    except _UPSTREAM_ERRORS as exc:
+        logger.warning("Upstream connect error during stream (%s): %s", url, exc)
+        yield _upstream_error_sse(exc)
