@@ -1744,6 +1744,217 @@ class TestResponsesAPIStreaming(unittest.TestCase):
 from simple_api_router.config import ProviderConfig  # noqa: E402
 
 
+class TestIsRealKey(unittest.TestCase):
+    """Tests for proxy._is_real_key."""
+
+    def setUp(self):
+        from simple_api_router.proxy import _is_real_key
+        self._is_real_key = _is_real_key
+
+    def test_real_key_returns_true(self):
+        self.assertTrue(self._is_real_key("sk-abc123"))
+
+    def test_empty_string_returns_false(self):
+        self.assertFalse(self._is_real_key(""))
+
+    def test_none_literal_returns_false(self):
+        self.assertFalse(self._is_real_key("none"))
+
+    def test_none_upper_returns_false(self):
+        self.assertFalse(self._is_real_key("NONE"))
+
+    def test_null_literal_returns_false(self):
+        self.assertFalse(self._is_real_key("null"))
+
+    def test_false_literal_returns_false(self):
+        self.assertFalse(self._is_real_key("false"))
+
+    def test_no_literal_returns_false(self):
+        self.assertFalse(self._is_real_key("no"))
+
+    def test_zero_literal_returns_false(self):
+        self.assertFalse(self._is_real_key("0"))
+
+
+class TestBuildAnthropicHeaders(unittest.TestCase):
+    """Tests for proxy._build_anthropic_headers dual-auth behaviour."""
+
+    def _make_request(self, headers: dict):
+        from starlette.testclient import TestClient
+        from starlette.requests import Request
+        from starlette.applications import Starlette
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/messages",
+            "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+            "query_string": b"",
+        }
+        return Request(scope)
+
+    def test_real_key_sends_both_auth_headers(self):
+        from simple_api_router.proxy import _build_anthropic_headers
+        from simple_api_router.config import ProviderConfig
+        prov = ProviderConfig(type="anthropic", api_key="sk-real")
+        req = self._make_request({"anthropic-version": "2023-06-01"})
+        hdrs = _build_anthropic_headers(req, prov)
+        self.assertEqual(hdrs["x-api-key"], "sk-real")
+        self.assertEqual(hdrs["Authorization"], "Bearer sk-real")
+
+    def test_fake_key_none_sends_no_auth(self):
+        from simple_api_router.proxy import _build_anthropic_headers
+        from simple_api_router.config import ProviderConfig
+        prov = ProviderConfig(type="anthropic", api_key="none")
+        req = self._make_request({})
+        hdrs = _build_anthropic_headers(req, prov)
+        self.assertNotIn("x-api-key", hdrs)
+        self.assertNotIn("Authorization", hdrs)
+
+    def test_empty_key_sends_no_auth(self):
+        from simple_api_router.proxy import _build_anthropic_headers
+        from simple_api_router.config import ProviderConfig
+        prov = ProviderConfig(type="anthropic", api_key="")
+        req = self._make_request({})
+        hdrs = _build_anthropic_headers(req, prov)
+        self.assertNotIn("x-api-key", hdrs)
+        self.assertNotIn("Authorization", hdrs)
+
+    def test_anthropic_version_forwarded(self):
+        from simple_api_router.proxy import _build_anthropic_headers
+        from simple_api_router.config import ProviderConfig
+        prov = ProviderConfig(type="anthropic", api_key="sk-real")
+        req = self._make_request({"anthropic-version": "2024-01-01"})
+        hdrs = _build_anthropic_headers(req, prov)
+        self.assertEqual(hdrs["anthropic-version"], "2024-01-01")
+
+    def test_default_anthropic_version_injected_when_missing(self):
+        from simple_api_router.proxy import _build_anthropic_headers
+        from simple_api_router.config import ProviderConfig
+        prov = ProviderConfig(type="anthropic", api_key="sk-real")
+        req = self._make_request({})
+        hdrs = _build_anthropic_headers(req, prov)
+        self.assertEqual(hdrs["anthropic-version"], "2023-06-01")
+
+
+class TestFindUnexpanded(unittest.TestCase):
+    """Tests for config._find_unexpanded and load_config env-var validation."""
+
+    def test_detects_unset_var_in_string(self):
+        import os
+        os.environ.pop("DEFINITELY_NOT_SET_XYZ", None)
+        from simple_api_router.config import _find_unexpanded
+        problems = _find_unexpanded({"api_key": "${DEFINITELY_NOT_SET_XYZ}"})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("DEFINITELY_NOT_SET_XYZ", problems[0])
+
+    def test_no_problems_when_var_is_set(self):
+        import os
+        os.environ["TEST_EXPANDED_VAR"] = "value"
+        try:
+            from simple_api_router.config import _find_unexpanded
+            problems = _find_unexpanded({"api_key": "${TEST_EXPANDED_VAR}"})
+            self.assertEqual(problems, [])
+        finally:
+            del os.environ["TEST_EXPANDED_VAR"]
+
+    def test_detects_nested_unset_var(self):
+        import os
+        os.environ.pop("NESTED_UNSET_VAR", None)
+        from simple_api_router.config import _find_unexpanded
+        problems = _find_unexpanded({"providers": {"p": {"api_key": "${NESTED_UNSET_VAR}"}}})
+        self.assertEqual(len(problems), 1)
+
+    def test_load_config_raises_on_unset_var(self):
+        import os, tempfile
+        os.environ.pop("LOAD_CONFIG_MISSING_VAR", None)
+        yaml_content = """
+providers:
+  test:
+    type: anthropic
+    api_key: "${LOAD_CONFIG_MISSING_VAR}"
+    models: []
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            path = f.name
+        try:
+            from simple_api_router.config import load_config
+            with self.assertRaises(ValueError) as ctx:
+                load_config(path)
+            self.assertIn("LOAD_CONFIG_MISSING_VAR", str(ctx.exception))
+        finally:
+            os.unlink(path)
+
+
+class TestRetryExhaustion(unittest.TestCase):
+    """Tests for _post_with_retry and _streaming_request_with_retry exhaustion behaviour."""
+
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    def test_post_with_retry_exhaustion_returns_last_response(self):
+        """On exhaustion with HTTP errors, returns the last response (not None)."""
+        import httpx
+        from unittest.mock import AsyncMock
+        from simple_api_router.proxy import _post_with_retry
+
+        mock_resp = httpx.Response(429)
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_resp)
+
+        resp, err = self._run(_post_with_retry(mock_client, "http://x", {}, {}, max_retries=1))
+        self.assertIsNotNone(err)
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp.status_code, 429)
+
+    def test_post_with_retry_network_error_returns_none_resp(self):
+        """On exhaustion with network errors, returns None for resp."""
+        import httpx
+        from unittest.mock import AsyncMock
+        from simple_api_router.proxy import _post_with_retry
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
+
+        resp, err = self._run(_post_with_retry(mock_client, "http://x", {}, {}, max_retries=0))
+        self.assertIsNone(resp)
+        self.assertIsNotNone(err)
+
+    def test_streaming_retry_exhaustion_raises_last_status(self):
+        """On exhaustion, _streaming_request_with_retry raises HTTPException with last HTTP status."""
+        import httpx
+        from unittest.mock import AsyncMock, MagicMock
+        from fastapi import HTTPException
+        from simple_api_router.proxy import _streaming_request_with_retry
+
+        mock_resp = httpx.Response(503)
+        mock_resp.aclose = AsyncMock()
+
+        mock_client = MagicMock()
+        mock_client.build_request = MagicMock(return_value=MagicMock())
+        mock_client.send = AsyncMock(return_value=mock_resp)
+
+        with self.assertRaises(HTTPException) as ctx:
+            self._run(_streaming_request_with_retry(mock_client, "http://x", {}, {}, max_retries=1))
+        self.assertEqual(ctx.exception.status_code, 503)
+
+    def test_streaming_network_error_exhaustion_raises_502(self):
+        """On exhaustion with network errors, raises HTTPException(502)."""
+        import httpx
+        from unittest.mock import AsyncMock, MagicMock
+        from fastapi import HTTPException
+        from simple_api_router.proxy import _streaming_request_with_retry
+
+        mock_client = MagicMock()
+        mock_client.build_request = MagicMock(return_value=MagicMock())
+        mock_client.send = AsyncMock(side_effect=httpx.ConnectError("refused"))
+
+        with self.assertRaises(HTTPException) as ctx:
+            self._run(_streaming_request_with_retry(mock_client, "http://x", {}, {}, max_retries=0))
+        self.assertEqual(ctx.exception.status_code, 502)
+
+
 class TestProviderConfigExtended(unittest.TestCase):
     def test_default_api_format_is_openai_chat(self):
         cfg = ProviderConfig(type="openai", api_key="k")
