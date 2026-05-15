@@ -85,18 +85,22 @@ async def _post_with_retry(
     return None, reason
 
 
-async def _stream_with_retry(
+async def _streaming_request_with_retry(
     client: httpx.AsyncClient,
     url: str,
     headers: Dict[str, str],
     body: Dict[str, Any],
     max_retries: int,
-    make_stream: Callable,
-) -> AsyncIterator[bytes]:
-    """Stream POST with retry. Yields from make_stream(aiter_bytes) on success.
+) -> httpx.Response:
+    """Stream POST with retry. Returns an open httpx.Response on 2xx.
 
-    make_stream is a callable that takes an aiter_bytes and returns an async iterable.
-    Retries happen before the first byte is yielded so the client sees no error.
+    Status code is checked BEFORE returning, so callers can raise HTTPException
+    with the correct status code (401, 403, 404, …) instead of always 200.
+    Caller MUST NOT close the response — _stream_raw/_stream_converted do that.
+
+    Raises:
+        HTTPException: non-retryable non-2xx upstream error (correct status preserved)
+        HTTPException(502): all retries exhausted
     """
     last_err: Any = None
     for attempt in range(max_retries + 1):
@@ -107,45 +111,56 @@ async def _stream_with_retry(
                            attempt, max_retries, url, last_err, delay)
             await asyncio.sleep(delay)
         try:
-            async with client.stream("POST", url, json=body, headers=headers) as resp:
-                if resp.status_code in _RETRY_STATUS:
-                    last_err = resp
-                    continue
-                if not (200 <= resp.status_code < 300):
-                    # Non-retryable upstream error (e.g. 401, 403, 404).
-                    # StreamingResponse has already committed HTTP 200, so we
-                    # can only surface the error as an SSE error event.
-                    await resp.aread()
-                    try:
-                        detail = resp.json()
-                    except Exception:
-                        detail = resp.text
-                    logger.warning("Upstream %d for %s: %s", resp.status_code, url, detail)
-                    yield _upstream_error_sse_status(resp.status_code, detail)
-                    return
-                # Once we start yielding chunks the client has received data —
-                # we cannot restart the stream. Track whether we've begun so that
-                # a mid-stream network error surfaces as an SSE error event instead
-                # of silently looping and sending duplicate/corrupt chunks.
-                started = False
+            req = client.build_request("POST", url, json=body, headers=headers)
+            resp = await client.send(req, stream=True)
+            if resp.status_code in _RETRY_STATUS:
+                await resp.aclose()
+                last_err = resp
+                continue
+            if not (200 <= resp.status_code < 300):
+                await resp.aread()
                 try:
-                    async for chunk in make_stream(resp.aiter_bytes()):
-                        started = True
-                        yield chunk
-                except _UPSTREAM_ERRORS as mid_exc:
-                    if started:
-                        logger.warning("Upstream error mid-stream for %s: %s", url, mid_exc)
-                        yield _upstream_error_sse(mid_exc)
-                        return
-                    # Error before first chunk — treat as connection failure, retry
-                    raise
-                return  # success
+                    detail = resp.json()
+                except Exception:
+                    detail = resp.text
+                await resp.aclose()
+                logger.warning("Upstream %d for %s: %s", resp.status_code, url, detail)
+                raise HTTPException(status_code=resp.status_code, detail=detail)
+            return resp  # open; _stream_raw/_stream_converted will close it
         except _UPSTREAM_ERRORS as exc:
             last_err = exc
 
     reason = f"HTTP {last_err.status_code}" if isinstance(last_err, httpx.Response) else str(last_err)
     logger.warning("All %d stream retries exhausted for %s: %s", max_retries, url, reason)
-    yield _upstream_error_sse(last_err)
+    raise HTTPException(status_code=502, detail=f"Upstream error: {reason}")
+
+
+async def _stream_raw(resp: httpx.Response, url: str) -> AsyncIterator[bytes]:
+    """Yield raw bytes; emit SSE error event on mid-stream network failure."""
+    try:
+        async for chunk in resp.aiter_bytes():
+            yield chunk
+    except _UPSTREAM_ERRORS as exc:
+        logger.warning("Upstream error mid-stream for %s: %s", url, exc)
+        yield _upstream_error_sse(exc)
+    finally:
+        await resp.aclose()
+
+
+async def _stream_converted(
+    resp: httpx.Response,
+    make_stream: Callable,
+    url: str,
+) -> AsyncIterator[bytes]:
+    """Yield converted chunks; emit SSE error event on mid-stream network failure."""
+    try:
+        async for chunk in make_stream(resp.aiter_bytes()):
+            yield chunk
+    except _UPSTREAM_ERRORS as exc:
+        logger.warning("Upstream error mid-stream for %s: %s", url, exc)
+        yield _upstream_error_sse(exc)
+    finally:
+        await resp.aclose()
 
 
 def _upstream_error_json(exc: Any) -> dict:
@@ -155,16 +170,6 @@ def _upstream_error_json(exc: Any) -> dict:
 
 def _upstream_error_sse(exc: Any) -> bytes:
     data = json.dumps(_upstream_error_json(exc))
-    return f"event: error\ndata: {data}\n\n".encode()
-
-
-def _upstream_error_sse_status(status_code: int, detail: Any) -> bytes:
-    """SSE error event for a non-retryable upstream HTTP error (e.g. 401, 403, 404)."""
-    msg = detail if isinstance(detail, str) else json.dumps(detail)
-    data = json.dumps({"type": "error", "error": {
-        "type": "api_error",
-        "message": f"Upstream HTTP {status_code}: {msg}",
-    }})
     return f"event: error\ndata: {data}\n\n".encode()
 
 
@@ -306,9 +311,9 @@ async def _proxy_anthropic(
     url = f"{base_url}/v1/messages"
 
     if body.get("stream", False):
+        resp = await _streaming_request_with_retry(client, url, headers, patched, max_retries)
         return StreamingResponse(
-            _stream_with_retry(client, url, headers, patched, max_retries,
-                               lambda aiter: aiter),
+            _stream_raw(resp, url),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -349,9 +354,9 @@ async def _proxy_openai(
         url = f"{base_url}/responses"
 
         if is_stream:
+            resp = await _streaming_request_with_retry(client, url, headers, req_body, max_retries)
             return StreamingResponse(
-                _stream_with_retry(client, url, headers, req_body, max_retries,
-                                   lambda aiter: stream_responses_to_anthropic(aiter, original_model)),
+                _stream_converted(resp, lambda aiter: stream_responses_to_anthropic(aiter, original_model), url),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
@@ -372,9 +377,9 @@ async def _proxy_openai(
     url = f"{base_url}/chat/completions"
 
     if is_stream:
+        resp = await _streaming_request_with_retry(client, url, headers, oai_body, max_retries)
         return StreamingResponse(
-            _stream_with_retry(client, url, headers, oai_body, max_retries,
-                               lambda aiter: stream_openai_to_anthropic(aiter, original_model)),
+            _stream_converted(resp, lambda aiter: stream_openai_to_anthropic(aiter, original_model), url),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
