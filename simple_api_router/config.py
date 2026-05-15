@@ -33,10 +33,6 @@ class ProviderConfig(BaseModel):
     # Enable DeepSeek reasoning_content passthrough for assistant messages.
     # None = auto-detect from provider name / model name.
     deepseek_reasoning: Optional[bool] = None
-    # Use 'Authorization: Bearer <key>' instead of 'x-api-key: <key>'.
-    # Needed for providers that expose Anthropic-format API but use Bearer auth
-    # (e.g. ollama.com cloud).
-    bearer_auth: bool = False
 
     @model_validator(mode="after")
     def _validate_fields(self) -> "ProviderConfig":

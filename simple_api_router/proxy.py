@@ -242,10 +242,11 @@ def _is_real_key(api_key: str) -> bool:
 def _build_anthropic_headers(request: Request, provider: "ProviderConfig") -> Dict[str, str]:
     headers: Dict[str, str] = {}
     if _is_real_key(provider.api_key):
-        if provider.bearer_auth:
-            headers["Authorization"] = f"Bearer {provider.api_key}"
-        else:
-            headers["x-api-key"] = provider.api_key
+        # Send both auth header styles so the provider can use whichever it recognises.
+        # Standard Anthropic uses x-api-key; some compatible servers (e.g. ollama.com)
+        # use Authorization: Bearer. Unrecognised headers are silently ignored.
+        headers["x-api-key"] = provider.api_key
+        headers["Authorization"] = f"Bearer {provider.api_key}"
     for h in _FORWARD_HEADERS:
         if v := request.headers.get(h):
             headers[h] = v
