@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "simple-api-router"
+version = "0.1.0"
+description = "Multi-provider LLM API router exposing a unified Anthropic Messages API — route to Anthropic, OpenAI, DeepSeek, or any OpenAI-compatible backend"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [{name = "simple_api_router contributors"}]
+keywords = ["openai", "anthropic", "api", "proxy", "router", "llm", "claude", "deepseek", "claude-code"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: Proxy Servers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    "httpx>=0.27.0",
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+    "anyio>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "requests>=2.31",
+]
+
+[project.scripts]
+simple-api-router = "simple_api_router.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/chen-squared/simple_api_router"
+Repository = "https://github.com/chen-squared/simple_api_router"
+Issues = "https://github.com/chen-squared/simple_api_router/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["simple_api_router*"]

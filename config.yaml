@@ -2,89 +2,80 @@ server:
   host: "0.0.0.0"
   port: 8080
   log_level: "INFO"
-  log_file: "router.log"
+  log_file: "router.log"   # set to null to log to stdout only
 
-# All requests go to the default group
-default_group: main
-
-apis:
-  openai-primary:
-    base_url: "https://api.openai.com/v1"
-    api_key: "${OPENAI_API_KEY}"
-    type: openai
-    retry:
-      max_retries: 3
-      cooldown_after: 5
-      cooldown_duration: 300
-      error_limits:
-        429: 1
-        500: 3
-        502: 3
-        503: 5
-    usage:
-      rpm: 60
-      daily_requests: 1000
-      per_5h_requests: 300
-      weekly_requests: 5000
-      no_retry_duration: 3600
-      budget:
-        input_price_per_1m: 2.50
-        output_price_per_1m: 10.00
-        daily: 5.0
-        weekly: 25.0
-        monthly: 80.0
-        no_retry_duration: 3600
-
-  anthropic-primary:
-    base_url: "https://api.anthropic.com"
-    api_key: "${ANTHROPIC_API_KEY}"
+providers:
+  # ── Anthropic ─────────────────────────────────────────────────────────────
+  # Pure proxy — all Anthropic features (extended thinking, prompt caching,
+  # anthropic-beta headers, streaming) pass through verbatim.
+  anthropic:
     type: anthropic
-    retry:
-      max_retries: 3
-      cooldown_after: 5
-      cooldown_duration: 300
-      error_limits:
-        429: 1
-        500: 3
-        529: 3
-    usage:
-      rpm: 50
-      daily_requests: 500
-      per_5h_requests: 150
-      weekly_requests: 2500
-      no_retry_duration: 3600
-      budget:
-        input_price_per_1m: 3.00
-        output_price_per_1m: 15.00
-        daily: 5.0
-        weekly: 25.0
-        monthly: 80.0
-        no_retry_duration: 3600
+    api_key: "${ANTHROPIC_API_KEY}"
+    models:
+      - claude-opus-4-5
+      - claude-sonnet-4-5
+      - claude-haiku-4-5
+      - claude-3-5-sonnet-20241022
+      - claude-3-5-haiku-20241022
 
-  openai-backup:
-    base_url: "https://api.openai.com/v1"
-    api_key: "${OPENAI_BACKUP_API_KEY}"
+  # ── OpenAI ────────────────────────────────────────────────────────────────
+  # Full Anthropic ↔ OpenAI conversion layer (Chat Completions API).
+  openai:
     type: openai
-    retry:
-      max_retries: 2
-      cooldown_after: 3
-      cooldown_duration: 120
-      error_limits:
-        429: 1
-        500: 2
-    usage:
-      rpm: 30
-      daily_requests: 500
+    api_key: "${OPENAI_API_KEY}"
+    # base_url defaults to https://api.openai.com/v1
+    models:
+      - gpt-4o
+      - gpt-4o-mini
+      - o3
+      - o4-mini
 
-groups:
-  main:
-    strategy: sequential
-    members:
-      - api: openai-primary
-      - group: fallback
+  # ── DeepSeek ──────────────────────────────────────────────────────────────
+  # deepseek_reasoning enables reasoning_content passthrough so Claude Code
+  # receives thinking blocks from DeepSeek's chain-of-thought models.
+  # Omit deepseek_reasoning to auto-detect from model name (deepseek-* = true).
+  deepseek:
+    type: openai
+    api_key: "${DEEPSEEK_API_KEY}"
+    base_url: "https://api.deepseek.com/v1"
+    deepseek_reasoning: true
+    models:
+      - deepseek-chat
+      - deepseek-reasoner
 
-  fallback:
-    strategy: load_balance
-    members:
-      - api: anthropic-primary
-      - api: openai-backup
+  # ── OpenAI Responses API (optional) ───────────────────────────────────────
+  # Use api_format: openai_responses for providers that expose /v1/responses.
+  # openai-responses:
+  #   type: openai
+  #   api_key: "${OPENAI_API_KEY}"
+  #   api_format: openai_responses
+  #   models:
+  #     - gpt-4o
+  #     - o3
+
+  # ── Second Anthropic account (for load distribution) ──────────────────────
+  # anthropic-2:
+  #   type: anthropic
+  #   api_key: "${ANTHROPIC_API_KEY_2}"
+  #   models:
+  #     - claude-opus-4-5
+  #     - claude-sonnet-4-5
+
+  # ── Local / self-hosted (Ollama, vLLM, LM Studio) ─────────────────────────
+  # local:
+  #   type: openai
+  #   api_key: "none"
+  #   base_url: "http://localhost:11434/v1"
+  #   models:
+  #     - llama3.2
+  #     - qwen2.5-coder
+
+  # ── Model name remapping ───────────────────────────────────────────────────
+  # myapi:
+  #   type: openai
+  #   api_key: "${MY_API_KEY}"
+  #   base_url: "https://api.my-provider.com/v1"
+  #   models: [fast, smart]
+  #   model_map:
+  #     fast: gpt-4o-mini
+  #     smart: gpt-4o

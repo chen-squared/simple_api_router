@@ -1,106 +1,99 @@
-# simple_api_router
+# Simple API Router
 
-A lightweight FastAPI proxy that routes OpenAI- and Anthropic-format requests across multiple backend AI API keys/providers, with automatic fallback, rate limiting, request-quota enforcement, and dollar-based budget control.
+A lightweight multi-provider LLM API router that exposes a **unified Anthropic Messages API** (`/v1/messages`) and routes requests to multiple backend providers — Anthropic, OpenAI, DeepSeek, or any OpenAI-compatible endpoint.
+
+Designed for use with tools like [Claude Code](https://claude.ai/code) that speak the Anthropic API but need flexible model routing.
 
 ---
 
 ## Features
 
-- **Unified endpoint** — accepts both OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`) request formats and auto-converts between them as needed
-- **Sequential fallback** — try APIs in order; move to the next one on error, rate-limit, or quota exhaustion
-- **Load balancing** — distribute requests across backends weighted by their RPM capacity
-- **Nested groups** — mix sequential and load_balance groups arbitrarily deep
-- **RPM sliding window** — atomic per-API requests-per-minute enforcement (concurrent-safe)
-- **Period request quotas** — daily / per-5h / weekly request count limits (not token counts)
-- **Dollar budget** — estimate cost from input/output token prices; enforce daily / weekly / monthly USD caps
-- **Retry & cooldown** — per-error-code retry limits, consecutive-failure cooldown, configurable no-retry duration after quota/budget exceeded
-- **Streaming support** — SSE pass-through and cross-format stream conversion with safe resource cleanup
-- **Environment variable expansion** — use `${VAR}` in config values
-- **Stats & health endpoints** — `/health` and `/stats` for observability
+- **Unified Anthropic API** — any Anthropic-compatible client (Claude Code, etc.) works out of the box
+- **`provider/model` routing** — `model: "openai/gpt-4o"`, `model: "deepseek/deepseek-chat"`, `model: "ant2/claude-opus-4-5"`, etc.
+- **Anthropic backend** — pure HTTP proxy, zero conversion; all Anthropic features (extended thinking, prompt caching, `anthropic-beta` headers, streaming) pass through verbatim
+- **OpenAI backend** — full bidirectional Anthropic ↔ OpenAI conversion:
+  - Text, multi-turn, system prompts
+  - Tool use / function calling (including streaming `input_json_delta`)
+  - Vision (base64 + URL images)
+  - Extended thinking → OpenAI reasoning effort (adaptive maps to `high`)
+  - Streaming SSE with all event types
+  - **OpenAI Responses API** (`api_format: openai_responses`) for providers that use `/v1/responses`
+- **DeepSeek reasoning passthrough** — `reasoning_content` preserved across request/response/streaming; auto-enabled for any `deepseek-*` model
+- **1M context suffix** — Claude Code's `[1m]` model suffix is stripped before forwarding but the full context window is honoured
+- **`model_map`** per provider — remap external model names to backend names
+- **Model catalog** — `GET /v1/models` lists all configured models
 
 ---
 
 ## Quick Start
 
-### 1. Install dependencies
+### 1. Install
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
+# with dev/test dependencies:
+pip install -e ".[dev]"
 ```
 
 ### 2. Configure
 
-Copy and edit the provided `config.yaml`:
+Create or edit `config.yaml`:
 
 ```yaml
 server:
   host: "0.0.0.0"
   port: 8080
 
-default_group: main
-
-apis:
-  openai-primary:
-    base_url: "https://api.openai.com/v1"
-    api_key: "${OPENAI_API_KEY}"
-    type: openai
-    usage:
-      rpm: 60
-      daily_requests: 1000
-      budget:
-        input_price_per_1m: 2.50
-        output_price_per_1m: 10.00
-        daily: 5.0
-
-  anthropic-fallback:
-    base_url: "https://api.anthropic.com"
-    api_key: "${ANTHROPIC_API_KEY}"
+providers:
+  anthropic:
     type: anthropic
+    api_key: "${ANTHROPIC_API_KEY}"
+    models:
+      - claude-opus-4-5
+      - claude-sonnet-4-5
 
-groups:
-  main:
-    strategy: sequential
-    members:
-      - api: openai-primary
-      - api: anthropic-fallback
+  openai:
+    type: openai
+    api_key: "${OPENAI_API_KEY}"
+    models:
+      - gpt-4o
+      - gpt-4o-mini
 
-default_group: main
+  deepseek:
+    type: openai
+    api_key: "${DEEPSEEK_API_KEY}"
+    base_url: "https://api.deepseek.com/v1"
+    deepseek_reasoning: true   # enable reasoning_content passthrough
+    models:
+      - deepseek-chat
+      - deepseek-reasoner
+```
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."
+export DEEPSEEK_API_KEY="sk-..."
 ```
 
 ### 3. Run
 
 ```bash
-export OPENAI_API_KEY=sk-...
-export ANTHROPIC_API_KEY=sk-ant-...
-python main.py --config config.yaml
+python -m simple_api_router --config config.yaml
 ```
 
-Or with a custom port:
+### 4. Use with Claude Code
 
 ```bash
-python main.py --config config.yaml --port 9090
+ANTHROPIC_BASE_URL=http://localhost:8080 claude
 ```
 
-### 4. Make requests
+Then pick any configured model:
 
-The router accepts standard OpenAI and Anthropic payloads at the same host:
-
-```bash
-# OpenAI format
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]}'
-
-# Anthropic format
-curl http://localhost:8080/v1/messages \
-  -H "Content-Type: application/json" \
-  -d '{"model": "claude-3-5-sonnet-20241022", "max_tokens": 1024,
-       "messages": [{"role": "user", "content": "Hello"}]}'
 ```
-
-The router returns the response in the **same format the client used**, regardless of which backend handled the request.
+/model deepseek/deepseek-reasoner
+/model openai/gpt-4o
+/model anthropic/claude-opus-4-5
+```
 
 ---
 
@@ -108,185 +101,213 @@ The router returns the response in the **same format the client used**, regardle
 
 ### `server`
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `host` | string | `"0.0.0.0"` | Bind address |
-| `port` | int | `8080` | Listen port |
-| `log_level` | string | `"INFO"` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
-| `log_file` | string | `"router.log"` | Log file path (rotating, 10 MB × 5 files). `null` to disable file logging |
+| Field | Default | Description |
+|-------|---------|-------------|
+| `host` | `"0.0.0.0"` | Bind host |
+| `port` | `8080` | Bind port |
+| `log_level` | `"INFO"` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `log_file` | `"router.log"` | Log file path; set to `null` to log to stdout only |
 
-### `apis.<name>`
+### `providers`
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `base_url` | string | ✓ | Backend base URL. For OpenAI-type APIs, include `/v1` (e.g. `https://api.openai.com/v1`). For Anthropic-type, omit it (e.g. `https://api.anthropic.com`) |
-| `api_key` | string | ✓ | API key; supports `${ENV_VAR}` expansion |
-| `type` | string | ✓ | `"openai"` or `"anthropic"` |
-| `model` | string | — | Override model name sent to the backend (useful for provider-specific model names) |
-| `endpoint_path` | string | — | Override the full request path (default: `/chat/completions` for OpenAI, `/v1/messages` for Anthropic) |
+Each key is the provider name used as the prefix in `provider/model` routing:
 
-#### `apis.<name>.retry`
+```yaml
+providers:
+  <provider-name>:
+    type: anthropic | openai   # required
+    api_key: "..."             # required; supports ${ENV_VAR} expansion
+    base_url: "..."            # optional; defaults to official endpoint
+    models:                    # optional; if omitted, any model name is accepted
+      - model-name
+    model_map:                 # optional; remap external name → backend name
+      external-name: backend-name
+    api_format: openai_chat | openai_responses   # (openai type only) default: openai_chat
+    deepseek_reasoning: true | false             # (openai type only) default: auto-detect
+```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `max_retries` | int | `3` | Max total retry attempts per request |
-| `cooldown_after` | int | `5` | Consecutive failures before triggering cooldown |
-| `cooldown_duration` | int | `300` | Cooldown duration in seconds |
-| `error_limits` | map(int→int) | `{}` | Per-HTTP-status max retries, e.g. `{429: 1, 500: 3}` |
+**`type: anthropic`** — pure HTTP proxy. All Anthropic headers and features (extended thinking, prompt caching, beta headers) pass through unchanged.
 
-#### `apis.<name>.usage`
+**`type: openai`** — full bidirectional conversion layer. Supports any OpenAI Chat Completions-compatible endpoint, plus the Responses API (`api_format: openai_responses`).
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `rpm` | int | — | Max requests per minute (sliding 60-second window). Atomic enforcement under concurrency |
-| `daily_requests` | int | — | Max requests per 24-hour rolling window |
-| `per_5h_requests` | int | — | Max requests per 5-hour rolling window |
-| `weekly_requests` | int | — | Max requests per 7-day rolling window |
-| `no_retry_duration` | int | `3600` | Seconds to skip this API after request quota is exceeded **and** a 429 is received |
+#### `api_format`
 
-#### `apis.<name>.usage.budget`
+| Value | Endpoint | Use case |
+|---|---|---|
+| `openai_chat` (default) | `POST /chat/completions` | Standard OpenAI, DeepSeek, Ollama, etc. |
+| `openai_responses` | `POST /responses` | OpenAI Responses API |
 
-Dollar-based budget estimation using token counts from API responses.
+#### `deepseek_reasoning`
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `input_price_per_1m` | float | `0.0` | USD per 1 million input/prompt tokens |
-| `output_price_per_1m` | float | `0.0` | USD per 1 million output/completion tokens |
-| `daily` | float | — | Max USD spend per 24-hour rolling window |
-| `weekly` | float | — | Max USD spend per 7-day rolling window |
-| `monthly` | float | — | Max USD spend per 30-day rolling window |
-| `no_retry_duration` | int | `3600` | Seconds to skip this API after budget is exceeded **and** a 429 is received |
+Controls whether `reasoning_content` is passed through in requests/responses:
 
-> **Note:** Budget tracking requires the upstream API to return token usage in its response. If usage data is missing (e.g. streaming without usage chunks), that request contributes zero to budget.
-
-### `groups.<name>`
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `strategy` | string | `"sequential"` | `"sequential"` — try members in order until one succeeds. `"load_balance"` — pick a member randomly weighted by RPM capacity |
-| `members` | list | `[]` | Ordered list of `{api: <name>}` or `{group: <name>}` entries |
-
-### `default_group`
-
-Name of the group that handles all incoming requests.
-
----
-
-## Routing Logic
-
-### Sequential strategy
-
-1. Try each member in order.
-2. If a member is **unavailable** (cooldown, RPM limit exceeded, request quota exceeded, budget exceeded), skip it immediately.
-3. If a member **returns an error**, retry up to `max_retries` times, then move to the next member.
-4. If all members fail or are unavailable, return HTTP 503.
-
-### Load balance strategy
-
-1. Compute weights from each member's `rpm` value (default weight = 1).
-2. Randomly pick one member proportional to weight, skipping unavailable ones.
-3. If selected member fails, fall back to sequential order through remaining members.
-
-### Availability checks (order of precedence)
-
-1. **Cooldown**: too many consecutive errors → skip for `cooldown_duration` seconds
-2. **RPM limit**: sliding 60-second window full → skip
-3. **Request quota exceeded**: daily / per-5h / weekly request count full → skip (or enter `no_retry_duration` block after 429)
-4. **Budget exceeded**: estimated dollar spend over limit → skip (or enter budget `no_retry_duration` block after 429)
+- `true` — always enabled
+- `false` — always disabled
+- omitted — auto-detected from model name (enabled for any `deepseek-*` model)
 
 ---
 
 ## API Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/v1/chat/completions` | OpenAI-format chat completions |
-| `POST` | `/v1/messages` | Anthropic-format messages |
-| `GET` | `/health` | Returns `{"status": "ok"}` |
-| `GET` | `/stats` | Per-API usage statistics |
+### `POST /v1/messages`
 
-### Stats response example
+Standard [Anthropic Messages API](https://docs.anthropic.com/en/api/messages). Use `model: "provider/model"` to route:
+
+```bash
+# Anthropic backend (pure proxy)
+curl http://localhost:8080/v1/messages \
+  -H "x-api-key: any" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"anthropic/claude-opus-4-5","max_tokens":1024,"messages":[{"role":"user","content":"Hello!"}]}'
+
+# OpenAI backend (converted)
+curl http://localhost:8080/v1/messages \
+  -H "x-api-key: any" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"openai/gpt-4o","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"Hello!"}]}'
+```
+
+If the provider prefix is omitted (e.g. `"model": "claude-opus-4-5"`), the first configured provider that lists that model is used.
+
+### `GET /v1/models`
+
+Returns all configured models in Anthropic-compatible format:
 
 ```json
 {
-  "openai-primary": {
-    "total_requests": 150,
-    "total_success": 148,
-    "total_errors": 2,
-    "daily_requests": 42,
-    "per_5h_requests": 12,
-    "weekly_requests": 150,
-    "budget_spend": {
-      "daily": 0.043,
-      "weekly": 0.21,
-      "monthly": 0.21
-    }
+  "object": "list",
+  "data": [
+    {"id": "anthropic/claude-opus-4-5", "object": "model", "owned_by": "anthropic"},
+    {"id": "openai/gpt-4o", "object": "model", "owned_by": "openai"},
+    {"id": "deepseek/deepseek-chat", "object": "model", "owned_by": "deepseek"}
+  ]
+}
+```
+
+### `GET /health`
+
+```json
+{"status": "ok", "uptime_seconds": 42.1, "providers": ["anthropic", "openai", "deepseek"]}
+```
+
+### `GET /stats`
+
+```json
+{
+  "providers": {
+    "anthropic": {"type": "anthropic", "models": ["claude-opus-4-5"], "base_url": "..."},
+    "openai":    {"type": "openai",    "models": ["gpt-4o"], "base_url": "..."}
   }
 }
 ```
 
 ---
 
-## Format Conversion
+## Advanced Examples
 
-| Client sends | Backend type | Conversion |
-|---|---|---|
-| OpenAI | OpenAI | Pass-through |
-| OpenAI | Anthropic | Request + response converted |
-| Anthropic | Anthropic | Pass-through |
-| Anthropic | OpenAI | Request + response converted |
+### Multiple Anthropic Accounts
 
-Streaming responses are also converted in the SSE stream format (chunked). The client always receives a response in the format it requested.
+Spread load across multiple API keys:
+
+```yaml
+providers:
+  ant1:
+    type: anthropic
+    api_key: "${ANTHROPIC_KEY_1}"
+    models: [claude-opus-4-5, claude-sonnet-4-5]
+  ant2:
+    type: anthropic
+    api_key: "${ANTHROPIC_KEY_2}"
+    models: [claude-opus-4-5, claude-sonnet-4-5]
+```
+
+Use `model: "ant1/claude-opus-4-5"` or `model: "ant2/claude-opus-4-5"`.
+
+### Local / Self-Hosted (Ollama, vLLM, LM Studio)
+
+```yaml
+providers:
+  local:
+    type: openai
+    api_key: "none"
+    base_url: "http://localhost:11434/v1"
+    models: [llama3.2, qwen2.5-coder]
+```
+
+### OpenAI Responses API
+
+```yaml
+providers:
+  openai-responses:
+    type: openai
+    api_key: "${OPENAI_API_KEY}"
+    api_format: openai_responses
+    models: [gpt-4o, o3]
+```
+
+### Model Name Remapping
+
+```yaml
+providers:
+  myapi:
+    type: openai
+    api_key: "${MY_KEY}"
+    base_url: "https://api.my-provider.com/v1"
+    models: [fast, smart]
+    model_map:
+      fast: gpt-4o-mini
+      smart: gpt-4o
+```
+
+Client sends `model: "myapi/fast"`; backend receives `gpt-4o-mini`.
+
+### 1M Context Models
+
+Claude Code appends `[1m]` to model names to signal 1M-token context support. The router strips the suffix before forwarding and passes through all content — no truncation is applied.
+
+```
+/model deepseek/deepseek-chat[1m]
+```
+
+---
+
+## How Conversion Works
+
+For `type: openai` providers the router performs full bidirectional conversion between the Anthropic Messages format and OpenAI Chat Completions (or Responses API):
+
+| Anthropic concept | OpenAI equivalent |
+|---|---|
+| `system` (string or array) | `messages[0].role = "system"` |
+| `content[].type = "image_url"` | `content[].type = "image_url"` |
+| `content[].type = "tool_use"` | `tool_calls[].function` |
+| `content[].type = "tool_result"` | `role = "tool"` message |
+| `content[].type = "thinking"` | `reasoning_content` (DeepSeek) / `reasoning.effort` (Responses API) |
+| `cache_control` | forwarded as-is (provider-dependent) |
+| `stop_reason: "tool_use"` | `finish_reason: "tool_calls"` |
+| Streaming `content_block_delta` | Streaming `delta.content` / `delta.tool_calls` |
 
 ---
 
 ## Development
 
-### Run tests
-
 ```bash
-PYTHONPATH=. venv/bin/python3.13 -m pytest tests/ -v
+# Run all tests (97 tests)
+python -m pytest tests/ -v
+
+# Run with auto-reload during development
+uvicorn simple_api_router.app:app --reload --port 8080
 ```
 
-The test suite starts a local mock API server (port 19999) and the router itself (port 18080). **159 tests** covering unit, integration, edge cases, and real-world usage scenarios.
-
-### Mock API server (for local testing)
-
-```bash
-python -m uvicorn mock_api.server:app --port 19999
-```
-
-Endpoints simulated:
-- `POST /v1/chat/completions` — success with token usage
-- `POST /v1/chat/completions/error/{code}` — returns HTTP `{code}`
-- `POST /v1/chat/completions/slow` — 2-second delay then success
-- `POST /v1/chat/completions/flaky/{n}` — fails first `n-1` times, then succeeds
-- Anthropic equivalents at `/v1/messages/...`
-
-### Project structure
+### Module Structure
 
 ```
 simple_api_router/
-├── main.py                 # CLI entry point
-├── config.yaml             # Example configuration
-├── requirements.txt
-├── router/
-│   ├── app.py              # FastAPI app factory
-│   ├── config.py           # Pydantic config models + YAML loader
-│   ├── converter.py        # OpenAI ↔ Anthropic format conversion
-│   ├── endpoint.py         # Single-backend proxy with retry loop
-│   ├── group.py            # Group routing (sequential / load_balance)
-│   ├── logger.py           # Rotating file + console logging
-│   ├── retry.py            # Error-count and cooldown tracking
-│   └── usage.py            # RPM, request quota, and budget tracking
-├── mock_api/
-│   └── server.py           # Local mock backend for testing
-└── tests/
-    ├── test_router.py       # Core routing and usage tests
-    ├── test_edge_cases.py   # Format conversion, RPM, streaming edge cases
-    ├── test_qa_round2.py    # Model override, streaming cleanup, load balance
-    ├── test_qa_round3.py    # Concurrent requests, non-JSON errors, content blocks
-    └── test_scenarios.py    # Real-world usage scenario tests
+  config.py     — Pydantic config models + YAML loader with ${ENV_VAR} expansion
+  app.py        — FastAPI application factory and endpoint wiring
+  proxy.py      — Request routing, provider resolution, dispatch
+  converter.py  — Stateless Anthropic ↔ OpenAI format conversion (request/response/streaming)
+  logger.py     — Logging setup
+  cli.py        — CLI entry point
 ```
 
 ---
