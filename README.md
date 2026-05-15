@@ -78,6 +78,10 @@ export DEEPSEEK_API_KEY="sk-..."
 ### 3. Run
 
 ```bash
+# Using the installed CLI command
+simple-api-router --config config.yaml
+
+# Or via python -m (requires the package to be installed)
 python -m simple_api_router --config config.yaml
 ```
 

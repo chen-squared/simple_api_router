@@ -18,7 +18,11 @@ pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
 
-All tests are pure unit tests — no running server or network access required. The suite currently contains **97 tests** covering:
+Tests are pure unit tests with no network access. You can run them without installing — just `cd` into the project directory and pytest will find the package from the current directory. With the venv:
+
+```bash
+/path/to/venv/bin/python -m pytest tests/ -v
+```
 
 - Anthropic → OpenAI request conversion (text, tools, vision, cache control, thinking, reasoning effort)
 - OpenAI → Anthropic response conversion (text, tool calls, reasoning content)
