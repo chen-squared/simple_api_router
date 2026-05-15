@@ -316,6 +316,12 @@ async def _proxy_anthropic(
     resp, err = await _post_with_retry(client, url, headers, patched, max_retries)
     if err:
         return JSONResponse(status_code=502, content=_upstream_error_json(err))
+    if resp.status_code != 200:
+        try:
+            detail = resp.json()
+        except Exception:
+            detail = resp.text
+        raise HTTPException(status_code=resp.status_code, detail=detail)
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
 
