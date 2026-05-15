@@ -3,6 +3,7 @@ server:
   port: 8080
   log_level: "INFO"
   log_file: "router.log"   # set to null to log to stdout only
+  max_retries: 3           # retry on 429/5xx/529/network errors (default: 3)
 
 providers:
   # ── Anthropic ─────────────────────────────────────────────────────────────

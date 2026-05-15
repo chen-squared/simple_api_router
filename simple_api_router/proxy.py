@@ -36,7 +36,7 @@ logger = get_logger("proxy")
 # ---------------------------------------------------------------------------
 
 # HTTP status codes that warrant a retry
-_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+_RETRY_STATUS = frozenset({429, 500, 502, 503, 504, 529})
 
 # Network-level errors that warrant a retry
 _UPSTREAM_ERRORS = (

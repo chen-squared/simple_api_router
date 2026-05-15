@@ -43,6 +43,7 @@ Create or edit `config.yaml`:
 server:
   host: "0.0.0.0"
   port: 8080
+  max_retries: 3        # retry upstream errors (429/5xx/529/network), default 3
 
 providers:
   anthropic:
