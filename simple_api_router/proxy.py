@@ -111,6 +111,18 @@ async def _stream_with_retry(
                 if resp.status_code in _RETRY_STATUS:
                     last_err = resp
                     continue
+                if not (200 <= resp.status_code < 300):
+                    # Non-retryable upstream error (e.g. 401, 403, 404).
+                    # StreamingResponse has already committed HTTP 200, so we
+                    # can only surface the error as an SSE error event.
+                    await resp.aread()
+                    try:
+                        detail = resp.json()
+                    except Exception:
+                        detail = resp.text
+                    logger.warning("Upstream %d for %s: %s", resp.status_code, url, detail)
+                    yield _upstream_error_sse_status(resp.status_code, detail)
+                    return
                 # Once we start yielding chunks the client has received data —
                 # we cannot restart the stream. Track whether we've begun so that
                 # a mid-stream network error surfaces as an SSE error event instead
@@ -143,6 +155,16 @@ def _upstream_error_json(exc: Any) -> dict:
 
 def _upstream_error_sse(exc: Any) -> bytes:
     data = json.dumps(_upstream_error_json(exc))
+    return f"event: error\ndata: {data}\n\n".encode()
+
+
+def _upstream_error_sse_status(status_code: int, detail: Any) -> bytes:
+    """SSE error event for a non-retryable upstream HTTP error (e.g. 401, 403, 404)."""
+    msg = detail if isinstance(detail, str) else json.dumps(detail)
+    data = json.dumps({"type": "error", "error": {
+        "type": "api_error",
+        "message": f"Upstream HTTP {status_code}: {msg}",
+    }})
     return f"event: error\ndata: {data}\n\n".encode()
 
 
@@ -212,9 +234,14 @@ _FORWARD_HEADERS = {
 }
 
 
+def _is_real_key(api_key: str) -> bool:
+    """Return True only if api_key is a non-empty, non-placeholder string."""
+    return bool(api_key) and api_key.lower() not in ("none", "null", "false", "no", "0")
+
+
 def _build_anthropic_headers(request: Request, api_key: str) -> Dict[str, str]:
     headers: Dict[str, str] = {}
-    if api_key:
+    if _is_real_key(api_key):
         headers["x-api-key"] = api_key
     for h in _FORWARD_HEADERS:
         if v := request.headers.get(h):
@@ -226,7 +253,7 @@ def _build_anthropic_headers(request: Request, api_key: str) -> Dict[str, str]:
 
 def _build_openai_headers(api_key: str) -> Dict[str, str]:
     headers: Dict[str, str] = {"Content-Type": "application/json"}
-    if api_key:
+    if _is_real_key(api_key):
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
 
