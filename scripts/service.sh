@@ -2,7 +2,9 @@
 # service.sh — manage simple-api-router as a macOS launchd service
 #
 # Usage:
-#   ./scripts/service.sh install   — generate plist and load service (auto-start on login)
+#   ./scripts/service.sh install [--config PATH]
+#                                — generate plist and load service (auto-start on login)
+#                                  default config: ~/.config/simple-api-router/config.yaml
 #   ./scripts/service.sh uninstall — unload and remove plist
 #   ./scripts/service.sh start     — start service
 #   ./scripts/service.sh stop      — stop service
@@ -19,6 +21,8 @@ set -euo pipefail
 SERVICE_LABEL="com.chen-squared.simple-api-router"
 PLIST_PATH="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
 LOG_DIR="$HOME/Library/Logs/simple-api-router"
+CONFIG_DIR="$HOME/.config/simple-api-router"
+DEFAULT_CONFIG="$CONFIG_DIR/config.yaml"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -30,7 +34,6 @@ _warn()  { printf '  \033[33m!\033[0m %s\n' "$*" >&2; }
 _die()   { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 _find_executable() {
-    # Prefer the active venv / PATH executable
     if command -v simple-api-router &>/dev/null; then
         command -v simple-api-router
     else
@@ -43,23 +46,53 @@ _service_loaded() {
 }
 
 # ---------------------------------------------------------------------------
-# install
+# install [--config PATH]
 # ---------------------------------------------------------------------------
 cmd_install() {
     _bold "Installing simple-api-router service"
 
     local exe config_path work_dir
+    config_path=""
+
+    # Parse --config argument
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --config|-c)
+                shift
+                config_path="${1/#\~/$HOME}"
+                ;;
+            *) _die "Unknown argument: $1" ;;
+        esac
+        shift
+    done
 
     exe=$(_find_executable)
     _ok "Executable: $exe"
 
-    # Resolve config path
-    if [[ -f "config.yaml" ]]; then
-        config_path="$(pwd)/config.yaml"
-    else
-        read -r -p "  Path to config.yaml: " config_path
-        config_path="${config_path/#\~/$HOME}"
+    # Resolve config path: --config > ~/.config/simple-api-router/config.yaml > ./config.yaml
+    if [[ -z "$config_path" ]]; then
+        if [[ -f "$DEFAULT_CONFIG" ]]; then
+            config_path="$DEFAULT_CONFIG"
+        elif [[ -f "$(pwd)/config.yaml" ]]; then
+            config_path="$(pwd)/config.yaml"
+        else
+            # Create default config from bundled template if available
+            local script_dir
+            script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+            mkdir -p "$CONFIG_DIR"
+            if [[ -f "$script_dir/../config.yaml" ]]; then
+                cp "$script_dir/../config.yaml" "$DEFAULT_CONFIG"
+                _info "Copied config template to $DEFAULT_CONFIG"
+            else
+                touch "$DEFAULT_CONFIG"
+                _info "Created empty config at $DEFAULT_CONFIG"
+            fi
+            config_path="$DEFAULT_CONFIG"
+        fi
     fi
+
+    # Expand and validate
+    config_path="$(cd "$(dirname "$config_path")" && pwd)/$(basename "$config_path")"
     [[ -f "$config_path" ]] || _die "Config file not found: $config_path"
     _ok "Config: $config_path"
 
@@ -223,7 +256,7 @@ cmd_log() {
 # dispatch
 # ---------------------------------------------------------------------------
 case "${1:-help}" in
-    install)   cmd_install ;;
+    install)   shift; cmd_install "$@" ;;
     uninstall) cmd_uninstall ;;
     start)     cmd_start ;;
     stop)      cmd_stop ;;
