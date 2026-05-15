@@ -79,14 +79,39 @@ export DEEPSEEK_API_KEY="sk-..."
 ### 3. Run
 
 ```bash
-# Using the installed CLI command
+# Foreground (for testing)
 simple-api-router --config config.yaml
 
-# Or via python -m (requires the package to be installed)
+# Or via python -m
 python -m simple_api_router --config config.yaml
 ```
 
-### 4. Use with Claude Code
+### 4. Run as a macOS background service (auto-start on login)
+
+```bash
+# From the project directory:
+./scripts/service.sh install
+```
+
+This will:
+- Auto-detect the `simple-api-router` executable
+- Create `~/.config/simple-api-router/env` for your API keys (edit this file)
+- Install a launchd plist to `~/Library/LaunchAgents/`
+- Start the service immediately and on every login
+
+**Control commands:**
+```bash
+./scripts/service.sh start    # start
+./scripts/service.sh stop     # stop
+./scripts/service.sh restart  # restart
+./scripts/service.sh status   # show launchd state + recent logs
+./scripts/service.sh log      # tail live logs
+./scripts/service.sh uninstall
+```
+
+**Hot reload:** just save `config.yaml` — provider/model/key/retry changes apply automatically within a second, with no restart and no dropped connections. Changes to `host` or `port` require a restart.
+
+### 5. Use with Claude Code
 
 ```bash
 ANTHROPIC_BASE_URL=http://localhost:8080 claude

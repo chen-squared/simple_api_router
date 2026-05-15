@@ -26,7 +26,7 @@ def main() -> None:
     config = load_config(config_path)
     setup_logging(config.server.log_level, config.server.log_file)
 
-    app = create_app(config)
+    app = create_app(config, config_path=config_path)
 
     uvicorn.run(
         app,
