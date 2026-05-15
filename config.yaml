@@ -65,11 +65,19 @@ providers:
   # ── Local / self-hosted (Ollama, vLLM, LM Studio) ─────────────────────────
   # local:
   #   type: openai
-  #   api_key: "none"
-  #   base_url: "http://localhost:11434/v1"
+  #   base_url: "http://localhost:11434/v1"   # no api_key needed for local
   #   models:
   #     - llama3.2
   #     - qwen2.5-coder
+
+  # ── Provider using Anthropic-format API but Bearer auth (e.g. ollama.com) ──
+  # ollama-cloud:
+  #   type: anthropic
+  #   base_url: "https://ollama.com"
+  #   api_key: "${OLLAMA_API_KEY}"
+  #   bearer_auth: true              # send 'Authorization: Bearer' instead of 'x-api-key'
+  #   models:
+  #     - gpt-oss:120b
 
   # ── Model name remapping ───────────────────────────────────────────────────
   # myapi:

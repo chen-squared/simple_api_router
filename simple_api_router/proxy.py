@@ -239,10 +239,13 @@ def _is_real_key(api_key: str) -> bool:
     return bool(api_key) and api_key.lower() not in ("none", "null", "false", "no", "0")
 
 
-def _build_anthropic_headers(request: Request, api_key: str) -> Dict[str, str]:
+def _build_anthropic_headers(request: Request, provider: "ProviderConfig") -> Dict[str, str]:
     headers: Dict[str, str] = {}
-    if _is_real_key(api_key):
-        headers["x-api-key"] = api_key
+    if _is_real_key(provider.api_key):
+        if provider.bearer_auth:
+            headers["Authorization"] = f"Bearer {provider.api_key}"
+        else:
+            headers["x-api-key"] = provider.api_key
     for h in _FORWARD_HEADERS:
         if v := request.headers.get(h):
             headers[h] = v
@@ -297,7 +300,7 @@ async def _proxy_anthropic(
 ) -> Any:
     # Replace model with backend name; everything else passes through unchanged
     patched = {**body, "model": backend_model}
-    headers = _build_anthropic_headers(request, provider.api_key)
+    headers = _build_anthropic_headers(request, provider)
     base_url = provider.resolve_base_url()
     url = f"{base_url}/v1/messages"
 
