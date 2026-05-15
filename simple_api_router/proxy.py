@@ -8,9 +8,10 @@ Handles:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-from typing import Any, AsyncIterator, Dict, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, Optional, Tuple
 
 import httpx
 from fastapi import HTTPException, Request
@@ -30,7 +31,14 @@ from .logger import get_logger
 
 logger = get_logger("proxy")
 
-# Network-level errors that mean we couldn't reach the upstream at all.
+# ---------------------------------------------------------------------------
+# Retry helpers
+# ---------------------------------------------------------------------------
+
+# HTTP status codes that warrant a retry
+_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+
+# Network-level errors that warrant a retry
 _UPSTREAM_ERRORS = (
     httpx.ConnectError,
     httpx.ConnectTimeout,
@@ -42,17 +50,85 @@ _UPSTREAM_ERRORS = (
 )
 
 
-def _upstream_error_json(exc: Exception) -> dict:
-    return {
-        "type": "error",
-        "error": {
-            "type": "api_error",
-            "message": f"Upstream connection error: {exc}",
-        },
-    }
+def _backoff(attempt: int, retry_after: Optional[float] = None) -> float:
+    """Return seconds to wait before attempt N (0-based). Respects Retry-After when present."""
+    if retry_after is not None:
+        return min(retry_after, 60.0)
+    return min(0.5 * (2 ** attempt), 8.0)
 
 
-def _upstream_error_sse(exc: Exception) -> bytes:
+async def _post_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: Dict[str, str],
+    body: Dict[str, Any],
+    max_retries: int,
+) -> Tuple[Optional[httpx.Response], Optional[str]]:
+    """POST with retry. Returns (response, None) on success, (None, error_str) on exhaustion."""
+    last_err: Any = None
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            ra = float(last_err.headers.get("retry-after", 0)) if isinstance(last_err, httpx.Response) else None
+            delay = _backoff(attempt - 1, ra or None)
+            logger.warning("Retry %d/%d → %s (reason: %s), waiting %.1fs",
+                           attempt, max_retries, url, last_err, delay)
+            await asyncio.sleep(delay)
+        try:
+            resp = await client.post(url, json=body, headers=headers)
+            if resp.status_code not in _RETRY_STATUS:
+                return resp, None
+            last_err = resp
+        except _UPSTREAM_ERRORS as exc:
+            last_err = exc
+
+    reason = f"HTTP {last_err.status_code}" if isinstance(last_err, httpx.Response) else str(last_err)
+    logger.warning("All %d retries exhausted for %s: %s", max_retries, url, reason)
+    return None, reason
+
+
+async def _stream_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: Dict[str, str],
+    body: Dict[str, Any],
+    max_retries: int,
+    make_stream: Callable,
+) -> AsyncIterator[bytes]:
+    """Stream POST with retry. Yields from make_stream(aiter_bytes) on success.
+
+    make_stream is a callable that takes an aiter_bytes and returns an async iterable.
+    Retries happen before the first byte is yielded so the client sees no error.
+    """
+    last_err: Any = None
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            ra = float(last_err.headers.get("retry-after", 0)) if isinstance(last_err, httpx.Response) else None
+            delay = _backoff(attempt - 1, ra or None)
+            logger.warning("Stream retry %d/%d → %s (reason: %s), waiting %.1fs",
+                           attempt, max_retries, url, last_err, delay)
+            await asyncio.sleep(delay)
+        try:
+            async with client.stream("POST", url, json=body, headers=headers) as resp:
+                if resp.status_code in _RETRY_STATUS:
+                    last_err = resp
+                    continue
+                async for chunk in make_stream(resp.aiter_bytes()):
+                    yield chunk
+                return  # success
+        except _UPSTREAM_ERRORS as exc:
+            last_err = exc
+
+    reason = f"HTTP {last_err.status_code}" if isinstance(last_err, httpx.Response) else str(last_err)
+    logger.warning("All %d stream retries exhausted for %s: %s", max_retries, url, reason)
+    yield _upstream_error_sse(last_err)
+
+
+def _upstream_error_json(exc: Any) -> dict:
+    msg = f"HTTP {exc.status_code}" if isinstance(exc, httpx.Response) else str(exc)
+    return {"type": "error", "error": {"type": "api_error", "message": f"Upstream error: {msg}"}}
+
+
+def _upstream_error_sse(exc: Any) -> bytes:
     data = json.dumps(_upstream_error_json(exc))
     return f"event: error\ndata: {data}\n\n".encode()
 
@@ -157,11 +233,12 @@ async def route_request(
 
     provider_name, model = parse_model(model_str)
     provider, backend_model = resolve_provider(provider_name, model, config)
+    max_retries = config.server.max_retries
 
     if provider.type == "anthropic":
-        return await _proxy_anthropic(request, body, backend_model, provider, client)
+        return await _proxy_anthropic(request, body, backend_model, provider, client, max_retries)
     else:
-        return await _proxy_openai(request, body, model_str, backend_model, provider, client)
+        return await _proxy_openai(request, body, model_str, backend_model, provider, client, max_retries)
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +251,7 @@ async def _proxy_anthropic(
     backend_model: str,
     provider: ProviderConfig,
     client: httpx.AsyncClient,
+    max_retries: int,
 ) -> Any:
     # Replace model with backend name; everything else passes through unchanged
     patched = {**body, "model": backend_model}
@@ -181,44 +259,19 @@ async def _proxy_anthropic(
     base_url = provider.resolve_base_url()
     url = f"{base_url}/v1/messages"
 
-    is_stream = body.get("stream", False)
-
-    if is_stream:
+    if body.get("stream", False):
         return StreamingResponse(
-            _stream_anthropic(client, url, headers, patched),
+            _stream_with_retry(client, url, headers, patched, max_retries,
+                               lambda aiter: aiter),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    try:
-        resp = await client.post(url, json=patched, headers=headers)
-    except _UPSTREAM_ERRORS as exc:
-        logger.warning("Upstream connect error (%s): %s", url, exc)
-        return JSONResponse(status_code=502, content=_upstream_error_json(exc))
+    resp, err = await _post_with_retry(client, url, headers, patched, max_retries)
+    if err:
+        return JSONResponse(status_code=502, content=_upstream_error_json(err))
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
-
-async def _stream_anthropic(
-    client: httpx.AsyncClient,
-    url: str,
-    headers: Dict[str, str],
-    body: Dict[str, Any],
-) -> AsyncIterator[bytes]:
-    try:
-        async with client.stream("POST", url, json=body, headers=headers) as resp:
-            async for chunk in resp.aiter_bytes():
-                yield chunk
-    except _UPSTREAM_ERRORS as exc:
-        logger.warning("Upstream connect error during stream (%s): %s", url, exc)
-        yield _upstream_error_sse(exc)
-
-
-# ---------------------------------------------------------------------------
-# OpenAI backend — full conversion
-# ---------------------------------------------------------------------------
 
 async def _proxy_openai(
     request: Request,
@@ -227,6 +280,7 @@ async def _proxy_openai(
     backend_model: str,
     provider: ProviderConfig,
     client: httpx.AsyncClient,
+    max_retries: int,
 ) -> Any:
     use_reasoning = (
         provider.deepseek_reasoning
@@ -244,16 +298,15 @@ async def _proxy_openai(
 
         if is_stream:
             return StreamingResponse(
-                _stream_responses_converted(client, url, headers, req_body, original_model),
+                _stream_with_retry(client, url, headers, req_body, max_retries,
+                                   lambda aiter: stream_responses_to_anthropic(aiter, original_model)),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
-        try:
-            resp = await client.post(url, json=req_body, headers=headers)
-        except _UPSTREAM_ERRORS as exc:
-            logger.warning("Upstream connect error (%s): %s", url, exc)
-            return JSONResponse(status_code=502, content=_upstream_error_json(exc))
+        resp, err = await _post_with_retry(client, url, headers, req_body, max_retries)
+        if err:
+            return JSONResponse(status_code=502, content=_upstream_error_json(err))
         if resp.status_code != 200:
             try:
                 detail = resp.json()
@@ -268,53 +321,19 @@ async def _proxy_openai(
 
     if is_stream:
         return StreamingResponse(
-            _stream_openai_converted(client, url, headers, oai_body, original_model),
+            _stream_with_retry(client, url, headers, oai_body, max_retries,
+                               lambda aiter: stream_openai_to_anthropic(aiter, original_model)),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    try:
-        resp = await client.post(url, json=oai_body, headers=headers)
-    except _UPSTREAM_ERRORS as exc:
-        logger.warning("Upstream connect error (%s): %s", url, exc)
-        return JSONResponse(status_code=502, content=_upstream_error_json(exc))
+    resp, err = await _post_with_retry(client, url, headers, oai_body, max_retries)
+    if err:
+        return JSONResponse(status_code=502, content=_upstream_error_json(err))
     if resp.status_code != 200:
         try:
             detail = resp.json()
         except Exception:
             detail = resp.text
         raise HTTPException(status_code=resp.status_code, detail=detail)
-
     return JSONResponse(content=openai_to_anthropic_response(resp.json(), original_model))
-
-
-async def _stream_openai_converted(
-    client: httpx.AsyncClient,
-    url: str,
-    headers: Dict[str, str],
-    body: Dict[str, Any],
-    original_model: str,
-) -> AsyncIterator[bytes]:
-    try:
-        async with client.stream("POST", url, json=body, headers=headers) as resp:
-            async for chunk in stream_openai_to_anthropic(resp.aiter_bytes(), original_model):
-                yield chunk
-    except _UPSTREAM_ERRORS as exc:
-        logger.warning("Upstream connect error during stream (%s): %s", url, exc)
-        yield _upstream_error_sse(exc)
-
-
-async def _stream_responses_converted(
-    client: httpx.AsyncClient,
-    url: str,
-    headers: Dict[str, str],
-    body: Dict[str, Any],
-    original_model: str,
-) -> AsyncIterator[bytes]:
-    try:
-        async with client.stream("POST", url, json=body, headers=headers) as resp:
-            async for chunk in stream_responses_to_anthropic(resp.aiter_bytes(), original_model):
-                yield chunk
-    except _UPSTREAM_ERRORS as exc:
-        logger.warning("Upstream connect error during stream (%s): %s", url, exc)
-        yield _upstream_error_sse(exc)

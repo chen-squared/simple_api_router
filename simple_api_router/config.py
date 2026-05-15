@@ -15,6 +15,7 @@ class ServerConfig(BaseModel):
     port: int = 8080
     log_level: str = "INFO"
     log_file: Optional[str] = "router.log"
+    max_retries: int = 3  # max retry attempts per request on upstream errors
 
 
 class ProviderConfig(BaseModel):
