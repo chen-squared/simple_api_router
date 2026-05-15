@@ -6,7 +6,7 @@
 #   Linux  — systemd user service (~/.config/systemd/user/)
 #
 # Usage:
-#   ./scripts/service.sh install [--config PATH]
+#   ./scripts/service.sh install [--config PATH] [--exe PATH]
 #       Install and enable the service (auto-start on login).
 #       Default config: ~/.config/simple-api-router/config.yaml
 #   ./scripts/service.sh uninstall  — stop and remove the service
@@ -61,35 +61,45 @@ _warn()  { printf '  \033[33m!\033[0m %s\n' "$*" >&2; }
 _die()   { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 _find_executable() {
-    if command -v simple-api-router &>/dev/null; then
-        command -v simple-api-router
-    else
-        _die "simple-api-router not found in PATH. Install it first: pip install -e ."
+    # 1. Explicit --exe argument
+    if [[ -n "${_EXE_OVERRIDE:-}" ]]; then
+        [[ -x "$_EXE_OVERRIDE" ]] || _die "Not executable: $_EXE_OVERRIDE"
+        echo "$_EXE_OVERRIDE"; return
     fi
+    # 2. Already in PATH (venv active or system install)
+    if command -v simple-api-router &>/dev/null; then
+        command -v simple-api-router; return
+    fi
+    # 3. Common venv / install locations
+    local candidates=(
+        "$HOME/Developer/.venv/bin/simple-api-router"
+        "$HOME/.venv/bin/simple-api-router"
+        "$HOME/venv/bin/simple-api-router"
+        "$HOME/.local/bin/simple-api-router"
+        "/usr/local/bin/simple-api-router"
+    )
+    for c in "${candidates[@]}"; do
+        if [[ -x "$c" ]]; then echo "$c"; return; fi
+    done
+    _die "simple-api-router not found. Either:
+  • activate your venv before running install, or
+  • pass the path: $0 install --exe /path/to/.venv/bin/simple-api-router"
 }
 
 _resolve_config() {
-    # $1: explicit path from --config (may be empty)
     local explicit="$1"
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
     if [[ -n "$explicit" ]]; then
-        echo "${explicit/#\~/$HOME}"
-        return
+        echo "${explicit/#\~/$HOME}"; return
     fi
-
     if [[ -f "$DEFAULT_CONFIG" ]]; then
-        echo "$DEFAULT_CONFIG"
-        return
+        echo "$DEFAULT_CONFIG"; return
     fi
-
     if [[ -f "$(pwd)/config.yaml" ]]; then
-        echo "$(pwd)/config.yaml"
-        return
+        echo "$(pwd)/config.yaml"; return
     fi
-
-    # Create from bundled template
     mkdir -p "$CONFIG_DIR"
     if [[ -f "$script_dir/../config.yaml" ]]; then
         cp "$script_dir/../config.yaml" "$DEFAULT_CONFIG"
@@ -143,11 +153,9 @@ _launchd_loaded() {
 
 _install_macos() {
     local exe="$1" config_path="$2" work_dir="$3"
-
     mkdir -p "$LOG_DIR"
     _ok "Log dir: $LOG_DIR"
     _write_wrapper "$exe" "$config_path"
-
     cat >"$PLIST_PATH" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -177,7 +185,6 @@ _install_macos() {
 </plist>
 EOF
     _ok "Plist: $PLIST_PATH"
-
     if _launchd_loaded; then
         launchctl unload "$PLIST_PATH" 2>/dev/null || true
     fi
@@ -218,9 +225,7 @@ _systemd() { systemctl --user "$@"; }
 
 _install_linux() {
     local exe="$1" config_path="$2" work_dir="$3"
-
     _write_wrapper "$exe" "$config_path"
-
     mkdir -p "$SYSTEMD_UNIT_DIR"
     cat >"$SYSTEMD_UNIT" <<EOF
 [Unit]
@@ -238,13 +243,10 @@ RestartSec=5
 WantedBy=default.target
 EOF
     _ok "Unit file: $SYSTEMD_UNIT"
-
     _systemd daemon-reload
     _systemd enable "$SERVICE_NAME"
     _systemd start  "$SERVICE_NAME"
     _ok "Service enabled and started"
-
-    # Allow service to run without an active login session
     if command -v loginctl &>/dev/null; then
         loginctl enable-linger "$USER" 2>/dev/null && _ok "Linger enabled (service survives logout)"
     fi
@@ -264,19 +266,17 @@ _start_linux()   { _systemd start   "$SERVICE_NAME"; _ok "Started"; }
 _stop_linux()    { _systemd stop    "$SERVICE_NAME"; _ok "Stopped"; }
 _restart_linux() { _systemd restart "$SERVICE_NAME"; _ok "Restarted"; }
 _status_linux()  { _systemd status  "$SERVICE_NAME" --no-pager || true; }
-_log_linux()     {
-    _info "Tailing logs (Ctrl+C to stop)…"
-    journalctl --user -u "$SERVICE_NAME" -f --no-pager
-}
+_log_linux()     { _info "Tailing logs (Ctrl+C to stop)…"; journalctl --user -u "$SERVICE_NAME" -f --no-pager; }
 
 # ---------------------------------------------------------------------------
 # Cross-platform dispatch
 # ---------------------------------------------------------------------------
-_install()   {
-    local explicit_config=""
+_install() {
+    local explicit_config="" _EXE_OVERRIDE=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --config|-c) shift; explicit_config="$1" ;;
+            --exe|-e)    shift; _EXE_OVERRIDE="${1/#\~/$HOME}" ;;
             *) _die "Unknown argument: $1" ;;
         esac
         shift
@@ -303,7 +303,7 @@ _install()   {
     _bold "Done. Useful commands:"
     echo "  $0 status / log / stop / start / restart / uninstall"
     _info "Hot reload: just save config.yaml — changes apply automatically."
-    _info "API keys: edit $ENV_FILE then restart."
+    _info "API keys:   edit $ENV_FILE  then restart."
 }
 
 _uninstall() {
@@ -333,254 +333,8 @@ case "${1:-help}" in
     status)    _status ;;
     log)       _log ;;
     *)
-        echo "Usage: $0 {install [--config PATH]|uninstall|start|stop|restart|status|log}"
+        echo "Usage: $0 {install [--config PATH] [--exe PATH]|uninstall|start|stop|restart|status|log}"
         echo "       Supports macOS (launchd) and Linux (systemd user service)"
-        exit 1
-        ;;
-esac
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-_bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
-_info()  { printf '  \033[34m→\033[0m %s\n' "$*"; }
-_ok()    { printf '  \033[32m✓\033[0m %s\n' "$*"; }
-_warn()  { printf '  \033[33m!\033[0m %s\n' "$*" >&2; }
-_die()   { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
-
-_find_executable() {
-    if command -v simple-api-router &>/dev/null; then
-        command -v simple-api-router
-    else
-        _die "simple-api-router not found in PATH. Install it first: pip install -e ."
-    fi
-}
-
-_service_loaded() {
-    launchctl list 2>/dev/null | grep -q "$SERVICE_LABEL"
-}
-
-# ---------------------------------------------------------------------------
-# install [--config PATH]
-# ---------------------------------------------------------------------------
-cmd_install() {
-    _bold "Installing simple-api-router service"
-
-    local exe config_path work_dir
-    config_path=""
-
-    # Parse --config argument
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --config|-c)
-                shift
-                config_path="${1/#\~/$HOME}"
-                ;;
-            *) _die "Unknown argument: $1" ;;
-        esac
-        shift
-    done
-
-    exe=$(_find_executable)
-    _ok "Executable: $exe"
-
-    # Resolve config path: --config > ~/.config/simple-api-router/config.yaml > ./config.yaml
-    if [[ -z "$config_path" ]]; then
-        if [[ -f "$DEFAULT_CONFIG" ]]; then
-            config_path="$DEFAULT_CONFIG"
-        elif [[ -f "$(pwd)/config.yaml" ]]; then
-            config_path="$(pwd)/config.yaml"
-        else
-            # Create default config from bundled template if available
-            local script_dir
-            script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-            mkdir -p "$CONFIG_DIR"
-            if [[ -f "$script_dir/../config.yaml" ]]; then
-                cp "$script_dir/../config.yaml" "$DEFAULT_CONFIG"
-                _info "Copied config template to $DEFAULT_CONFIG"
-            else
-                touch "$DEFAULT_CONFIG"
-                _info "Created empty config at $DEFAULT_CONFIG"
-            fi
-            config_path="$DEFAULT_CONFIG"
-        fi
-    fi
-
-    # Expand and validate
-    config_path="$(cd "$(dirname "$config_path")" && pwd)/$(basename "$config_path")"
-    [[ -f "$config_path" ]] || _die "Config file not found: $config_path"
-    _ok "Config: $config_path"
-
-    work_dir="$(dirname "$config_path")"
-
-    # Create log directory
-    mkdir -p "$LOG_DIR"
-    _ok "Log dir: $LOG_DIR"
-
-    # Env file hint
-    local env_file="$HOME/.config/simple-api-router/env"
-    if [[ ! -f "$env_file" ]]; then
-        mkdir -p "$(dirname "$env_file")"
-        cat >"$env_file" <<'EOF'
-# Environment variables for simple-api-router
-# Uncomment and fill in your API keys:
-#
-# ANTHROPIC_API_KEY=sk-ant-...
-# OPENAI_API_KEY=sk-...
-# DEEPSEEK_API_KEY=sk-...
-EOF
-        _info "Created env file template: $env_file"
-        _warn "Edit $env_file and add your API keys before starting"
-    fi
-
-    # Generate wrapper script that sources the env file
-    local wrapper="$HOME/.config/simple-api-router/run.sh"
-    cat >"$wrapper" <<EOF
-#!/bin/bash
-ENV_FILE="\$HOME/.config/simple-api-router/env"
-if [ -f "\$ENV_FILE" ]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "\$ENV_FILE"
-    set +a
-fi
-exec "$exe" --config "$config_path"
-EOF
-    chmod +x "$wrapper"
-    _ok "Wrapper: $wrapper"
-
-    # Write plist
-    cat >"$PLIST_PATH" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>${SERVICE_LABEL}</string>
-
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/bash</string>
-        <string>${wrapper}</string>
-    </array>
-
-    <key>WorkingDirectory</key>
-    <string>${work_dir}</string>
-
-    <key>RunAtLoad</key>
-    <true/>
-
-    <key>KeepAlive</key>
-    <true/>
-
-    <key>StandardOutPath</key>
-    <string>${LOG_DIR}/stdout.log</string>
-
-    <key>StandardErrorPath</key>
-    <string>${LOG_DIR}/stderr.log</string>
-
-    <key>ThrottleInterval</key>
-    <integer>5</integer>
-</dict>
-</plist>
-EOF
-    _ok "Plist: $PLIST_PATH"
-
-    # Load
-    if _service_loaded; then
-        launchctl unload "$PLIST_PATH" 2>/dev/null || true
-    fi
-    launchctl load -w "$PLIST_PATH"
-    _ok "Service loaded and enabled"
-    echo
-    _bold "Service installed. Useful commands:"
-    echo "  ./scripts/service.sh status"
-    echo "  ./scripts/service.sh log"
-    echo "  ./scripts/service.sh stop / start / restart"
-    echo
-    _info "Hot reload: just save config.yaml — changes apply automatically."
-    _info "To change API keys, edit: $env_file  then restart the service."
-}
-
-# ---------------------------------------------------------------------------
-# uninstall
-# ---------------------------------------------------------------------------
-cmd_uninstall() {
-    _bold "Uninstalling simple-api-router service"
-    if _service_loaded; then
-        launchctl unload -w "$PLIST_PATH" 2>/dev/null || true
-        _ok "Service unloaded"
-    fi
-    if [[ -f "$PLIST_PATH" ]]; then
-        rm "$PLIST_PATH"
-        _ok "Plist removed"
-    fi
-    _ok "Done (logs remain in $LOG_DIR)"
-}
-
-# ---------------------------------------------------------------------------
-# start / stop / restart
-# ---------------------------------------------------------------------------
-cmd_start() {
-    [[ -f "$PLIST_PATH" ]] || _die "Service not installed. Run: ./scripts/service.sh install"
-    launchctl start "$SERVICE_LABEL"
-    _ok "Started"
-}
-
-cmd_stop() {
-    launchctl stop "$SERVICE_LABEL" 2>/dev/null && _ok "Stopped" || _warn "Service was not running"
-}
-
-cmd_restart() {
-    cmd_stop || true
-    sleep 1
-    cmd_start
-}
-
-# ---------------------------------------------------------------------------
-# status
-# ---------------------------------------------------------------------------
-cmd_status() {
-    if ! _service_loaded; then
-        _warn "Service not loaded (not installed or unloaded)"
-        return
-    fi
-    echo
-    launchctl print "gui/$UID/$SERVICE_LABEL" 2>/dev/null || launchctl list "$SERVICE_LABEL"
-    echo
-    if [[ -f "$LOG_DIR/stdout.log" ]]; then
-        _info "Last 5 log lines:"
-        tail -5 "$LOG_DIR/stdout.log" | sed 's/^/    /'
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# log
-# ---------------------------------------------------------------------------
-cmd_log() {
-    local out="$LOG_DIR/stdout.log"
-    local err="$LOG_DIR/stderr.log"
-    [[ -f "$out" ]] || _die "No log found at $out — is the service installed?"
-    _info "Tailing logs (Ctrl+C to stop)…"
-    # Merge stdout + stderr, sorted by timestamp
-    tail -f "$out" "$err"
-}
-
-# ---------------------------------------------------------------------------
-# dispatch
-# ---------------------------------------------------------------------------
-case "${1:-help}" in
-    install)   shift; cmd_install "$@" ;;
-    uninstall) cmd_uninstall ;;
-    start)     cmd_start ;;
-    stop)      cmd_stop ;;
-    restart)   cmd_restart ;;
-    status)    cmd_status ;;
-    log)       cmd_log ;;
-    *)
-        echo "Usage: $0 {install|uninstall|start|stop|restart|status|log}"
         exit 1
         ;;
 esac

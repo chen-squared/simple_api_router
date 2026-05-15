@@ -79,9 +79,35 @@ def _expand_env_vars(obj: Any) -> Any:
     return obj
 
 
+def _find_unexpanded(obj: Any, path: str = "") -> List[str]:
+    """Return a list of config paths where ${VAR} was not expanded (var not set)."""
+    problems: List[str] = []
+    if isinstance(obj, str):
+        for m in _ENV_PATTERN.finditer(obj):
+            if m.group(1) not in os.environ:
+                problems.append(f"{path}: ${{{m.group(1)}}} (env var not set)")
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            problems.extend(_find_unexpanded(v, f"{path}.{k}" if path else k))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            problems.extend(_find_unexpanded(v, f"{path}[{i}]"))
+    return problems
+
+
 def load_config(path: Union[str, Path] = "config.yaml") -> RouterConfig:
-    """Load and validate configuration from YAML file."""
+    """Load and validate configuration from YAML file.
+
+    Raises ValueError if any ${VAR} placeholders remain unexpanded
+    (i.e. the referenced environment variable is not set).
+    """
     with open(path, "r") as f:
         raw = yaml.safe_load(f)
     raw = _expand_env_vars(raw)
+    unexpanded = _find_unexpanded(raw)
+    if unexpanded:
+        raise ValueError(
+            "Config contains unexpanded environment variables — "
+            "set them before starting:\n  " + "\n  ".join(unexpanded)
+        )
     return RouterConfig.model_validate(raw)
