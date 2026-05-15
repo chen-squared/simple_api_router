@@ -36,17 +36,16 @@ logger = get_logger("proxy")
 # ---------------------------------------------------------------------------
 
 # HTTP status codes that warrant a retry
-_RETRY_STATUS = frozenset({429, 500, 502, 503, 504, 529})
+_RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
 
-# Network-level errors that warrant a retry
+# Network/transport errors that warrant a retry.
+# httpx.TimeoutException  covers: ConnectTimeout, ReadTimeout, WriteTimeout, PoolTimeout
+# httpx.NetworkError      covers: ConnectError, ReadError, WriteError, CloseError
+# httpx.RemoteProtocolError: upstream sent malformed HTTP (truncated response, etc.)
 _UPSTREAM_ERRORS = (
-    httpx.ConnectError,
-    httpx.ConnectTimeout,
-    httpx.ReadTimeout,
-    httpx.WriteTimeout,
     httpx.TimeoutException,
-    httpx.RemoteProtocolError,
     httpx.NetworkError,
+    httpx.RemoteProtocolError,
 )
 
 
@@ -112,8 +111,22 @@ async def _stream_with_retry(
                 if resp.status_code in _RETRY_STATUS:
                     last_err = resp
                     continue
-                async for chunk in make_stream(resp.aiter_bytes()):
-                    yield chunk
+                # Once we start yielding chunks the client has received data —
+                # we cannot restart the stream. Track whether we've begun so that
+                # a mid-stream network error surfaces as an SSE error event instead
+                # of silently looping and sending duplicate/corrupt chunks.
+                started = False
+                try:
+                    async for chunk in make_stream(resp.aiter_bytes()):
+                        started = True
+                        yield chunk
+                except _UPSTREAM_ERRORS as mid_exc:
+                    if started:
+                        logger.warning("Upstream error mid-stream for %s: %s", url, mid_exc)
+                        yield _upstream_error_sse(mid_exc)
+                        return
+                    # Error before first chunk — treat as connection failure, retry
+                    raise
                 return  # success
         except _UPSTREAM_ERRORS as exc:
             last_err = exc
