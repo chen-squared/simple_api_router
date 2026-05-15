@@ -17,16 +17,39 @@ from .logger import setup_logging as setup_logger
 from .proxy import route_request
 
 
+async def _try_load_config(config_path: Path, logger, retries: int = 3, delay: float = 0.5):
+    """Load config with retries to handle mid-write auto-saves.
+
+    Editors often truncate then rewrite — the first parse attempt may hit an
+    incomplete file. We retry a few times (with a short sleep) to let the
+    editor finish before giving up and keeping the current config.
+    Returns the new RouterConfig on success, or None if all attempts fail.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        if attempt > 0:
+            await asyncio.sleep(delay)
+        try:
+            return load_config(config_path)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                logger.debug(
+                    "Config reload attempt %d/%d failed, retrying in %.1fs: %s",
+                    attempt + 1, retries, delay, exc,
+                )
+    logger.warning("Config reload failed (keeping current config): %s", last_exc)
+    return None
+
+
 async def _watch_config(app: FastAPI, config_path: Path, logger) -> None:
     """Background task: reload config whenever config_path is saved."""
     try:
         async for _ in awatch(str(config_path)):
-            try:
-                new_config = load_config(config_path)
+            new_config = await _try_load_config(config_path, logger)
+            if new_config is not None:
                 app.state.config = new_config
                 logger.info("Config reloaded from %s", config_path)
-            except Exception as exc:
-                logger.warning("Config reload failed (keeping current config): %s", exc)
     except asyncio.CancelledError:
         pass
 

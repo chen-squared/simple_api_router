@@ -22,7 +22,7 @@ class ProviderConfig(BaseModel):
     """Configuration for a single upstream provider (Anthropic or OpenAI-compatible)."""
 
     type: str  # "anthropic" or "openai"
-    api_key: str
+    api_key: str = ""   # optional for local endpoints that don't require auth
     base_url: Optional[str] = None
     # "openai_chat" (default) or "openai_responses" (OpenAI Responses API)
     api_format: str = "openai_chat"

@@ -213,7 +213,9 @@ _FORWARD_HEADERS = {
 
 
 def _build_anthropic_headers(request: Request, api_key: str) -> Dict[str, str]:
-    headers: Dict[str, str] = {"x-api-key": api_key}
+    headers: Dict[str, str] = {}
+    if api_key:
+        headers["x-api-key"] = api_key
     for h in _FORWARD_HEADERS:
         if v := request.headers.get(h):
             headers[h] = v
@@ -223,10 +225,10 @@ def _build_anthropic_headers(request: Request, api_key: str) -> Dict[str, str]:
 
 
 def _build_openai_headers(api_key: str) -> Dict[str, str]:
-    return {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
 
 
 # ---------------------------------------------------------------------------
