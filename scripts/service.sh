@@ -148,7 +148,7 @@ EOF
 # macOS — launchd
 # ---------------------------------------------------------------------------
 _launchd_loaded() {
-    launchctl list 2>/dev/null | grep -q "$SERVICE_LABEL"
+    launchctl list "$SERVICE_LABEL" &>/dev/null
 }
 
 _install_macos() {
