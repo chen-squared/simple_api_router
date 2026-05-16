@@ -1,24 +1,15 @@
 #!/usr/bin/env bash
-# service.sh — manage simple-api-router as a background service
+# service.sh — DEPRECATED
 #
-# Supports:
-#   macOS  — launchd  (~/Library/LaunchAgents/)
-#   Linux  — systemd user service (~/.config/systemd/user/)
+# Service management is now built into the simple-api-router executable:
 #
-# Usage:
-#   ./scripts/service.sh install [--config PATH] [--exe PATH]
-#       Install and enable the service (auto-start on login).
-#       Default config: ~/.config/simple-api-router/config.yaml
-#   ./scripts/service.sh uninstall  — stop and remove the service
-#   ./scripts/service.sh start      — start the service
-#   ./scripts/service.sh stop       — stop the service
-#   ./scripts/service.sh restart    — restart the service
-#   ./scripts/service.sh status     — show service state
-#   ./scripts/service.sh log        — tail live logs
+#   simple-api-router install [--config PATH] [--exe PATH]
+#   simple-api-router start | stop | restart | status | log | uninstall
 #
-# Hot reload: just save config.yaml — provider/model/key/retry changes apply
-# automatically within ~1 second with no restart and no dropped connections.
-# Changes to host/port require a restart.
+# This script is kept only as a fallback for environments where the Python
+# package is not installed.  Use the CLI subcommands above instead.
+#
+# ---------------------------------------------------------------------------
 
 set -euo pipefail
 
