@@ -13,8 +13,8 @@ VALID_FORMATS = frozenset({"anthropic", "openai_chat", "openai_responses", "goog
 
 _FORMAT_DEFAULT_URLS: Dict[str, str] = {
     "anthropic": "https://api.anthropic.com",
-    "openai_chat": "https://api.openai.com/v1",
-    "openai_responses": "https://api.openai.com/v1",
+    "openai_chat": "https://api.openai.com",
+    "openai_responses": "https://api.openai.com",
     "google": "https://generativelanguage.googleapis.com",
 }
 
@@ -34,10 +34,13 @@ class EndpointConfig(BaseModel):
     # Enable DeepSeek reasoning_content passthrough. None = auto-detect from model name.
     deepseek_reasoning: Optional[bool] = None
 
-    def resolve_base_url(self, api_format: str) -> str:
-        if self.base_url:
-            return self.base_url.rstrip("/")
-        return _FORMAT_DEFAULT_URLS.get(api_format, "https://api.openai.com/v1")
+    def resolve_base_url(self, api_format: str, provider_base_url: Optional[str] = None) -> str:
+        raw = self.base_url or provider_base_url or _FORMAT_DEFAULT_URLS.get(api_format, "https://api.openai.com")
+        url = raw.rstrip("/")
+        # Strip accidental trailing /v1 — proxy.py always appends the full versioned path.
+        if url.endswith("/v1"):
+            url = url[:-3]
+        return url
 
     def resolve_model(self, model: str) -> str:
         return self.model_map.get(model, model)
@@ -47,6 +50,7 @@ class ProviderConfig(BaseModel):
     """Configuration for a single upstream provider."""
 
     api_key: str = ""
+    base_url: Optional[str] = None  # inherited by endpoints that omit their own base_url
     endpoints: Dict[str, EndpointConfig]
 
     @model_validator(mode="after")

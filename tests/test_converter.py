@@ -2027,13 +2027,49 @@ class TestProviderConfigExtended(unittest.TestCase):
         from simple_api_router.config import EndpointConfig
         ep = EndpointConfig()
         self.assertEqual(ep.resolve_base_url("anthropic"), "https://api.anthropic.com")
-        self.assertEqual(ep.resolve_base_url("openai_chat"), "https://api.openai.com/v1")
+        self.assertEqual(ep.resolve_base_url("openai_chat"), "https://api.openai.com")
+        self.assertEqual(ep.resolve_base_url("openai_responses"), "https://api.openai.com")
         self.assertEqual(ep.resolve_base_url("google"), "https://generativelanguage.googleapis.com")
 
     def test_endpoint_resolve_base_url_custom(self):
         from simple_api_router.config import EndpointConfig
         ep = EndpointConfig(base_url="https://myserver.com/")
         self.assertEqual(ep.resolve_base_url("anthropic"), "https://myserver.com")
+
+    def test_endpoint_resolve_base_url_strips_trailing_v1(self):
+        from simple_api_router.config import EndpointConfig
+        ep = EndpointConfig(base_url="https://api.anthropic.com/v1")
+        self.assertEqual(ep.resolve_base_url("anthropic"), "https://api.anthropic.com")
+
+    def test_endpoint_resolve_base_url_strips_trailing_v1_with_slash(self):
+        from simple_api_router.config import EndpointConfig
+        ep = EndpointConfig(base_url="https://api.openai.com/v1/")
+        self.assertEqual(ep.resolve_base_url("openai_chat"), "https://api.openai.com")
+
+    def test_endpoint_inherits_provider_base_url(self):
+        from simple_api_router.config import EndpointConfig
+        ep = EndpointConfig()  # no base_url
+        self.assertEqual(ep.resolve_base_url("anthropic", "https://myserver.com"), "https://myserver.com")
+
+    def test_endpoint_base_url_overrides_provider(self):
+        from simple_api_router.config import EndpointConfig
+        ep = EndpointConfig(base_url="https://specific.com")
+        self.assertEqual(ep.resolve_base_url("anthropic", "https://ignored.com"), "https://specific.com")
+
+    def test_provider_base_url_field(self):
+        from simple_api_router.config import ProviderConfig, EndpointConfig
+        prov = ProviderConfig(
+            api_key="key",
+            base_url="https://shared.com",
+            endpoints={
+                "anthropic": EndpointConfig(models=["claude-3"]),
+                "openai_chat": EndpointConfig(base_url="https://other.com", models=["gpt-4o"]),
+            },
+        )
+        fmt, ep = prov.find_model("claude-3")
+        self.assertEqual(ep.resolve_base_url("anthropic", prov.base_url), "https://shared.com")
+        fmt2, ep2 = prov.find_model("gpt-4o")
+        self.assertEqual(ep2.resolve_base_url("openai_chat", prov.base_url), "https://other.com")
 
 
 # ---------------------------------------------------------------------------

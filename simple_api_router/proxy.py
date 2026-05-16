@@ -317,7 +317,7 @@ async def _proxy_anthropic(
     # Replace model with backend name; everything else passes through unchanged
     patched = {**body, "model": backend_model}
     headers = _build_anthropic_headers(request, provider.api_key)
-    base_url = endpoint.resolve_base_url("anthropic")
+    base_url = endpoint.resolve_base_url("anthropic", provider.base_url)
     url = f"{base_url}/v1/messages"
 
     if body.get("stream", False):
@@ -358,13 +358,13 @@ async def _proxy_openai(
         else is_deepseek_model(backend_model)
     )
 
-    base_url = endpoint.resolve_base_url(api_format)
+    base_url = endpoint.resolve_base_url(api_format, provider.base_url)
     headers = _build_openai_headers(provider.api_key)
     is_stream = body.get("stream", False)
 
     if api_format == "openai_responses":
         req_body = anthropic_to_responses_request(body, backend_model)
-        url = f"{base_url}/responses"
+        url = f"{base_url}/v1/responses"
 
         if is_stream:
             resp = await _streaming_request_with_retry(client, url, headers, req_body, max_retries)
@@ -388,7 +388,7 @@ async def _proxy_openai(
 
     # openai_chat (default)
     oai_body = anthropic_to_openai_request(body, backend_model, use_reasoning_content=use_reasoning)
-    url = f"{base_url}/chat/completions"
+    url = f"{base_url}/v1/chat/completions"
 
     if is_stream:
         resp = await _streaming_request_with_retry(client, url, headers, oai_body, max_retries)
@@ -427,7 +427,7 @@ async def _proxy_google(
 ) -> Any:
     from .converter_google import anthropic_to_google_request, google_to_anthropic_response, stream_google_to_anthropic
 
-    base_url = endpoint.resolve_base_url("google")
+    base_url = endpoint.resolve_base_url("google", provider.base_url)
     headers = _build_openai_headers(provider.api_key)  # Bearer auth
     is_stream = body.get("stream", False)
 

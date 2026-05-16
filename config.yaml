@@ -27,26 +27,23 @@ providers:
   # ── Multi-format upstream (all formats, one key) ──────────────────────────
   # myupstream:
   #   api_key: "${MY_KEY}"
+  #   base_url: "https://myupstream.com"   # shared base_url; endpoints inherit unless overridden
   #   endpoints:
   #     anthropic:
-  #       base_url: "https://myupstream.com"
-  #       models: [claude-opus-4-5]
+  #       models: [claude-opus-4-5]         # uses provider base_url above
   #     openai_chat:
-  #       base_url: "https://myupstream.com"
   #       models: [gpt-4o]
   #     openai_responses:
-  #       base_url: "https://myupstream.com"
   #       models: [o1-preview]
   #     google:
-  #       base_url: "https://myupstream.com"
   #       models: [gemini-2.5-pro]
 
   # ── Local / Self-Hosted (Ollama, vLLM, LM Studio) ────────────────────────
   # local:
+  #   base_url: "http://localhost:11434"
   #   endpoints:
   #     openai_chat:
-  #       base_url: "http://localhost:11434/v1"
-  #       models: [llama3.2, qwen2.5-coder]
+  #       models: [llama3.2, qwen2.5-coder]   # /v1 suffix on base_url is stripped automatically
 
   # ── Model name remapping ───────────────────────────────────────────────────
   # myprovider:
