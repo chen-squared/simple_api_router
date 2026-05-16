@@ -259,7 +259,10 @@ def _log_macos() -> None:
     stderr_log = LOG_DIR / "stderr.log"
     if stderr_log.exists():
         args.append(str(stderr_log))
-    subprocess.run(args)
+    try:
+        subprocess.run(args)
+    except KeyboardInterrupt:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -341,9 +344,12 @@ def _status_linux() -> None:
 
 def _log_linux() -> None:
     _info("Tailing logs (Ctrl+C to stop)…")
-    subprocess.run([
-        "journalctl", "--user", "-u", SERVICE_NAME, "-f", "--no-pager",
-    ])
+    try:
+        subprocess.run([
+            "journalctl", "--user", "-u", SERVICE_NAME, "-f", "--no-pager",
+        ])
+    except KeyboardInterrupt:
+        pass
 
 
 # ---------------------------------------------------------------------------
