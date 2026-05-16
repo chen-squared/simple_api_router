@@ -198,14 +198,37 @@ def parse_model(model_str: str) -> Tuple[Optional[str], str]:
     return None, clean
 
 
+_MEDIA_TYPES = frozenset({"image", "video", "document"})
+
+
+def _blocks_have_media(blocks: list) -> bool:
+    """Return True if any content block in *blocks* is a non-text media type."""
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype in ("image", "video"):
+            return True
+        if btype == "document":
+            # document blocks with source.type == "text" are plain-text and fine for
+            # text-only models; base64/url sources are PDFs or binary docs that are not.
+            src_type = (block.get("source") or {}).get("type")
+            if src_type != "text":
+                return True
+        # tool_result content can itself contain image/video blocks (e.g. a screenshot tool)
+        if btype == "tool_result":
+            nested = block.get("content", "")
+            if isinstance(nested, list) and _blocks_have_media(nested):
+                return True
+    return False
+
+
 def _request_has_media(body: Dict[str, Any]) -> bool:
-    """Return True if any message in the request contains an image or video content block."""
+    """Return True if any message in the request contains image, video, or PDF content."""
     for msg in body.get("messages", []):
         content = msg.get("content", "")
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") in ("image", "video"):
-                    return True
+        if isinstance(content, list) and _blocks_have_media(content):
+            return True
     return False
 
 

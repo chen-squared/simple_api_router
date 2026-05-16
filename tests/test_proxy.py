@@ -11,7 +11,7 @@ from simple_api_router.config import (
     RouterConfig,
     ServerConfig,
 )
-from simple_api_router.proxy import _request_has_media, parse_model, resolve_provider
+from simple_api_router.proxy import _blocks_have_media, _request_has_media, parse_model, resolve_provider
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +53,43 @@ class TestRequestHasMedia(unittest.TestCase):
         ]}
         self.assertTrue(_request_has_media(body))
 
+    def test_pdf_document_block(self):
+        body = {"messages": [self._msg([
+            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "abc"}}
+        ])]}
+        self.assertTrue(_request_has_media(body))
+
+    def test_document_url_source(self):
+        body = {"messages": [self._msg([
+            {"type": "document", "source": {"type": "url", "url": "https://example.com/doc.pdf"}}
+        ])]}
+        self.assertTrue(_request_has_media(body))
+
+    def test_document_text_source_is_not_media(self):
+        # document with source.type == "text" is plain text, text-only models can handle it
+        body = {"messages": [self._msg([
+            {"type": "document", "source": {"type": "text", "text": "some text content"}}
+        ])]}
+        self.assertFalse(_request_has_media(body))
+
+    def test_tool_result_with_nested_image(self):
+        # tool_result content can be a list of blocks (e.g. screenshot tool)
+        body = {"messages": [self._msg([
+            {"type": "tool_result", "tool_use_id": "tu_1", "content": [
+                {"type": "image", "source": {"type": "url", "url": "https://example.com/screenshot.png"}},
+                {"type": "text", "text": "see screenshot"},
+            ]}
+        ])]}
+        self.assertTrue(_request_has_media(body))
+
+    def test_tool_result_with_text_only_content(self):
+        body = {"messages": [self._msg([
+            {"type": "tool_result", "tool_use_id": "tu_1", "content": [
+                {"type": "text", "text": "result text"}
+            ]}
+        ])]}
+        self.assertFalse(_request_has_media(body))
+
     # ── negative cases ──────────────────────────────────────────────────────
 
     def test_text_only_string_content(self):
@@ -69,7 +106,7 @@ class TestRequestHasMedia(unittest.TestCase):
         ])]}
         self.assertFalse(_request_has_media(body))
 
-    def test_tool_result_block_is_not_media(self):
+    def test_tool_result_string_content_is_not_media(self):
         body = {"messages": [self._msg([
             {"type": "tool_result", "tool_use_id": "tu_1", "content": "result"}
         ])]}
