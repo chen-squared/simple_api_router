@@ -25,14 +25,41 @@ class ServerConfig(BaseModel):
     log_level: str = "INFO"
     log_file: Optional[str] = "router.log"
     max_retries: int = 3  # max retry attempts per request on upstream errors
+    # Global fallback model for text-only models that receive image/video content.
+    # Value is "provider/model" (same format as the client `model` field).
+    multimodal_fallback: Optional[str] = None
+
+
+class ModelEntry(BaseModel):
+    """Per-model attributes.  Used when a model needs extra flags beyond its name."""
+    name: str
+    # Set True to mark this model as text-only.  When a request with image/video
+    # content is routed here, the router will redirect to multimodal_fallback (or the
+    # global server.multimodal_fallback) instead of forwarding and letting the upstream
+    # return an error.
+    text_only: bool = False
+    # Override the global server.multimodal_fallback for just this model.
+    multimodal_fallback: Optional[str] = None
 
 
 class EndpointConfig(BaseModel):
     base_url: Optional[str] = None
-    models: List[str] = Field(default_factory=list)
+    # Accept either plain strings or ModelEntry dicts; both forms are normalised internally.
+    models: List[Union[str, ModelEntry]] = Field(default_factory=list)
     model_map: Dict[str, str] = Field(default_factory=dict)
     # Enable DeepSeek reasoning_content passthrough. None = auto-detect from model name.
     deepseek_reasoning: Optional[bool] = None
+
+    def model_names(self) -> List[str]:
+        """Return the list of model names (works for both str and ModelEntry items)."""
+        return [m if isinstance(m, str) else m.name for m in self.models]
+
+    def get_model_entry(self, name: str) -> ModelEntry:
+        """Return the ModelEntry for *name*, creating a default one if the model is a plain string."""
+        for m in self.models:
+            if isinstance(m, ModelEntry) and m.name == name:
+                return m
+        return ModelEntry(name=name)
 
     def resolve_base_url(self, api_format: str, provider_base_url: Optional[str] = None) -> str:
         raw = self.base_url or provider_base_url or _FORMAT_DEFAULT_URLS.get(api_format, "https://api.openai.com")
@@ -61,7 +88,7 @@ class ProviderConfig(BaseModel):
         # No duplicate model names across endpoints
         seen: Dict[str, str] = {}
         for fmt, ep in self.endpoints.items():
-            for m in ep.models:
+            for m in ep.model_names():
                 if m in seen:
                     raise ValueError(
                         f"Model '{m}' is listed in both '{seen[m]}' and '{fmt}' endpoints"
@@ -74,7 +101,7 @@ class ProviderConfig(BaseModel):
         Exact match first; wildcard (empty models list) as fallback."""
         wildcard = None
         for fmt, ep in self.endpoints.items():
-            if model in ep.models:
+            if model in ep.model_names():
                 return fmt, ep
             if not ep.models and wildcard is None:
                 wildcard = (fmt, ep)

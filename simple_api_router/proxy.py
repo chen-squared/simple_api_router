@@ -198,6 +198,17 @@ def parse_model(model_str: str) -> Tuple[Optional[str], str]:
     return None, clean
 
 
+def _request_has_media(body: Dict[str, Any]) -> bool:
+    """Return True if any message in the request contains an image or video content block."""
+    for msg in body.get("messages", []):
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") in ("image", "video"):
+                    return True
+    return False
+
+
 def resolve_provider(
     provider_name: Optional[str],
     model: str,
@@ -292,6 +303,29 @@ async def route_request(
     provider_name, model = parse_model(model_str)
     provider, endpoint, api_format, backend_model = resolve_provider(provider_name, model, config)
     max_retries = config.server.max_retries
+
+    # Multimodal fallback: if the resolved model is text-only and the request contains
+    # image or video blocks, re-route to a multimodal model instead of forwarding and
+    # letting the upstream return a (confusing) format error.
+    if _request_has_media(body):
+        entry = endpoint.get_model_entry(model)
+        if entry.text_only:
+            fallback = entry.multimodal_fallback or config.server.multimodal_fallback
+            if fallback:
+                logger.info(
+                    "text_only model '%s' received media content; routing to multimodal fallback: %s",
+                    model, fallback,
+                )
+                fb_provider_name, fb_model = parse_model(fallback)
+                provider, endpoint, api_format, backend_model = resolve_provider(
+                    fb_provider_name, fb_model, config
+                )
+            else:
+                logger.warning(
+                    "text_only model '%s' received media content but no multimodal_fallback "
+                    "is configured — forwarding anyway",
+                    model,
+                )
 
     if api_format == "anthropic":
         return await _proxy_anthropic(request, body, backend_model, provider, endpoint, client, max_retries)

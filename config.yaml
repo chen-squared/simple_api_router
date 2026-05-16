@@ -4,6 +4,10 @@ server:
   log_level: "INFO"
   log_file: "router.log"
   max_retries: 3
+  # Global multimodal fallback: when a text_only model receives an image/video request,
+  # route it here instead. Value is "provider/model" (same format as the client model field).
+  # Individual models can override this with their own multimodal_fallback field.
+  # multimodal_fallback: "google/gemini-2.5-flash"
 
 providers:
   # ── Anthropic ─────────────────────────────────────────────────────────────
@@ -43,7 +47,13 @@ providers:
   #   base_url: "http://localhost:11434"
   #   endpoints:
   #     openai_chat:
-  #       models: [llama3.2, qwen2.5-coder]   # /v1 suffix on base_url is stripped automatically
+  #       models:
+  #         - llava                          # plain string = multimodal-capable
+  #         - name: qwen2.5-coder            # dict form = with extra attributes
+  #           text_only: true               # mark as text-only
+  #           multimodal_fallback: "local/llava"  # per-model override (optional)
+  #         - name: deepseek-r1
+  #           text_only: true               # uses global server.multimodal_fallback
 
   # ── Model name remapping ───────────────────────────────────────────────────
   # myprovider:

@@ -175,9 +175,42 @@ Controls whether `reasoning_content` is passed through in requests/responses:
 - `false` — always disabled
 - omitted — auto-detected from model name (enabled for any `deepseek-*` model)
 
----
+#### `text_only` and multimodal fallback
 
-## API Endpoints
+Models can be marked as text-only when they don't support image or video content.
+When a request containing such content is routed to a `text_only` model, the router
+automatically re-routes it to a multimodal model instead of forwarding and letting the
+upstream return an error.
+
+```yaml
+server:
+  multimodal_fallback: "google/gemini-2.5-flash"   # global default
+
+providers:
+  local:
+    base_url: "http://localhost:11434"
+    endpoints:
+      openai_chat:
+        models:
+          - llava                             # plain string = multimodal-capable
+          - name: deepseek-r1                 # dict form = with extra attributes
+            text_only: true                  # uses global server.multimodal_fallback
+          - name: qwen2.5-coder:32b
+            text_only: true
+            multimodal_fallback: "local/llava"  # per-model override
+
+  google:
+    api_key: "${GOOGLE_API_KEY}"
+    endpoints:
+      google:
+        models: [gemini-2.5-flash, gemini-2.5-pro]  # multimodal, no flags needed
+```
+
+Priority: **model-level `multimodal_fallback`** > **`server.multimodal_fallback`** > warning logged, request forwarded as-is.
+
+The `model` field in the response always reflects the **original** model the client requested (routing is transparent to the client).
+
+
 
 ### `POST /v1/messages`
 
@@ -258,10 +291,10 @@ Use `model: "ant1/claude-opus-4-5"` or `model: "ant2/claude-opus-4-5"`.
 ```yaml
 providers:
   local:
-    type: openai
-    api_key: "none"
-    base_url: "http://localhost:11434/v1"
-    models: [llama3.2, qwen2.5-coder]
+    base_url: "http://localhost:11434"
+    endpoints:
+      openai_chat:
+        models: [llama3.2, qwen2.5-coder]   # /v1 suffix on base_url is stripped automatically
 ```
 
 ### OpenAI Responses API
