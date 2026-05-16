@@ -17,7 +17,7 @@ import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .config import ProviderConfig, RouterConfig
+from .config import EndpointConfig, ProviderConfig, RouterConfig
 from .converter import (
     anthropic_to_openai_request,
     anthropic_to_responses_request,
@@ -202,11 +202,8 @@ def resolve_provider(
     provider_name: Optional[str],
     model: str,
     config: RouterConfig,
-) -> Tuple[ProviderConfig, str]:
-    """Return (ProviderConfig, backend_model) for the given provider/model pair.
-
-    Raises HTTPException(404) when no matching provider is found.
-    """
+) -> Tuple[ProviderConfig, EndpointConfig, str, str]:
+    """Return (provider, endpoint, api_format, backend_model)."""
     if provider_name is not None:
         if provider_name not in config.providers:
             raise HTTPException(
@@ -215,12 +212,21 @@ def resolve_provider(
                        f"Available: {list(config.providers.keys())}",
             )
         prov = config.providers[provider_name]
-        return prov, prov.resolve_model(model)
+        result = prov.find_model(model)
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Model '{model}' not found in provider '{provider_name}'.",
+            )
+        api_format, ep = result
+        return prov, ep, api_format, ep.resolve_model(model)
 
     # No explicit provider — search by model name
     for prov in config.providers.values():
-        if not prov.models or model in prov.models:
-            return prov, prov.resolve_model(model)
+        result = prov.find_model(model)
+        if result is not None:
+            api_format, ep = result
+            return prov, ep, api_format, ep.resolve_model(model)
 
     raise HTTPException(
         status_code=404,
@@ -245,14 +251,14 @@ def _is_real_key(api_key: str) -> bool:
     return bool(api_key) and api_key.lower() not in ("none", "null", "false", "no", "0")
 
 
-def _build_anthropic_headers(request: Request, provider: "ProviderConfig") -> Dict[str, str]:
+def _build_anthropic_headers(request: Request, api_key: str) -> Dict[str, str]:
     headers: Dict[str, str] = {}
-    if _is_real_key(provider.api_key):
+    if _is_real_key(api_key):
         # Send both auth header styles so the provider can use whichever it recognises.
         # Standard Anthropic uses x-api-key; some compatible servers (e.g. ollama.com)
         # use Authorization: Bearer. Unrecognised headers are silently ignored.
-        headers["x-api-key"] = provider.api_key
-        headers["Authorization"] = f"Bearer {provider.api_key}"
+        headers["x-api-key"] = api_key
+        headers["Authorization"] = f"Bearer {api_key}"
     for h in _FORWARD_HEADERS:
         if v := request.headers.get(h):
             headers[h] = v
@@ -284,13 +290,15 @@ async def route_request(
         raise HTTPException(status_code=400, detail="'model' field is required")
 
     provider_name, model = parse_model(model_str)
-    provider, backend_model = resolve_provider(provider_name, model, config)
+    provider, endpoint, api_format, backend_model = resolve_provider(provider_name, model, config)
     max_retries = config.server.max_retries
 
-    if provider.type == "anthropic":
-        return await _proxy_anthropic(request, body, backend_model, provider, client, max_retries)
+    if api_format == "anthropic":
+        return await _proxy_anthropic(request, body, backend_model, provider, endpoint, client, max_retries)
+    elif api_format == "google":
+        return await _proxy_google(request, body, model_str, backend_model, provider, endpoint, client, max_retries)
     else:
-        return await _proxy_openai(request, body, model_str, backend_model, provider, client, max_retries)
+        return await _proxy_openai(request, body, model_str, backend_model, api_format, provider, endpoint, client, max_retries)
 
 
 # ---------------------------------------------------------------------------
@@ -302,13 +310,14 @@ async def _proxy_anthropic(
     body: Dict[str, Any],
     backend_model: str,
     provider: ProviderConfig,
+    endpoint: EndpointConfig,
     client: httpx.AsyncClient,
     max_retries: int,
 ) -> Any:
     # Replace model with backend name; everything else passes through unchanged
     patched = {**body, "model": backend_model}
-    headers = _build_anthropic_headers(request, provider)
-    base_url = provider.resolve_base_url()
+    headers = _build_anthropic_headers(request, provider.api_key)
+    base_url = endpoint.resolve_base_url("anthropic")
     url = f"{base_url}/v1/messages"
 
     if body.get("stream", False):
@@ -337,21 +346,23 @@ async def _proxy_openai(
     body: Dict[str, Any],
     original_model: str,
     backend_model: str,
+    api_format: str,
     provider: ProviderConfig,
+    endpoint: EndpointConfig,
     client: httpx.AsyncClient,
     max_retries: int,
 ) -> Any:
     use_reasoning = (
-        provider.deepseek_reasoning
-        if provider.deepseek_reasoning is not None
+        endpoint.deepseek_reasoning
+        if endpoint.deepseek_reasoning is not None
         else is_deepseek_model(backend_model)
     )
 
-    base_url = provider.resolve_base_url()
+    base_url = endpoint.resolve_base_url(api_format)
     headers = _build_openai_headers(provider.api_key)
     is_stream = body.get("stream", False)
 
-    if provider.api_format == "openai_responses":
+    if api_format == "openai_responses":
         req_body = anthropic_to_responses_request(body, backend_model)
         url = f"{base_url}/responses"
 
@@ -398,3 +409,48 @@ async def _proxy_openai(
             detail = resp.text
         raise HTTPException(status_code=resp.status_code, detail=detail)
     return JSONResponse(content=openai_to_anthropic_response(resp.json(), original_model))
+
+
+# ---------------------------------------------------------------------------
+# Google backend
+# ---------------------------------------------------------------------------
+
+async def _proxy_google(
+    request: Request,
+    body: Dict[str, Any],
+    original_model: str,
+    backend_model: str,
+    provider: ProviderConfig,
+    endpoint: EndpointConfig,
+    client: httpx.AsyncClient,
+    max_retries: int,
+) -> Any:
+    from .converter_google import anthropic_to_google_request, google_to_anthropic_response, stream_google_to_anthropic
+
+    base_url = endpoint.resolve_base_url("google")
+    headers = _build_openai_headers(provider.api_key)  # Bearer auth
+    is_stream = body.get("stream", False)
+
+    google_body = anthropic_to_google_request(body, backend_model)
+
+    if is_stream:
+        url = f"{base_url}/v1/models/{backend_model}:streamGenerateContent?alt=sse"
+        resp = await _streaming_request_with_retry(client, url, headers, google_body, max_retries)
+        return StreamingResponse(
+            _stream_converted(resp, lambda aiter: stream_google_to_anthropic(aiter, original_model), url),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    url = f"{base_url}/v1/models/{backend_model}:generateContent"
+    resp, err = await _post_with_retry(client, url, headers, google_body, max_retries)
+    if err:
+        status = resp.status_code if resp is not None else 502
+        return JSONResponse(status_code=status, content=_upstream_error_json(err))
+    if resp.status_code != 200:
+        try:
+            detail = resp.json()
+        except Exception:
+            detail = resp.text
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    return JSONResponse(content=google_to_anthropic_response(resp.json(), original_model))

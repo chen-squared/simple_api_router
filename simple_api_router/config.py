@@ -4,10 +4,19 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
+
+VALID_FORMATS = frozenset({"anthropic", "openai_chat", "openai_responses", "google"})
+
+_FORMAT_DEFAULT_URLS: Dict[str, str] = {
+    "anthropic": "https://api.anthropic.com",
+    "openai_chat": "https://api.openai.com/v1",
+    "openai_responses": "https://api.openai.com/v1",
+    "google": "https://generativelanguage.googleapis.com",
+}
 
 
 class ServerConfig(BaseModel):
@@ -18,46 +27,54 @@ class ServerConfig(BaseModel):
     max_retries: int = 3  # max retry attempts per request on upstream errors
 
 
-class ProviderConfig(BaseModel):
-    """Configuration for a single upstream provider (Anthropic or OpenAI-compatible)."""
-
-    type: str  # "anthropic" or "openai"
-    api_key: str = ""   # optional for local endpoints that don't require auth
+class EndpointConfig(BaseModel):
     base_url: Optional[str] = None
-    # "openai_chat" (default) or "openai_responses" (OpenAI Responses API)
-    api_format: str = "openai_chat"
-    # List of model names this provider exposes.  Empty list = accept any model.
     models: List[str] = Field(default_factory=list)
-    # Optional remap: external model name → backend model name.
     model_map: Dict[str, str] = Field(default_factory=dict)
-    # Enable DeepSeek reasoning_content passthrough for assistant messages.
-    # None = auto-detect from provider name / model name.
+    # Enable DeepSeek reasoning_content passthrough. None = auto-detect from model name.
     deepseek_reasoning: Optional[bool] = None
 
-    @model_validator(mode="after")
-    def _validate_fields(self) -> "ProviderConfig":
-        if self.type not in ("anthropic", "openai"):
-            raise ValueError(
-                f"provider type must be 'anthropic' or 'openai', got '{self.type}'"
-            )
-        if self.api_format not in ("openai_chat", "openai_responses"):
-            raise ValueError(
-                f"api_format must be 'openai_chat' or 'openai_responses', got '{self.api_format}'"
-            )
-        return self
-
-    def resolve_base_url(self) -> str:
+    def resolve_base_url(self, api_format: str) -> str:
         if self.base_url:
             return self.base_url.rstrip("/")
-        return (
-            "https://api.anthropic.com"
-            if self.type == "anthropic"
-            else "https://api.openai.com/v1"
-        )
+        return _FORMAT_DEFAULT_URLS.get(api_format, "https://api.openai.com/v1")
 
     def resolve_model(self, model: str) -> str:
-        """Return the backend model name for a client-facing model name."""
         return self.model_map.get(model, model)
+
+
+class ProviderConfig(BaseModel):
+    """Configuration for a single upstream provider."""
+
+    api_key: str = ""
+    endpoints: Dict[str, EndpointConfig]
+
+    @model_validator(mode="after")
+    def _validate(self) -> "ProviderConfig":
+        for fmt in self.endpoints:
+            if fmt not in VALID_FORMATS:
+                raise ValueError(f"Invalid endpoint format '{fmt}'. Valid: {sorted(VALID_FORMATS)}")
+        # No duplicate model names across endpoints
+        seen: Dict[str, str] = {}
+        for fmt, ep in self.endpoints.items():
+            for m in ep.models:
+                if m in seen:
+                    raise ValueError(
+                        f"Model '{m}' is listed in both '{seen[m]}' and '{fmt}' endpoints"
+                    )
+                seen[m] = fmt
+        return self
+
+    def find_model(self, model: str) -> Optional[Tuple[str, "EndpointConfig"]]:
+        """Return (api_format, endpoint) for model, or None.
+        Exact match first; wildcard (empty models list) as fallback."""
+        wildcard = None
+        for fmt, ep in self.endpoints.items():
+            if model in ep.models:
+                return fmt, ep
+            if not ep.models and wildcard is None:
+                wildcard = (fmt, ep)
+        return wildcard
 
 
 class RouterConfig(BaseModel):

@@ -2,88 +2,66 @@ server:
   host: "0.0.0.0"
   port: 8080
   log_level: "INFO"
-  log_file: "router.log"   # set to null to log to stdout only
-  max_retries: 3           # retry on 429/5xx/529/network errors (default: 3)
+  log_file: "router.log"
+  max_retries: 3
 
 providers:
   # ── Anthropic ─────────────────────────────────────────────────────────────
-  # Pure proxy — all Anthropic features (extended thinking, prompt caching,
-  # anthropic-beta headers, streaming) pass through verbatim.
   anthropic:
-    type: anthropic
     api_key: "${ANTHROPIC_API_KEY}"
-    models:
-      - claude-opus-4-5
-      - claude-sonnet-4-5
-      - claude-haiku-4-5
-      - claude-3-5-sonnet-20241022
-      - claude-3-5-haiku-20241022
+    endpoints:
+      anthropic:
+        models:
+          - claude-opus-4-5
+          - claude-sonnet-4-5
 
   # ── OpenAI ────────────────────────────────────────────────────────────────
-  # Full Anthropic ↔ OpenAI conversion layer (Chat Completions API).
   openai:
-    type: openai
     api_key: "${OPENAI_API_KEY}"
-    # base_url defaults to https://api.openai.com/v1
-    models:
-      - gpt-4o
-      - gpt-4o-mini
-      - o3
-      - o4-mini
+    endpoints:
+      openai_chat:
+        models: [gpt-4o, gpt-4o-mini]
+      openai_responses:
+        models: [o3, o4-mini]
 
-  # ── DeepSeek ──────────────────────────────────────────────────────────────
-  # deepseek_reasoning enables reasoning_content passthrough so Claude Code
-  # receives thinking blocks from DeepSeek's chain-of-thought models.
-  # Omit deepseek_reasoning to auto-detect from model name (deepseek-* = true).
-  deepseek:
-    type: openai
-    api_key: "${DEEPSEEK_API_KEY}"
-    base_url: "https://api.deepseek.com/v1"
-    deepseek_reasoning: true
-    models:
-      - deepseek-chat
-      - deepseek-reasoner
+  # ── Multi-format upstream (all formats, one key) ──────────────────────────
+  # myupstream:
+  #   api_key: "${MY_KEY}"
+  #   endpoints:
+  #     anthropic:
+  #       base_url: "https://myupstream.com"
+  #       models: [claude-opus-4-5]
+  #     openai_chat:
+  #       base_url: "https://myupstream.com"
+  #       models: [gpt-4o]
+  #     openai_responses:
+  #       base_url: "https://myupstream.com"
+  #       models: [o1-preview]
+  #     google:
+  #       base_url: "https://myupstream.com"
+  #       models: [gemini-2.5-pro]
 
-  # ── OpenAI Responses API (optional) ───────────────────────────────────────
-  # Use api_format: openai_responses for providers that expose /v1/responses.
-  # openai-responses:
-  #   type: openai
-  #   api_key: "${OPENAI_API_KEY}"
-  #   api_format: openai_responses
-  #   models:
-  #     - gpt-4o
-  #     - o3
-
-  # ── Second Anthropic account (for load distribution) ──────────────────────
-  # anthropic-2:
-  #   type: anthropic
-  #   api_key: "${ANTHROPIC_API_KEY_2}"
-  #   models:
-  #     - claude-opus-4-5
-  #     - claude-sonnet-4-5
-
-  # ── Local / self-hosted (Ollama, vLLM, LM Studio) ─────────────────────────
+  # ── Local / Self-Hosted (Ollama, vLLM, LM Studio) ────────────────────────
   # local:
-  #   type: openai
-  #   base_url: "http://localhost:11434/v1"   # no api_key needed for local
-  #   models:
-  #     - llama3.2
-  #     - qwen2.5-coder
-
-  # ── Provider using Anthropic-format API with Bearer auth (e.g. ollama.com) ─
-  # ollama-cloud:
-  #   type: anthropic
-  #   base_url: "https://ollama.com"
-  #   api_key: "${OLLAMA_API_KEY}"
-  #   models:
-  #     - gpt-oss:120b
+  #   endpoints:
+  #     openai_chat:
+  #       base_url: "http://localhost:11434/v1"
+  #       models: [llama3.2, qwen2.5-coder]
 
   # ── Model name remapping ───────────────────────────────────────────────────
-  # myapi:
-  #   type: openai
-  #   api_key: "${MY_API_KEY}"
-  #   base_url: "https://api.my-provider.com/v1"
-  #   models: [fast, smart]
-  #   model_map:
-  #     fast: gpt-4o-mini
-  #     smart: gpt-4o
+  # myprovider:
+  #   api_key: "${MY_KEY}"
+  #   endpoints:
+  #     openai_chat:
+  #       base_url: "https://api.example.com/v1"
+  #       models: [fast, smart]
+  #       model_map:
+  #         fast: gpt-4o-mini
+  #         smart: gpt-4o
+
+  # ── Google Gemini ─────────────────────────────────────────────────────────
+  # google:
+  #   api_key: "${GOOGLE_API_KEY}"
+  #   endpoints:
+  #     google:
+  #       models: [gemini-2.5-pro, gemini-2.5-flash]

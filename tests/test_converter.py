@@ -719,15 +719,17 @@ server:
   port: 9000
 providers:
   anthropic:
-    type: anthropic
     api_key: test-key
-    models:
-      - claude-sonnet-4-5
+    endpoints:
+      anthropic:
+        models:
+          - claude-sonnet-4-5
   openai:
-    type: openai
     api_key: sk-test
-    models:
-      - gpt-4o
+    endpoints:
+      openai_chat:
+        models:
+          - gpt-4o
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             f.write(yaml_content)
@@ -738,7 +740,7 @@ providers:
             self.assertEqual(cfg.server.port, 9000)
             self.assertIn("anthropic", cfg.providers)
             self.assertIn("openai", cfg.providers)
-            self.assertEqual(cfg.providers["anthropic"].type, "anthropic")
+            self.assertIn("anthropic", cfg.providers["anthropic"].endpoints)
         finally:
             os.unlink(path)
 
@@ -748,9 +750,10 @@ providers:
         yaml_content = """
 providers:
   test:
-    type: anthropic
     api_key: "${TEST_KEY_CONV}"
-    models: []
+    endpoints:
+      anthropic:
+        models: []
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             f.write(yaml_content)
@@ -782,13 +785,16 @@ class TestProxy(unittest.TestCase):
         self.assertEqual(model, "claude-sonnet-4-5")
 
     def test_resolve_provider_by_name(self):
-        from simple_api_router.config import ProviderConfig, RouterConfig
+        from simple_api_router.config import EndpointConfig, ProviderConfig, RouterConfig
         from simple_api_router.proxy import resolve_provider
         cfg = RouterConfig(providers={
-            "anthropic": ProviderConfig(type="anthropic", api_key="k", models=["claude-opus-4-5"]),
+            "anthropic": ProviderConfig(
+                api_key="k",
+                endpoints={"anthropic": EndpointConfig(models=["claude-opus-4-5"])},
+            ),
         })
-        prov, bmodel = resolve_provider("anthropic", "claude-opus-4-5", cfg)
-        self.assertEqual(prov.type, "anthropic")
+        prov, ep, api_format, bmodel = resolve_provider("anthropic", "claude-opus-4-5", cfg)
+        self.assertEqual(api_format, "anthropic")
         self.assertEqual(bmodel, "claude-opus-4-5")
 
     def test_resolve_provider_not_found(self):
@@ -800,17 +806,20 @@ class TestProxy(unittest.TestCase):
             resolve_provider("nonexistent", "model", cfg)
 
     def test_model_map_remapping(self):
-        from simple_api_router.config import ProviderConfig, RouterConfig
+        from simple_api_router.config import EndpointConfig, ProviderConfig, RouterConfig
         from simple_api_router.proxy import resolve_provider
         cfg = RouterConfig(providers={
             "myapi": ProviderConfig(
-                type="openai",
                 api_key="k",
-                models=["my-fast"],
-                model_map={"my-fast": "gpt-4o-mini"},
+                endpoints={
+                    "openai_chat": EndpointConfig(
+                        models=["my-fast"],
+                        model_map={"my-fast": "gpt-4o-mini"},
+                    )
+                },
             )
         })
-        prov, bmodel = resolve_provider("myapi", "my-fast", cfg)
+        prov, ep, api_format, bmodel = resolve_provider("myapi", "my-fast", cfg)
         self.assertEqual(bmodel, "gpt-4o-mini")
 
     def test_parse_model_strips_1m_suffix(self):
@@ -838,16 +847,17 @@ class TestProxy(unittest.TestCase):
         self.assertEqual(strip_model_suffixes("model"), "model")
 
     def test_resolve_provider_strips_bracket_suffix(self):
-        from simple_api_router.config import ProviderConfig, RouterConfig
+        from simple_api_router.config import EndpointConfig, ProviderConfig, RouterConfig
         from simple_api_router.proxy import resolve_provider
         cfg = RouterConfig(providers={
             "anthropic": ProviderConfig(
-                type="anthropic", api_key="k", models=["claude-opus-4-5"]
+                api_key="k",
+                endpoints={"anthropic": EndpointConfig(models=["claude-opus-4-5"])},
             ),
         })
         # Suffix is already stripped by parse_model before reaching resolve_provider,
         # so this tests that the stripped name resolves correctly.
-        prov, bmodel = resolve_provider("anthropic", "claude-opus-4-5", cfg)
+        prov, ep, api_format, bmodel = resolve_provider("anthropic", "claude-opus-4-5", cfg)
         self.assertEqual(bmodel, "claude-opus-4-5")
 
 
@@ -1794,45 +1804,35 @@ class TestBuildAnthropicHeaders(unittest.TestCase):
 
     def test_real_key_sends_both_auth_headers(self):
         from simple_api_router.proxy import _build_anthropic_headers
-        from simple_api_router.config import ProviderConfig
-        prov = ProviderConfig(type="anthropic", api_key="sk-real")
         req = self._make_request({"anthropic-version": "2023-06-01"})
-        hdrs = _build_anthropic_headers(req, prov)
+        hdrs = _build_anthropic_headers(req, "sk-real")
         self.assertEqual(hdrs["x-api-key"], "sk-real")
         self.assertEqual(hdrs["Authorization"], "Bearer sk-real")
 
     def test_fake_key_none_sends_no_auth(self):
         from simple_api_router.proxy import _build_anthropic_headers
-        from simple_api_router.config import ProviderConfig
-        prov = ProviderConfig(type="anthropic", api_key="none")
         req = self._make_request({})
-        hdrs = _build_anthropic_headers(req, prov)
+        hdrs = _build_anthropic_headers(req, "none")
         self.assertNotIn("x-api-key", hdrs)
         self.assertNotIn("Authorization", hdrs)
 
     def test_empty_key_sends_no_auth(self):
         from simple_api_router.proxy import _build_anthropic_headers
-        from simple_api_router.config import ProviderConfig
-        prov = ProviderConfig(type="anthropic", api_key="")
         req = self._make_request({})
-        hdrs = _build_anthropic_headers(req, prov)
+        hdrs = _build_anthropic_headers(req, "")
         self.assertNotIn("x-api-key", hdrs)
         self.assertNotIn("Authorization", hdrs)
 
     def test_anthropic_version_forwarded(self):
         from simple_api_router.proxy import _build_anthropic_headers
-        from simple_api_router.config import ProviderConfig
-        prov = ProviderConfig(type="anthropic", api_key="sk-real")
         req = self._make_request({"anthropic-version": "2024-01-01"})
-        hdrs = _build_anthropic_headers(req, prov)
+        hdrs = _build_anthropic_headers(req, "sk-real")
         self.assertEqual(hdrs["anthropic-version"], "2024-01-01")
 
     def test_default_anthropic_version_injected_when_missing(self):
         from simple_api_router.proxy import _build_anthropic_headers
-        from simple_api_router.config import ProviderConfig
-        prov = ProviderConfig(type="anthropic", api_key="sk-real")
         req = self._make_request({})
-        hdrs = _build_anthropic_headers(req, prov)
+        hdrs = _build_anthropic_headers(req, "sk-real")
         self.assertEqual(hdrs["anthropic-version"], "2023-06-01")
 
 
@@ -1870,9 +1870,10 @@ class TestFindUnexpanded(unittest.TestCase):
         yaml_content = """
 providers:
   test:
-    type: anthropic
     api_key: "${LOAD_CONFIG_MISSING_VAR}"
-    models: []
+    endpoints:
+      anthropic:
+        models: []
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             f.write(yaml_content)
@@ -1956,25 +1957,539 @@ class TestRetryExhaustion(unittest.TestCase):
 
 
 class TestProviderConfigExtended(unittest.TestCase):
-    def test_default_api_format_is_openai_chat(self):
-        cfg = ProviderConfig(type="openai", api_key="k")
-        self.assertEqual(cfg.api_format, "openai_chat")
+    def test_valid_endpoint_formats_accepted(self):
+        from simple_api_router.config import EndpointConfig, ProviderConfig
+        cfg = ProviderConfig(api_key="k", endpoints={
+            "anthropic": EndpointConfig(),
+            "openai_chat": EndpointConfig(),
+        })
+        self.assertIn("anthropic", cfg.endpoints)
+        self.assertIn("openai_chat", cfg.endpoints)
 
-    def test_openai_responses_api_format_accepted(self):
-        cfg = ProviderConfig(type="openai", api_key="k", api_format="openai_responses")
-        self.assertEqual(cfg.api_format, "openai_responses")
+    def test_all_valid_formats_accepted(self):
+        from simple_api_router.config import EndpointConfig, ProviderConfig, VALID_FORMATS
+        for fmt in VALID_FORMATS:
+            cfg = ProviderConfig(api_key="k", endpoints={fmt: EndpointConfig()})
+            self.assertIn(fmt, cfg.endpoints)
 
-    def test_invalid_api_format_raises(self):
+    def test_invalid_endpoint_format_raises(self):
+        from simple_api_router.config import EndpointConfig, ProviderConfig
         with self.assertRaises(Exception):
-            ProviderConfig(type="openai", api_key="k", api_format="invalid_format")
+            ProviderConfig(api_key="k", endpoints={"invalid_format": EndpointConfig()})
+
+    def test_duplicate_model_across_endpoints_raises(self):
+        from simple_api_router.config import EndpointConfig, ProviderConfig
+        with self.assertRaises(Exception):
+            ProviderConfig(api_key="k", endpoints={
+                "anthropic": EndpointConfig(models=["shared-model"]),
+                "openai_chat": EndpointConfig(models=["shared-model"]),
+            })
 
     def test_deepseek_reasoning_default_none(self):
-        cfg = ProviderConfig(type="openai", api_key="k")
-        self.assertIsNone(cfg.deepseek_reasoning)
+        from simple_api_router.config import EndpointConfig
+        ep = EndpointConfig()
+        self.assertIsNone(ep.deepseek_reasoning)
 
     def test_deepseek_reasoning_can_be_set(self):
-        cfg = ProviderConfig(type="openai", api_key="k", deepseek_reasoning=True)
-        self.assertTrue(cfg.deepseek_reasoning)
+        from simple_api_router.config import EndpointConfig
+        ep = EndpointConfig(deepseek_reasoning=True)
+        self.assertTrue(ep.deepseek_reasoning)
+
+    def test_find_model_exact_match(self):
+        from simple_api_router.config import EndpointConfig, ProviderConfig
+        prov = ProviderConfig(api_key="k", endpoints={
+            "anthropic": EndpointConfig(models=["claude-opus-4-5"]),
+            "openai_chat": EndpointConfig(models=["gpt-4o"]),
+        })
+        result = prov.find_model("gpt-4o")
+        self.assertIsNotNone(result)
+        fmt, ep = result
+        self.assertEqual(fmt, "openai_chat")
+
+    def test_find_model_wildcard_fallback(self):
+        from simple_api_router.config import EndpointConfig, ProviderConfig
+        prov = ProviderConfig(api_key="k", endpoints={
+            "openai_chat": EndpointConfig(models=[]),  # wildcard
+        })
+        result = prov.find_model("any-model")
+        self.assertIsNotNone(result)
+        fmt, ep = result
+        self.assertEqual(fmt, "openai_chat")
+
+    def test_find_model_not_found_returns_none(self):
+        from simple_api_router.config import EndpointConfig, ProviderConfig
+        prov = ProviderConfig(api_key="k", endpoints={
+            "anthropic": EndpointConfig(models=["claude-opus-4-5"]),
+        })
+        self.assertIsNone(prov.find_model("unknown-model"))
+
+    def test_endpoint_resolve_base_url_default(self):
+        from simple_api_router.config import EndpointConfig
+        ep = EndpointConfig()
+        self.assertEqual(ep.resolve_base_url("anthropic"), "https://api.anthropic.com")
+        self.assertEqual(ep.resolve_base_url("openai_chat"), "https://api.openai.com/v1")
+        self.assertEqual(ep.resolve_base_url("google"), "https://generativelanguage.googleapis.com")
+
+    def test_endpoint_resolve_base_url_custom(self):
+        from simple_api_router.config import EndpointConfig
+        ep = EndpointConfig(base_url="https://myserver.com/")
+        self.assertEqual(ep.resolve_base_url("anthropic"), "https://myserver.com")
+
+
+# ---------------------------------------------------------------------------
+# Google Gemini converter
+# ---------------------------------------------------------------------------
+
+class TestGoogleConverter(unittest.TestCase):
+    """Tests for converter_google.py — Anthropic ↔ Gemini format conversion."""
+
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    async def _collect_stream(self, sse_chunks):
+        """Collect all SSE events from stream_google_to_anthropic over raw bytes."""
+        from simple_api_router.converter_google import stream_google_to_anthropic
+
+        async def _source():
+            for c in sse_chunks:
+                yield c
+
+        events = []
+        async for raw in stream_google_to_anthropic(_source(), "google/gemini-2.0-flash"):
+            for line in raw.decode().split("\n"):
+                if line.startswith("event: "):
+                    events.append(("event", line[7:]))
+                elif line.startswith("data: "):
+                    events.append(("data", json.loads(line[6:])))
+        return events
+
+    # ------------------------------------------------------------------
+    # anthropic_to_google_request
+    # ------------------------------------------------------------------
+
+    def test_simple_text_message(self):
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "google/gemini-2.0-flash",
+            "max_tokens": 512,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        self.assertEqual(result["contents"][0]["role"], "user")
+        self.assertEqual(result["contents"][0]["parts"][0]["text"], "Hello")
+        self.assertEqual(result["generationConfig"]["maxOutputTokens"], 512)
+
+    def test_assistant_role_becomes_model(self):
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": "Hello!"},
+            ],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        self.assertEqual(result["contents"][1]["role"], "model")
+
+    def test_system_string_becomes_system_instruction(self):
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "system": "Be concise.",
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        self.assertEqual(result["systemInstruction"]["parts"][0]["text"], "Be concise.")
+
+    def test_system_list_merged(self):
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "system": [
+                {"type": "text", "text": "Part A."},
+                {"type": "text", "text": "Part B."},
+            ],
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        text = result["systemInstruction"]["parts"][0]["text"]
+        self.assertIn("Part A.", text)
+        self.assertIn("Part B.", text)
+
+    def test_generation_config_fields(self):
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x",
+            "max_tokens": 256,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "stop_sequences": ["END"],
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        gc = result["generationConfig"]
+        self.assertEqual(gc["maxOutputTokens"], 256)
+        self.assertEqual(gc["temperature"], 0.7)
+        self.assertEqual(gc["topP"], 0.9)
+        self.assertEqual(gc["stopSequences"], ["END"])
+
+    def test_tools_converted_to_function_declarations(self):
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Calculate"}],
+            "tools": [
+                {
+                    "name": "calculator",
+                    "description": "Does math",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"expr": {"type": "string"}},
+                        "required": ["expr"],
+                    },
+                }
+            ],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        decls = result["tools"][0]["functionDeclarations"]
+        self.assertEqual(len(decls), 1)
+        self.assertEqual(decls[0]["name"], "calculator")
+        self.assertEqual(decls[0]["description"], "Does math")
+        self.assertIn("properties", decls[0]["parameters"])
+
+    def test_tool_choice_auto(self):
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [{"name": "t", "input_schema": {}}],
+            "tool_choice": {"type": "auto"},
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        self.assertEqual(result["toolConfig"]["functionCallingConfig"]["mode"], "AUTO")
+
+    def test_tool_choice_none(self):
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [{"name": "t", "input_schema": {}}],
+            "tool_choice": {"type": "none"},
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        self.assertEqual(result["toolConfig"]["functionCallingConfig"]["mode"], "NONE")
+
+    def test_tool_choice_specific_tool(self):
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [{"name": "calculator", "input_schema": {}}],
+            "tool_choice": {"type": "tool", "name": "calculator"},
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        fc = result["toolConfig"]["functionCallingConfig"]
+        self.assertEqual(fc["mode"], "ANY")
+        self.assertEqual(fc["allowedFunctionNames"], ["calculator"])
+
+    def test_tool_use_in_assistant_message(self):
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "Calculate 2+2"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "toolu_01", "name": "calculator", "input": {"expr": "2+2"}}
+                    ],
+                },
+            ],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        assistant_parts = result["contents"][1]["parts"]
+        self.assertEqual(assistant_parts[0]["functionCall"]["name"], "calculator")
+        self.assertEqual(assistant_parts[0]["functionCall"]["args"], {"expr": "2+2"})
+
+    def test_tool_result_resolves_name_from_history(self):
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "Calculate 2+2"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "toolu_01", "name": "calculator", "input": {"expr": "2+2"}}
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_01", "content": "4"}
+                    ],
+                },
+            ],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        user_parts = result["contents"][2]["parts"]
+        fr = user_parts[0]["functionResponse"]
+        self.assertEqual(fr["name"], "calculator")
+        self.assertEqual(fr["response"]["output"], "4")
+
+    def test_tool_result_fallback_to_id_when_name_not_found(self):
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "unknown_id", "content": "result"}
+                    ],
+                }
+            ],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        fr = result["contents"][0]["parts"][0]["functionResponse"]
+        self.assertEqual(fr["name"], "unknown_id")
+
+    def test_image_base64_converted(self):
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "abc123",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        part = result["contents"][0]["parts"][0]
+        self.assertEqual(part["inlineData"]["mimeType"], "image/png")
+        self.assertEqual(part["inlineData"]["data"], "abc123")
+
+    def test_thinking_blocks_skipped(self):
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "internal thought"},
+                        {"type": "text", "text": "Answer"},
+                    ],
+                }
+            ],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        parts = result["contents"][0]["parts"]
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(parts[0]["text"], "Answer")
+
+    # ------------------------------------------------------------------
+    # google_to_anthropic_response
+    # ------------------------------------------------------------------
+
+    def test_response_simple_text(self):
+        from simple_api_router.converter_google import google_to_anthropic_response
+        data = {
+            "candidates": [
+                {
+                    "content": {"parts": [{"text": "Hello there"}]},
+                    "finishReason": "STOP",
+                }
+            ],
+            "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 3, "totalTokenCount": 8},
+        }
+        result = google_to_anthropic_response(data, "google/gemini-2.0-flash")
+        self.assertEqual(result["role"], "assistant")
+        self.assertEqual(result["content"][0]["type"], "text")
+        self.assertEqual(result["content"][0]["text"], "Hello there")
+        self.assertEqual(result["stop_reason"], "end_turn")
+        self.assertEqual(result["usage"]["input_tokens"], 5)
+        self.assertEqual(result["usage"]["output_tokens"], 3)
+
+    def test_response_max_tokens_finish_reason(self):
+        from simple_api_router.converter_google import google_to_anthropic_response
+        data = {
+            "candidates": [
+                {
+                    "content": {"parts": [{"text": "Truncated"}]},
+                    "finishReason": "MAX_TOKENS",
+                }
+            ],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5, "totalTokenCount": 15},
+        }
+        result = google_to_anthropic_response(data, "google/gemini-2.0-flash")
+        self.assertEqual(result["stop_reason"], "max_tokens")
+
+    def test_response_stop_sequence(self):
+        from simple_api_router.converter_google import google_to_anthropic_response
+        data = {
+            "candidates": [
+                {
+                    "content": {"parts": [{"text": "Answer"}]},
+                    "finishReason": "STOP_SEQUENCE",
+                }
+            ],
+        }
+        result = google_to_anthropic_response(data, "google/gemini-2.0-flash")
+        self.assertEqual(result["stop_reason"], "stop_sequence")
+
+    def test_response_function_call(self):
+        from simple_api_router.converter_google import google_to_anthropic_response
+        data = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {"functionCall": {"name": "calculator", "args": {"expr": "1+1"}}}
+                        ]
+                    },
+                    "finishReason": "STOP",
+                }
+            ],
+        }
+        result = google_to_anthropic_response(data, "google/gemini-2.0-flash")
+        self.assertEqual(result["stop_reason"], "tool_use")
+        tool = result["content"][0]
+        self.assertEqual(tool["type"], "tool_use")
+        self.assertEqual(tool["name"], "calculator")
+        self.assertEqual(tool["input"], {"expr": "1+1"})
+        self.assertTrue(tool["id"].startswith("toolu_"))
+
+    def test_response_safety_block(self):
+        from simple_api_router.converter_google import google_to_anthropic_response
+        data = {
+            "promptFeedback": {"blockReason": "SAFETY"},
+            "candidates": [],
+        }
+        result = google_to_anthropic_response(data, "google/gemini-2.0-flash")
+        self.assertEqual(result["stop_reason"], "end_turn")
+        self.assertIn("SAFETY", result["content"][0]["text"])
+
+    def test_response_empty_candidates(self):
+        from simple_api_router.converter_google import google_to_anthropic_response
+        data = {"candidates": []}
+        result = google_to_anthropic_response(data, "google/gemini-2.0-flash")
+        self.assertEqual(result["content"], [])
+        self.assertEqual(result["stop_reason"], "end_turn")
+
+    # ------------------------------------------------------------------
+    # stream_google_to_anthropic
+    # ------------------------------------------------------------------
+
+    def _make_sse_chunk(self, parts, finish_reason=None, usage=None):
+        candidate = {"content": {"parts": parts}}
+        if finish_reason:
+            candidate["finishReason"] = finish_reason
+        data = {"candidates": [candidate]}
+        if usage:
+            data["usageMetadata"] = usage
+        return f"data: {json.dumps(data)}\n\n".encode()
+
+    def test_stream_text(self):
+        chunks = [
+            self._make_sse_chunk([{"text": "Hello "}]),
+            self._make_sse_chunk([{"text": "world"}], finish_reason="STOP",
+                                  usage={"promptTokenCount": 3, "candidatesTokenCount": 2, "totalTokenCount": 5}),
+        ]
+        events = self._run(self._collect_stream(chunks))
+        types = [d["type"] for k, d in events if k == "data"]
+        self.assertIn("message_start", types)
+        self.assertIn("content_block_start", types)
+        self.assertIn("content_block_delta", types)
+        self.assertIn("content_block_stop", types)
+        self.assertIn("message_delta", types)
+        self.assertIn("message_stop", types)
+
+        # Collect text from all text_delta events
+        text = "".join(
+            d["delta"]["text"]
+            for _, d in events
+            if isinstance(d, dict) and d.get("type") == "content_block_delta"
+            and d.get("delta", {}).get("type") == "text_delta"
+        )
+        self.assertEqual(text, "Hello world")
+
+    def test_stream_stop_reason_end_turn(self):
+        chunks = [self._make_sse_chunk([{"text": "Hi"}], finish_reason="STOP")]
+        events = self._run(self._collect_stream(chunks))
+        delta = next(d for _, d in events if isinstance(d, dict) and d.get("type") == "message_delta")
+        self.assertEqual(delta["delta"]["stop_reason"], "end_turn")
+
+    def test_stream_stop_reason_max_tokens(self):
+        chunks = [self._make_sse_chunk([{"text": "..."}], finish_reason="MAX_TOKENS")]
+        events = self._run(self._collect_stream(chunks))
+        delta = next(d for _, d in events if isinstance(d, dict) and d.get("type") == "message_delta")
+        self.assertEqual(delta["delta"]["stop_reason"], "max_tokens")
+
+    def test_stream_tool_use(self):
+        chunks = [
+            self._make_sse_chunk(
+                [{"functionCall": {"name": "calculator", "args": {"expr": "2+2"}}}],
+                finish_reason="STOP",
+            )
+        ]
+        events = self._run(self._collect_stream(chunks))
+        types = [d["type"] for k, d in events if k == "data"]
+        self.assertIn("content_block_start", types)
+        self.assertIn("content_block_delta", types)
+
+        # Find the tool_use block_start
+        tool_start = next(
+            d for _, d in events
+            if isinstance(d, dict) and d.get("type") == "content_block_start"
+            and d.get("content_block", {}).get("type") == "tool_use"
+        )
+        self.assertEqual(tool_start["content_block"]["name"], "calculator")
+
+        # stop_reason should be tool_use
+        delta = next(d for _, d in events if isinstance(d, dict) and d.get("type") == "message_delta")
+        self.assertEqual(delta["delta"]["stop_reason"], "tool_use")
+
+    def test_stream_usage_in_message_delta(self):
+        chunks = [
+            self._make_sse_chunk(
+                [{"text": "Hi"}],
+                finish_reason="STOP",
+                usage={"promptTokenCount": 10, "candidatesTokenCount": 5, "totalTokenCount": 15},
+            )
+        ]
+        events = self._run(self._collect_stream(chunks))
+        delta = next(d for _, d in events if isinstance(d, dict) and d.get("type") == "message_delta")
+        self.assertEqual(delta["usage"]["output_tokens"], 5)
+
+    def test_stream_message_start_present(self):
+        chunks = [self._make_sse_chunk([{"text": "Hi"}], finish_reason="STOP")]
+        events = self._run(self._collect_stream(chunks))
+        start = next(d for _, d in events if isinstance(d, dict) and d.get("type") == "message_start")
+        self.assertEqual(start["message"]["role"], "assistant")
+        self.assertEqual(start["message"]["model"], "google/gemini-2.0-flash")
 
 
 if __name__ == "__main__":

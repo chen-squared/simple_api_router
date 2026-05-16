@@ -116,13 +116,14 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         cfg: RouterConfig = request.app.state.config
         model_data = []
         for prov_name, prov in cfg.providers.items():
-            for m in prov.models:
-                model_data.append({
-                    "id": f"{prov_name}/{m}",
-                    "object": "model",
-                    "created": 0,
-                    "owned_by": prov_name,
-                })
+            for fmt, ep in prov.endpoints.items():
+                for m in ep.models:
+                    model_data.append({
+                        "id": f"{prov_name}/{m}",
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": prov_name,
+                    })
         return JSONResponse({"object": "list", "data": model_data})
 
     # ------------------------------------------------------------------
@@ -146,11 +147,13 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         cfg: RouterConfig = request.app.state.config
         provider_info = {}
         for name, prov in cfg.providers.items():
-            provider_info[name] = {
-                "type": prov.type,
-                "models": prov.models,
-                "base_url": prov.resolve_base_url(),
-            }
+            endpoints_info = {}
+            for fmt, ep in prov.endpoints.items():
+                endpoints_info[fmt] = {
+                    "base_url": ep.resolve_base_url(fmt),
+                    "models": ep.models,
+                }
+            provider_info[name] = {"endpoints": endpoints_info}
         return JSONResponse({"providers": provider_info})
 
     return app
