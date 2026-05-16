@@ -262,6 +262,114 @@ class TestMultimodalFallbackRouting(unittest.TestCase):
         body = self._image_body("local/deepseek-r1")
         self.assertTrue(_request_has_media(body))
 
+    # ── helper: simulate route_request() decision without HTTP ──────────────
+
+    def _decide(self, body: dict, config) -> tuple:
+        """
+        Run the same fallback-decision logic as route_request() and return
+        (api_format, backend_model) that would actually be used.
+        """
+        from simple_api_router.proxy import parse_model, resolve_provider, _request_has_media
+        model_str = body["model"]
+        provider_name, model = parse_model(model_str)
+        provider, endpoint, api_format, backend_model = resolve_provider(provider_name, model, config)
+
+        if _request_has_media(body):
+            entry = endpoint.get_model_entry(model)
+            if entry.text_only:
+                fallback = entry.multimodal_fallback or config.server.multimodal_fallback
+                if fallback:
+                    fb_prov_name, fb_model = parse_model(fallback)
+                    _, _, api_format, backend_model = resolve_provider(fb_prov_name, fb_model, config)
+
+        return api_format, backend_model
+
+    # ── routing decision: text_only model ────────────────────────────────────
+
+    def test_text_only_model_text_request_stays_on_primary(self):
+        """text_only model + no media → primary model used, no fallback."""
+        config = _make_config(global_fallback="vision/gpt-4o",
+                              fallback_provider_name="vision", fallback_model="gpt-4o")
+        body = self._text_body("local/deepseek-r1")
+        _, backend = self._decide(body, config)
+        # Must stay on deepseek-r1, not be re-routed to gpt-4o
+        self.assertEqual(backend, "deepseek-r1")
+
+    def test_text_only_model_image_request_uses_fallback(self):
+        """text_only model + image → fallback model used."""
+        config = _make_config(global_fallback="vision/gpt-4o",
+                              fallback_provider_name="vision", fallback_model="gpt-4o")
+        body = self._image_body("local/deepseek-r1")
+        _, backend = self._decide(body, config)
+        self.assertEqual(backend, "gpt-4o")
+
+    def test_text_only_model_pdf_request_uses_fallback(self):
+        """text_only model + PDF document → fallback model used."""
+        config = _make_config(global_fallback="vision/gpt-4o",
+                              fallback_provider_name="vision", fallback_model="gpt-4o")
+        body = {
+            "model": "local/deepseek-r1",
+            "messages": [{"role": "user", "content": [
+                {"type": "document", "source": {"type": "base64",
+                                                "media_type": "application/pdf", "data": "abc"}},
+                {"type": "text", "text": "summarise this"},
+            ]}],
+            "max_tokens": 512,
+        }
+        _, backend = self._decide(body, config)
+        self.assertEqual(backend, "gpt-4o")
+
+    def test_text_only_model_text_document_stays_on_primary(self):
+        """text_only model + document with text source → NOT media, stays on primary."""
+        config = _make_config(global_fallback="vision/gpt-4o",
+                              fallback_provider_name="vision", fallback_model="gpt-4o")
+        body = {
+            "model": "local/deepseek-r1",
+            "messages": [{"role": "user", "content": [
+                {"type": "document", "source": {"type": "text", "text": "plain text doc"}},
+            ]}],
+            "max_tokens": 512,
+        }
+        _, backend = self._decide(body, config)
+        self.assertEqual(backend, "deepseek-r1")
+
+    def test_text_only_model_tool_result_image_uses_fallback(self):
+        """text_only model + tool_result containing image → fallback model used."""
+        config = _make_config(global_fallback="vision/gpt-4o",
+                              fallback_provider_name="vision", fallback_model="gpt-4o")
+        body = {
+            "model": "local/deepseek-r1",
+            "messages": [{"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu_1", "content": [
+                    {"type": "image", "source": {"type": "url",
+                                                 "url": "https://x.com/screenshot.png"}},
+                ]},
+            ]}],
+            "max_tokens": 512,
+        }
+        _, backend = self._decide(body, config)
+        self.assertEqual(backend, "gpt-4o")
+
+    def test_non_text_only_model_image_stays_on_primary(self):
+        """Model without text_only=True receives image → NOT re-routed (let upstream handle)."""
+        config = _make_config(
+            global_fallback="vision/gpt-4o",
+            model_entries=["llava"],
+            fallback_provider_name="vision",
+            fallback_model="gpt-4o",
+        )
+        body = self._image_body("local/llava")
+        _, backend = self._decide(body, config)
+        # llava is multimodal-capable; must NOT be re-routed to gpt-4o
+        self.assertEqual(backend, "llava")
+
+    def test_text_only_model_no_fallback_configured_stays_on_primary(self):
+        """text_only model + image but no fallback configured → stays on primary (warning path)."""
+        config = _make_config(global_fallback=None)
+        body = self._image_body("local/deepseek-r1")
+        _, backend = self._decide(body, config)
+        self.assertEqual(backend, "deepseek-r1")
+
     # ── resolve_provider with ModelEntry ────────────────────────────────────
 
     def test_resolve_text_only_model_entry(self):
@@ -295,12 +403,31 @@ class TestMultimodalFallbackRouting(unittest.TestCase):
             fallback_provider_name="vision",
             fallback_model="gpt-4o",
         )
-        _, model = parse_model("local/deepseek-r1")
-        _, ep, _, _ = resolve_provider("local", model, config)
-        entry = ep.get_model_entry(model)
+        # Verify model-level fallback wins
+        body = self._image_body("local/deepseek-r1")
+        _, backend = self._decide(body, config)
+        self.assertEqual(backend, "gpt-4o")
 
-        fallback_str = entry.multimodal_fallback or config.server.multimodal_fallback
-        self.assertEqual(fallback_str, "vision/gpt-4o")
+    def test_model_level_fallback_independent_of_global(self):
+        """Model with its own fallback uses it even when global points elsewhere."""
+        vision_ep = EndpointConfig(base_url="https://v.com", models=["vision-model"])
+        vision_prov = ProviderConfig(api_key="k", endpoints={"openai_chat": vision_ep})
+        other_ep = EndpointConfig(base_url="https://o.com", models=["other-model"])
+        other_prov = ProviderConfig(api_key="k", endpoints={"openai_chat": other_ep})
+        primary_ep = EndpointConfig(
+            base_url="http://localhost:11434",
+            models=[ModelEntry(name="deepseek-r1", text_only=True,
+                               multimodal_fallback="vision/vision-model")],
+        )
+        primary_prov = ProviderConfig(api_key="", endpoints={"openai_chat": primary_ep})
+        config = RouterConfig(
+            server=ServerConfig(multimodal_fallback="other/other-model"),
+            providers={"local": primary_prov, "vision": vision_prov, "other": other_prov},
+        )
+        body = self._image_body("local/deepseek-r1")
+        _, backend = self._decide(body, config)
+        # model-level fallback "vision/vision-model" wins over global "other/other-model"
+        self.assertEqual(backend, "vision-model")
 
     def test_no_fallback_configured_returns_none(self):
         """When neither model nor server has a fallback, fallback_str is None."""
@@ -323,13 +450,7 @@ class TestMultimodalFallbackRouting(unittest.TestCase):
         _, model = parse_model("local/llava")
         _, ep, _, _ = resolve_provider("local", model, config)
         entry = ep.get_model_entry(model)
-
         self.assertFalse(entry.text_only)
-        # No fallback should be applied
-        fallback_str = None
-        if entry.text_only:
-            fallback_str = entry.multimodal_fallback or config.server.multimodal_fallback
-        self.assertIsNone(fallback_str)
 
 
 if __name__ == "__main__":
