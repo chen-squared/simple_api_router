@@ -2425,7 +2425,7 @@ class TestGoogleConverter(unittest.TestCase):
             "candidates": [],
         }
         result = google_to_anthropic_response(data, "google/gemini-2.0-flash")
-        self.assertEqual(result["stop_reason"], "end_turn")
+        self.assertEqual(result["stop_reason"], "refusal")
         self.assertIn("SAFETY", result["content"][0]["text"])
 
     def test_response_empty_candidates(self):
@@ -2526,6 +2526,373 @@ class TestGoogleConverter(unittest.TestCase):
         start = next(d for _, d in events if isinstance(d, dict) and d.get("type") == "message_start")
         self.assertEqual(start["message"]["role"], "assistant")
         self.assertEqual(start["message"]["model"], "google/gemini-2.0-flash")
+
+    # ------------------------------------------------------------------
+    # cc-switch ported: request (TEST 5, 16, 17)
+    # ------------------------------------------------------------------
+
+    def test_parameters_json_schema_for_additional_properties(self):
+        """TEST 5 (cc-switch): additionalProperties triggers parametersJsonSchema; $schema stripped."""
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [
+                {
+                    "name": "my_tool",
+                    "description": "Does stuff",
+                    "input_schema": {
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "type": "object",
+                        "properties": {"x": {"type": "string"}},
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        decl = result["tools"][0]["functionDeclarations"][0]
+        # Must use parametersJsonSchema, not parameters
+        self.assertIn("parametersJsonSchema", decl)
+        self.assertNotIn("parameters", decl)
+        # $schema must be stripped
+        self.assertNotIn("$schema", decl["parametersJsonSchema"])
+        # additionalProperties is preserved
+        self.assertFalse(decl["parametersJsonSchema"]["additionalProperties"])
+
+    def test_parameters_json_schema_not_used_for_simple_schema(self):
+        """TEST 5 variant: plain schema stays as parameters, not parametersJsonSchema."""
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [
+                {
+                    "name": "plain",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"cmd": {"type": "string"}},
+                        "required": ["cmd"],
+                    },
+                }
+            ],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        decl = result["tools"][0]["functionDeclarations"][0]
+        self.assertIn("parameters", decl)
+        self.assertNotIn("parametersJsonSchema", decl)
+
+    def test_synthesized_id_stripped_from_function_call_in_request(self):
+        """TEST 16 (cc-switch): tool_use with synthesised toolu_* id → no id in functionCall."""
+        from simple_api_router.converter_google import anthropic_to_google_request
+        synth_id = "toolu_" + "a" * 24
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": synth_id,
+                            "name": "Bash",
+                            "input": {"command": "ls"},
+                        }
+                    ],
+                }
+            ],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        fc = result["contents"][0]["parts"][0]["functionCall"]
+        self.assertNotIn("id", fc)
+
+    def test_synthesized_id_stripped_from_function_response_in_request(self):
+        """TEST 16 (cc-switch): tool_result with synthesised toolu_* id → no id in functionResponse."""
+        from simple_api_router.converter_google import anthropic_to_google_request
+        synth_id = "toolu_" + "b" * 24
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [
+                # Provide the tool_use so the name is in the map
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": synth_id, "name": "Bash", "input": {}}
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": synth_id, "content": "ok"}
+                    ],
+                },
+            ],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        fr = result["contents"][1]["parts"][0]["functionResponse"]
+        self.assertNotIn("id", fr)
+
+    def test_genuine_id_preserved_in_function_call_request(self):
+        """TEST 17 (cc-switch): tool_use with real Gemini id → id preserved in functionCall."""
+        from simple_api_router.converter_google import anthropic_to_google_request
+        real_id = "call_real_1"
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": real_id,
+                            "name": "Bash",
+                            "input": {"command": "ls"},
+                        }
+                    ],
+                }
+            ],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        fc = result["contents"][0]["parts"][0]["functionCall"]
+        self.assertEqual(fc["id"], real_id)
+
+    def test_genuine_id_preserved_in_function_response_request(self):
+        """TEST 17 (cc-switch): tool_result with real Gemini id → id preserved in functionResponse."""
+        from simple_api_router.converter_google import anthropic_to_google_request
+        real_id = "call_real_1"
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": real_id, "name": "Bash", "input": {}}
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": real_id, "content": "done"}
+                    ],
+                },
+            ],
+        }
+        result = anthropic_to_google_request(body, "gemini-2.0-flash")
+        fr = result["contents"][1]["parts"][0]["functionResponse"]
+        self.assertEqual(fr["id"], real_id)
+
+    # ------------------------------------------------------------------
+    # cc-switch ported: response (TEST 6, 7, 10, responseId)
+    # ------------------------------------------------------------------
+
+    def test_response_uses_response_id_from_gemini(self):
+        """responseId in Gemini response → used as Anthropic message id."""
+        from simple_api_router.converter_google import google_to_anthropic_response
+        data = {
+            "responseId": "resp_1",
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {"parts": [{"text": "Hi"}]},
+                }
+            ],
+            "usageMetadata": {"promptTokenCount": 10, "totalTokenCount": 12},
+        }
+        result = google_to_anthropic_response(data, "gemini-2.0-flash")
+        self.assertEqual(result["id"], "resp_1")
+
+    def test_response_cache_read_tokens(self):
+        """TEST 6 (cc-switch): cachedContentTokenCount → cache_read_input_tokens in usage."""
+        from simple_api_router.converter_google import google_to_anthropic_response
+        data = {
+            "responseId": "resp_1",
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {"parts": [{"text": "Hello"}]},
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": 12,
+                "totalTokenCount": 20,
+                "cachedContentTokenCount": 3,
+            },
+        }
+        result = google_to_anthropic_response(data, "gemini-2.0-flash")
+        self.assertEqual(result["usage"]["input_tokens"], 12)
+        self.assertEqual(result["usage"]["output_tokens"], 8)   # 20 - 12
+        self.assertEqual(result["usage"]["cache_read_input_tokens"], 3)
+
+    def test_response_no_cache_tokens_omits_field(self):
+        """cache_read_input_tokens should not appear when cachedContentTokenCount is absent."""
+        from simple_api_router.converter_google import google_to_anthropic_response
+        data = {
+            "candidates": [
+                {"finishReason": "STOP", "content": {"parts": [{"text": "Hi"}]}}
+            ],
+            "usageMetadata": {"promptTokenCount": 5, "totalTokenCount": 8},
+        }
+        result = google_to_anthropic_response(data, "gemini-2.0-flash")
+        self.assertNotIn("cache_read_input_tokens", result["usage"])
+
+    def test_response_function_call_id_preserved(self):
+        """TEST 7 (cc-switch): Gemini functionCall.id is used verbatim as tool_use.id."""
+        from simple_api_router.converter_google import google_to_anthropic_response
+        data = {
+            "responseId": "resp_2",
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {
+                        "parts": [
+                            {
+                                "functionCall": {
+                                    "id": "call_1",
+                                    "name": "get_weather",
+                                    "args": {"city": "Tokyo"},
+                                }
+                            }
+                        ]
+                    },
+                }
+            ],
+            "usageMetadata": {"promptTokenCount": 5, "totalTokenCount": 8},
+        }
+        result = google_to_anthropic_response(data, "gemini-2.0-flash")
+        self.assertEqual(len(result["content"]), 1)
+        tool_block = result["content"][0]
+        self.assertEqual(tool_block["type"], "tool_use")
+        self.assertEqual(tool_block["id"], "call_1")
+        self.assertEqual(tool_block["name"], "get_weather")
+
+    def test_response_function_call_no_id_synthesizes(self):
+        """TEST 15 (cc-switch): functionCall without id gets a synthesised toolu_* id."""
+        from simple_api_router.converter_google import google_to_anthropic_response
+        data = {
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {
+                        "parts": [
+                            {"functionCall": {"name": "search", "args": {"q": "hi"}}}
+                        ]
+                    },
+                }
+            ],
+            "usageMetadata": {"promptTokenCount": 3, "totalTokenCount": 5},
+        }
+        result = google_to_anthropic_response(data, "gemini-2.0-flash")
+        tool_id = result["content"][0]["id"]
+        self.assertTrue(tool_id.startswith("toolu_"), tool_id)
+
+    def test_response_safety_block_is_refusal(self):
+        """TEST 10 (cc-switch): promptFeedback.blockReason → stop_reason: 'refusal'."""
+        from simple_api_router.converter_google import google_to_anthropic_response
+        data = {
+            "promptFeedback": {"blockReason": "SAFETY"},
+            "usageMetadata": {},
+        }
+        result = google_to_anthropic_response(data, "gemini-2.0-flash")
+        self.assertEqual(result["stop_reason"], "refusal")
+        self.assertEqual(result["content"][0]["text"], "Content blocked: SAFETY")
+
+    # ------------------------------------------------------------------
+    # cc-switch ported: streaming (TEST S1, S3)
+    # ------------------------------------------------------------------
+
+    def test_stream_cumulative_text_delta(self):
+        """TEST S1 (cc-switch): Gemini sends cumulative text; converter must diff to get delta."""
+        # Chunk 1 has "Hel", chunk 2 has "Hello" (cumulative snapshot)
+        # Expected SSE deltas: "Hel" then "lo"
+        chunks = [
+            (
+                b'data: {"responseId":"resp_1","candidates":[{"content":{"parts":[{"text":"Hel"}]}}],'
+                b'"usageMetadata":{"promptTokenCount":10,"totalTokenCount":13}}\n\n'
+            ),
+            (
+                b'data: {"responseId":"resp_1","candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"Hello"}]}}],'
+                b'"usageMetadata":{"promptTokenCount":10,"totalTokenCount":15}}\n\n'
+            ),
+        ]
+        events = self._run(self._collect_stream(chunks))
+        text_deltas = [
+            d["delta"]["text"]
+            for _, d in events
+            if isinstance(d, dict) and d.get("type") == "content_block_delta"
+            and d.get("delta", {}).get("type") == "text_delta"
+        ]
+        self.assertEqual(text_deltas, ["Hel", "lo"])
+
+    def test_stream_incremental_text_passthrough(self):
+        """Incremental text (not cumulative) passes straight through unchanged."""
+        chunks = [
+            b'data: {"candidates":[{"content":{"parts":[{"text":"Hel"}]}}],"usageMetadata":{"promptTokenCount":4,"totalTokenCount":6}}\n\n',
+            b'data: {"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"lo"}]}}],"usageMetadata":{"promptTokenCount":4,"totalTokenCount":8}}\n\n',
+        ]
+        events = self._run(self._collect_stream(chunks))
+        text_deltas = [
+            d["delta"]["text"]
+            for _, d in events
+            if isinstance(d, dict) and d.get("type") == "content_block_delta"
+            and d.get("delta", {}).get("type") == "text_delta"
+        ]
+        self.assertEqual(text_deltas, ["Hel", "lo"])
+
+    def test_stream_crlf_delimiters(self):
+        """TEST S3 (cc-switch): CRLF line endings in SSE stream are handled correctly."""
+        chunks = [
+            b'data: {"candidates":[{"content":{"parts":[{"text":"Hi"}]}}],"usageMetadata":{"promptTokenCount":4,"totalTokenCount":6}}\r\n\r\n',
+            b'data: {"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"Hi there"}]}}],"usageMetadata":{"promptTokenCount":4,"totalTokenCount":9}}\r\n\r\n',
+        ]
+        events = self._run(self._collect_stream(chunks))
+        text_deltas = [
+            d["delta"]["text"]
+            for _, d in events
+            if isinstance(d, dict) and d.get("type") == "content_block_delta"
+            and d.get("delta", {}).get("type") == "text_delta"
+        ]
+        # First chunk "Hi", second cumulative "Hi there" → delta " there"
+        self.assertEqual(text_deltas, ["Hi", " there"])
+
+    def test_stream_tool_call_real_id_preserved(self):
+        """Streaming: real functionCall.id from Gemini is used as tool_use.id."""
+        chunks = [
+            (
+                b'data: {"responseId":"r1","candidates":[{"finishReason":"STOP","content":{"parts":['
+                b'{"functionCall":{"id":"call_1","name":"Bash","args":{"command":"ls"}}}]}}],'
+                b'"usageMetadata":{"promptTokenCount":5,"totalTokenCount":8}}\n\n'
+            ),
+        ]
+        events = self._run(self._collect_stream(chunks))
+        tool_start = next(
+            d for _, d in events
+            if isinstance(d, dict) and d.get("type") == "content_block_start"
+            and d.get("content_block", {}).get("type") == "tool_use"
+        )
+        self.assertEqual(tool_start["content_block"]["id"], "call_1")
+
+    def test_stream_tool_call_no_id_synthesized(self):
+        """Streaming: functionCall without id gets synthesised toolu_* id."""
+        chunks = [
+            (
+                b'data: {"responseId":"r2","candidates":[{"finishReason":"STOP","content":{"parts":['
+                b'{"functionCall":{"name":"search","args":{"q":"hi"}}}]}}],'
+                b'"usageMetadata":{"promptTokenCount":3,"totalTokenCount":5}}\n\n'
+            ),
+        ]
+        events = self._run(self._collect_stream(chunks))
+        tool_start = next(
+            d for _, d in events
+            if isinstance(d, dict) and d.get("type") == "content_block_start"
+            and d.get("content_block", {}).get("type") == "tool_use"
+        )
+        self.assertTrue(tool_start["content_block"]["id"].startswith("toolu_"))
 
 
 if __name__ == "__main__":

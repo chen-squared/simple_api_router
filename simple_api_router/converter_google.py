@@ -16,6 +16,32 @@ def _generate_tool_id() -> str:
     return f"toolu_{uuid.uuid4().hex[:24]}"
 
 
+def _is_synthesized_id(tool_id: str) -> bool:
+    """Return True if the id was synthesized by this converter (starts with toolu_).
+
+    Synthesized ids must not be round-tripped back to Gemini as functionCall/
+    functionResponse ids because Gemini does not recognise them.  Real ids
+    (e.g. "call_1") that came from a previous Gemini response should be
+    preserved so Gemini can match them across turns.
+    """
+    return tool_id.startswith("toolu_")
+
+
+_JSON_SCHEMA_RICH_KEYS = frozenset({
+    "$schema", "additionalProperties", "oneOf", "anyOf", "allOf",
+    "not", "const", "if", "then", "else",
+    "unevaluatedProperties", "unevaluatedItems",
+})
+
+
+def _needs_json_schema_encoding(schema: Dict[str, Any]) -> bool:
+    """Return True when input_schema uses JSON-Schema features that Gemini cannot
+    represent as an OpenAPI ``parameters`` object.  In that case the declaration
+    should use ``parametersJsonSchema`` instead.
+    """
+    return bool(_JSON_SCHEMA_RICH_KEYS & schema.keys())
+
+
 def _build_tool_id_map(messages: List[Dict[str, Any]]) -> Dict[str, str]:
     """Scan all messages and build a map of tool_use_id → tool name."""
     mapping: Dict[str, str] = {}
@@ -77,12 +103,16 @@ def _content_block_to_gemini_part(
         return None
 
     if btype == "tool_use":
-        return {
-            "functionCall": {
-                "name": block.get("name", ""),
-                "args": block.get("input", {}),
-            }
+        tool_id = block.get("id", "")
+        fc: Dict[str, Any] = {
+            "name": block.get("name", ""),
+            "args": block.get("input", {}),
         }
+        # Preserve the real Gemini id so it can be matched on subsequent turns.
+        # Synthesised ids (toolu_*) are not meaningful to Gemini and are stripped.
+        if tool_id and not _is_synthesized_id(tool_id):
+            fc["id"] = tool_id
+        return {"functionCall": fc}
 
     if btype == "tool_result":
         tool_use_id = block.get("tool_use_id", "")
@@ -99,12 +129,10 @@ def _content_block_to_gemini_part(
             response_val = {"output": "\n".join(texts)}
         else:
             response_val = {"output": str(raw_content)}
-        return {
-            "functionResponse": {
-                "name": name,
-                "response": response_val,
-            }
-        }
+        fr: Dict[str, Any] = {"name": name, "response": response_val}
+        if tool_use_id and not _is_synthesized_id(tool_use_id):
+            fr["id"] = tool_use_id
+        return {"functionResponse": fr}
 
     # Skip thinking / redacted_thinking and anything unknown
     return None
@@ -174,7 +202,14 @@ def anthropic_to_google_request(body: Dict[str, Any], model: str) -> Dict[str, A
             if "description" in tool:
                 decl["description"] = tool["description"]
             if "input_schema" in tool:
-                decl["parameters"] = tool["input_schema"]
+                schema = tool["input_schema"]
+                if _needs_json_schema_encoding(schema):
+                    # Strip $schema — Gemini does not accept it in parametersJsonSchema
+                    decl["parametersJsonSchema"] = {
+                        k: v for k, v in schema.items() if k != "$schema"
+                    }
+                else:
+                    decl["parameters"] = schema
             decls.append(decl)
         result["tools"] = [{"functionDeclarations": decls}]
 
@@ -210,9 +245,10 @@ _FINISH_REASON_MAP: Dict[str, str] = {
 
 def google_to_anthropic_response(data: Dict[str, Any], model: str) -> Dict[str, Any]:
     """Convert a Gemini generateContent response to Anthropic Messages format."""
-    msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+    # Use responseId from Gemini when available for stable cross-turn tracking
+    msg_id = data.get("responseId") or f"msg_{uuid.uuid4().hex[:24]}"
 
-    # Safety block
+    # Safety block — content was blocked before any candidates were generated
     if "promptFeedback" in data and "blockReason" in data["promptFeedback"]:
         block_reason = data["promptFeedback"]["blockReason"]
         return {
@@ -221,7 +257,7 @@ def google_to_anthropic_response(data: Dict[str, Any], model: str) -> Dict[str, 
             "role": "assistant",
             "model": model,
             "content": [{"type": "text", "text": f"Content blocked: {block_reason}"}],
-            "stop_reason": "end_turn",
+            "stop_reason": "refusal",
             "stop_sequence": None,
             "usage": {"input_tokens": 0, "output_tokens": 0},
         }
@@ -253,14 +289,17 @@ def google_to_anthropic_response(data: Dict[str, Any], model: str) -> Dict[str, 
                 content_blocks.append({"type": "text", "text": text})
         elif "functionCall" in part:
             fc = part["functionCall"]
+            # Preserve real Gemini ids; synthesise one only when absent
+            fc_id = fc.get("id", "")
+            tool_id = fc_id if fc_id else _generate_tool_id()
             content_blocks.append({
                 "type": "tool_use",
-                "id": _generate_tool_id(),
+                "id": tool_id,
                 "name": fc.get("name", ""),
                 "input": fc.get("args", {}),
             })
             has_tool_use = True
-        # Skip "thought" parts (thinking blocks) silently
+        # Skip "thought" / "thoughtSignature" parts silently
 
     stop_reason = "tool_use" if has_tool_use else _FINISH_REASON_MAP.get(finish_reason, "end_turn")
 
@@ -270,6 +309,14 @@ def google_to_anthropic_response(data: Dict[str, Any], model: str) -> Dict[str, 
     total_tokens = usage_meta.get("totalTokenCount", 0)
     output_tokens = candidates_tokens or max(0, total_tokens - input_tokens)
 
+    usage: Dict[str, Any] = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
+    cache_tokens = usage_meta.get("cachedContentTokenCount", 0)
+    if cache_tokens:
+        usage["cache_read_input_tokens"] = cache_tokens
+
     return {
         "id": msg_id,
         "type": "message",
@@ -278,10 +325,7 @@ def google_to_anthropic_response(data: Dict[str, Any], model: str) -> Dict[str, 
         "content": content_blocks,
         "stop_reason": stop_reason,
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        },
+        "usage": usage,
     }
 
 
@@ -316,6 +360,7 @@ async def stream_google_to_anthropic(
     # Track open text block and accumulated tool calls
     text_block_open = False
     text_block_index = 0
+    accumulated_text = ""          # running total of text emitted so far
     tool_blocks: List[Dict[str, Any]] = []
     accumulated_usage = {"input_tokens": 0, "output_tokens": 0}
     finish_reason = "STOP"
@@ -357,8 +402,19 @@ async def stream_google_to_anthropic(
             parts = candidate.get("content", {}).get("parts", [])
             for part in parts:
                 if "text" in part:
-                    text = part["text"]
-                    if not text:
+                    new_text = part["text"]
+                    if not new_text:
+                        continue
+                    # Gemini may send cumulative text (each chunk = full text so far)
+                    # or incremental text (each chunk = new text only).  Handle both:
+                    # if new_text starts with what we have so far it is cumulative.
+                    if new_text.startswith(accumulated_text):
+                        delta = new_text[len(accumulated_text):]
+                        accumulated_text = new_text
+                    else:
+                        delta = new_text
+                        accumulated_text += new_text
+                    if not delta:
                         continue
                     if not text_block_open:
                         yield _sse("content_block_start", {
@@ -370,12 +426,15 @@ async def stream_google_to_anthropic(
                     yield _sse("content_block_delta", {
                         "type": "content_block_delta",
                         "index": text_block_index,
-                        "delta": {"type": "text_delta", "text": text},
+                        "delta": {"type": "text_delta", "text": delta},
                     })
                 elif "functionCall" in part:
                     fc = part["functionCall"]
+                    # Preserve real Gemini ids; synthesise only when absent/empty
+                    fc_id = fc.get("id", "")
+                    tool_id = fc_id if fc_id else _generate_tool_id()
                     tool_blocks.append({
-                        "id": _generate_tool_id(),
+                        "id": tool_id,
                         "name": fc.get("name", ""),
                         "input": fc.get("args", {}),
                     })
