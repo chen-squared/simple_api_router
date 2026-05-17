@@ -28,10 +28,24 @@ def _models_command(config_path: str) -> None:
         print(f"Error loading config: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    VISION = "\033[36mvision\033[0m"
-    TEXT   = "\033[90mtext \033[0m"
-    BOLD   = "\033[1m"
-    RESET  = "\033[0m"
+    MULTIMODAL = "\033[36mmultimodal\033[0m"
+    TEXT       = "\033[90mtext      \033[0m"
+    GREY       = "\033[90m"
+    RESET      = "\033[0m"
+    BOLD       = "\033[1m"
+
+    def _fmt_pricing(p) -> str:
+        if p is None:
+            return ""
+        # Use first tier as representative if tiered pricing.
+        tier = p.tiers[0] if p.tiers else p
+        parts = [f"¥{tier.input:.3f}in", f"¥{tier.output:.3f}out"]
+        if tier.cache_read is not None:
+            parts.append(f"¥{tier.cache_read:.3f}cr")
+        if tier.cache_write is not None:
+            parts.append(f"¥{tier.cache_write:.3f}cw")
+        suffix = "+  /MTok" if p.tiers else "  /MTok"
+        return f"  {GREY}{' '.join(parts)}{suffix}{RESET}"
 
     total = 0
     for pname, provider in cfg.providers.items():
@@ -41,13 +55,9 @@ def _models_command(config_path: str) -> None:
             print(f"\n{BOLD}{pname}{RESET}  [{ename}]")
             for m in ep.models:
                 entry = m if isinstance(m, ModelEntry) else ModelEntry(name=m)
-                cap = TEXT if entry.text_only else VISION
+                cap = TEXT if entry.text_only else MULTIMODAL
                 pricing = cfg.get_pricing(f"{pname}/{entry.name}")
-                pricing_str = (
-                    f"  \033[90m${pricing.input:.3f}/${pricing.output:.3f}/MTok\033[0m"
-                    if pricing else ""
-                )
-                print(f"  {entry.name:<50} {cap}{pricing_str}")
+                print(f"  {entry.name:<50} {cap}{_fmt_pricing(pricing)}")
                 total += 1
 
     print(f"\n{total} models across {len(cfg.providers)} providers")
