@@ -131,8 +131,9 @@ class PricingTier(BaseModel):
     threshold: int = 0
     input: float = 0.0
     output: float = 0.0
-    cache_read: float = 0.0
-    cache_write: float = 0.0
+    # None means "not configured — fall back to the input rate at cost-calc time".
+    cache_read: Optional[float] = None
+    cache_write: Optional[float] = None
 
 
 class PricingEntry(BaseModel):
@@ -141,11 +142,16 @@ class PricingEntry(BaseModel):
     Use ``tiers`` for tiered (non-linear) pricing; leave it empty for flat pricing.
     When ``tiers`` is present the top-level ``input``/``output``/``cache_*``
     fields are ignored.
+
+    If ``cache_read`` or ``cache_write`` are omitted (None), those tokens are
+    billed at the ``input`` rate of the applicable tier.  Set them explicitly to
+    ``0.0`` to make them free.
     """
     input: float = 0.0
     output: float = 0.0
-    cache_read: float = 0.0
-    cache_write: float = 0.0
+    # None means "not configured — fall back to the input rate at cost-calc time".
+    cache_read: Optional[float] = None
+    cache_write: Optional[float] = None
     tiers: List[PricingTier] = Field(default_factory=list)
 
 

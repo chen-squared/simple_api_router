@@ -97,6 +97,10 @@ def _record_cost(rec: dict, config) -> Optional[float]:
 
     Uses ``config.get_pricing(model)`` which checks inline ModelEntry.pricing
     first, then falls back to the top-level RouterConfig.pricing section.
+
+    If ``cache_read`` or ``cache_write`` rates are not configured (None), the
+    corresponding tokens are billed at the ``input`` rate of the applicable
+    tier.  Explicitly set them to ``0.0`` to treat them as free.
     """
     model = rec.get("model", "")
     entry = config.get_pricing(model)
@@ -114,18 +118,22 @@ def _record_cost(rec: dict, config) -> Optional[float]:
         for tier in entry.tiers:
             if in_tok >= tier.threshold:
                 rate = tier
+        cr_rate = rate.cache_read if rate.cache_read is not None else rate.input
+        cw_rate = rate.cache_write if rate.cache_write is not None else rate.input
         return (
             in_tok / 1_000_000 * rate.input
             + out_tok / 1_000_000 * rate.output
-            + cr_tok / 1_000_000 * rate.cache_read
-            + cw_tok / 1_000_000 * rate.cache_write
+            + cr_tok / 1_000_000 * cr_rate
+            + cw_tok / 1_000_000 * cw_rate
         )
     else:
+        cr_rate = entry.cache_read if entry.cache_read is not None else entry.input
+        cw_rate = entry.cache_write if entry.cache_write is not None else entry.input
         return (
             in_tok / 1_000_000 * entry.input
             + out_tok / 1_000_000 * entry.output
-            + cr_tok / 1_000_000 * entry.cache_read
-            + cw_tok / 1_000_000 * entry.cache_write
+            + cr_tok / 1_000_000 * cr_rate
+            + cw_tok / 1_000_000 * cw_rate
         )
 
 
