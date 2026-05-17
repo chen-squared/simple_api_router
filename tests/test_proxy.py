@@ -663,3 +663,54 @@ class TestPricingConfig(unittest.TestCase):
         from simple_api_router.config import RouterConfig
         cfg = RouterConfig.model_validate({})
         self.assertIsNone(cfg.get_pricing("unknown/model"))
+
+    # ── cache fallback / explicit-zero tests ──────────────────────────────
+
+    def test_flat_pricing_cache_fallback_to_input_rate(self):
+        """cache_read/write=None (default) → tokens billed at the input rate."""
+        from simple_api_router.config import PricingEntry
+        from simple_api_router.usage_cli import _record_cost
+        # cache_read and cache_write are not set (None by default)
+        pricing = {"p/m": PricingEntry(input=10.0, output=30.0)}
+        config = self._wrap(pricing)
+        # 1M input + 1M cache_read (falls back to input rate 10.0)
+        cost = _record_cost(self._rec("p/m", 1_000_000, 0, cr=1_000_000), config)
+        self.assertAlmostEqual(cost, 10.0 + 10.0)
+
+    def test_flat_pricing_explicit_zero_cache_is_free(self):
+        """cache_read=0.0, cache_write=0.0 (explicit) → cache tokens cost nothing."""
+        from simple_api_router.config import PricingEntry
+        from simple_api_router.usage_cli import _record_cost
+        pricing = {"p/m": PricingEntry(input=10.0, output=30.0,
+                                       cache_read=0.0, cache_write=0.0)}
+        config = self._wrap(pricing)
+        # 1M input + 1M cache_read (explicitly free)
+        cost = _record_cost(self._rec("p/m", 1_000_000, 0, cr=1_000_000), config)
+        self.assertAlmostEqual(cost, 10.0)
+
+    def test_tiered_pricing_cache_fallback_to_tier_input_rate(self):
+        """Tiered: cache_read=None → billed at the tier's input rate."""
+        from simple_api_router.config import PricingEntry, PricingTier
+        from simple_api_router.usage_cli import _record_cost
+        # cache_read not configured on the tier → falls back to tier input rate
+        pricing = {"p/m": PricingEntry(tiers=[
+            PricingTier(threshold=0, input=1.0, output=5.0),
+        ])}
+        config = self._wrap(pricing)
+        # 50K input at 1.0 + 10K cache_read falling back to 1.0
+        cost = _record_cost(self._rec("p/m", 50_000, 0, cr=10_000), config)
+        expected = 50_000 / 1e6 * 1.0 + 10_000 / 1e6 * 1.0
+        self.assertAlmostEqual(cost, expected)
+
+    def test_tiered_pricing_explicit_zero_cache_in_tier(self):
+        """Tiered: cache_read=0.0 (explicit) → cache tokens cost nothing."""
+        from simple_api_router.config import PricingEntry, PricingTier
+        from simple_api_router.usage_cli import _record_cost
+        pricing = {"p/m": PricingEntry(tiers=[
+            PricingTier(threshold=0, input=1.0, output=5.0, cache_read=0.0),
+        ])}
+        config = self._wrap(pricing)
+        # 50K input at 1.0, 10K cache_read explicitly free
+        cost = _record_cost(self._rec("p/m", 50_000, 0, cr=10_000), config)
+        expected = 50_000 / 1e6 * 1.0
+        self.assertAlmostEqual(cost, expected)
