@@ -93,15 +93,17 @@ def _load_records(usage_path: Path, since: date, until: date) -> List[dict]:
 # ---------------------------------------------------------------------------
 
 def _record_cost(rec: dict, config) -> Optional[float]:
-    """Return the estimated cost in USD for a single request record, or None.
+    """Return estimated cost for a single request, or None if no pricing.
 
-    Uses ``config.get_pricing(model)`` which checks inline ModelEntry.pricing
-    first, then falls back to the top-level RouterConfig.pricing section.
-
-    If ``cache_read`` or ``cache_write`` rates are not configured (None), the
-    corresponding tokens are billed at the ``input`` rate of the applicable
-    tier.  Explicitly set them to ``0.0`` to treat them as free.
+    Cost is in the currency declared by the matching ``PricingEntry.currency``.
+    Use ``_record_cost_currency`` to also get the currency string.
     """
+    result = _record_cost_currency(rec, config)
+    return result[0] if result is not None else None
+
+
+def _record_cost_currency(rec: dict, config) -> Optional[Tuple[float, str]]:
+    """Return ``(cost, currency)`` for a single request, or None."""
     model = rec.get("model", "")
     entry = config.get_pricing(model)
     if entry is None:
@@ -113,14 +115,13 @@ def _record_cost(rec: dict, config) -> Optional[float]:
     cw_tok = rec.get("cache_write_tokens", 0)
 
     if entry.tiers:
-        # Pick the tier with the highest threshold that is still ≤ input tokens.
         rate = sorted(entry.tiers, key=lambda t: t.threshold)[0]
         for tier in entry.tiers:
             if in_tok >= tier.threshold:
                 rate = tier
         cr_rate = rate.cache_read if rate.cache_read is not None else rate.input
         cw_rate = rate.cache_write if rate.cache_write is not None else rate.input
-        return (
+        cost = (
             in_tok / 1_000_000 * rate.input
             + out_tok / 1_000_000 * rate.output
             + cr_tok / 1_000_000 * cr_rate
@@ -129,12 +130,13 @@ def _record_cost(rec: dict, config) -> Optional[float]:
     else:
         cr_rate = entry.cache_read if entry.cache_read is not None else entry.input
         cw_rate = entry.cache_write if entry.cache_write is not None else entry.input
-        return (
+        cost = (
             in_tok / 1_000_000 * entry.input
             + out_tok / 1_000_000 * entry.output
             + cr_tok / 1_000_000 * cr_rate
             + cw_tok / 1_000_000 * cw_rate
         )
+    return (cost, getattr(entry, "currency", "CNY"))
 
 
 # ---------------------------------------------------------------------------
@@ -148,8 +150,11 @@ def _empty_agg() -> Dict[str, Any]:
         "output_tokens": 0,
         "cache_read_tokens": 0,
         "cache_write_tokens": 0,
+        "cost_cny": 0.0,
         "cost_usd": 0.0,
         "_has_cost": False,
+        "_has_cost_cny": False,
+        "_has_cost_usd": False,
     }
 
 
@@ -159,9 +164,15 @@ def _add(agg: dict, rec: dict, config) -> None:
     agg["output_tokens"] += rec.get("output_tokens", 0)
     agg["cache_read_tokens"] += rec.get("cache_read_tokens", 0)
     agg["cache_write_tokens"] += rec.get("cache_write_tokens", 0)
-    cost = _record_cost(rec, config)
-    if cost is not None:
-        agg["cost_usd"] += cost
+    result = _record_cost_currency(rec, config)
+    if result is not None:
+        cost, currency = result
+        if currency.upper() == "USD":
+            agg["cost_usd"] += cost
+            agg["_has_cost_usd"] = True
+        else:
+            agg["cost_cny"] += cost
+            agg["_has_cost_cny"] = True
         agg["_has_cost"] = True
 
 
@@ -197,14 +208,24 @@ def _fmt_tok(n: int) -> str:
     return str(n)
 
 
-def _fmt_cost(agg: dict) -> str:
+def _fmt_cny(agg: dict) -> str:
     if not agg.get("_has_cost"):
         return "-"
-    return f"¥{agg['cost_usd']:.4f}"
+    if not agg.get("_has_cost_cny"):
+        return ""
+    return f"¥{agg['cost_cny']:.4f}"
 
 
-_COLS: Tuple[str, ...] = ("Model", "Req", "Input", "Output", "Cache↑", "Cache↓", "Cost")
-_COL_W: Tuple[int, ...] = (38, 6, 9, 9, 9, 9, 10)
+def _fmt_usd(agg: dict) -> str:
+    if not agg.get("_has_cost"):
+        return "-"
+    if not agg.get("_has_cost_usd"):
+        return ""
+    return f"${agg['cost_usd']:.4f}"
+
+
+_COLS: Tuple[str, ...] = ("Model", "Req", "Input", "Output", "Cache↑", "Cache↓", "¥ Cost", "$ Cost")
+_COL_W: Tuple[int, ...] = (36, 6, 9, 9, 9, 9, 10, 10)
 _TABLE_W = sum(_COL_W) + 2 * (len(_COL_W) - 1)
 
 _BOLD  = "\033[1m"
@@ -229,7 +250,8 @@ def _format_row(label: str, agg: dict, indent: int = 0) -> str:
         _fmt_tok(agg["output_tokens"]),
         _fmt_tok(agg["cache_write_tokens"]),
         _fmt_tok(agg["cache_read_tokens"]),
-        _fmt_cost(agg),
+        _fmt_cny(agg),
+        _fmt_usd(agg),
     )
     return "  ".join(str(c).ljust(w) for c, w in zip(cells, _COL_W))
 
@@ -242,8 +264,11 @@ def _total_agg(rows: Dict[str, dict]) -> dict:
         total["output_tokens"] += a["output_tokens"]
         total["cache_read_tokens"] += a["cache_read_tokens"]
         total["cache_write_tokens"] += a["cache_write_tokens"]
+        total["cost_cny"] += a["cost_cny"]
         total["cost_usd"] += a["cost_usd"]
         total["_has_cost"] = total["_has_cost"] or a["_has_cost"]
+        total["_has_cost_cny"] = total["_has_cost_cny"] or a["_has_cost_cny"]
+        total["_has_cost_usd"] = total["_has_cost_usd"] or a["_has_cost_usd"]
     return total
 
 
@@ -322,7 +347,8 @@ def _agg_to_dict(model: str, agg: dict) -> dict:
         "output_tokens": agg["output_tokens"],
         "cache_read_tokens": agg["cache_read_tokens"],
         "cache_write_tokens": agg["cache_write_tokens"],
-        "cost_usd": round(agg["cost_usd"], 6) if agg["_has_cost"] else None,
+        "cost_cny": round(agg["cost_cny"], 6) if agg["_has_cost_cny"] else None,
+        "cost_usd": round(agg["cost_usd"], 6) if agg["_has_cost_usd"] else None,
     }
 
 
@@ -338,7 +364,8 @@ def _json_summary(by_model: Dict[str, dict], period: dict) -> dict:
             "output_tokens": total["output_tokens"],
             "cache_read_tokens": total["cache_read_tokens"],
             "cache_write_tokens": total["cache_write_tokens"],
-            "cost_usd": round(total["cost_usd"], 6) if total["_has_cost"] else None,
+            "cost_cny": round(total["cost_cny"], 6) if total["_has_cost_cny"] else None,
+            "cost_usd": round(total["cost_usd"], 6) if total["_has_cost_usd"] else None,
         },
     }
 

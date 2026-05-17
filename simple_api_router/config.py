@@ -137,8 +137,9 @@ class PricingTier(BaseModel):
 
 
 class PricingEntry(BaseModel):
-    """Pricing for one model, in USD per million tokens.
+    """Pricing for one model, per million tokens.
 
+    ``currency`` declares whether prices are in CNY or USD (default: ``"CNY"``).
     Use ``tiers`` for tiered (non-linear) pricing; leave it empty for flat pricing.
     When ``tiers`` is present the top-level ``input``/``output``/``cache_*``
     fields are ignored.
@@ -147,6 +148,7 @@ class PricingEntry(BaseModel):
     billed at the ``input`` rate of the applicable tier.  Set them explicitly to
     ``0.0`` to make them free.
     """
+    currency: str = "CNY"   # "CNY" or "USD"
     input: float = 0.0
     output: float = 0.0
     # None means "not configured — fall back to the input rate at cost-calc time".

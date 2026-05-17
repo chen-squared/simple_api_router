@@ -37,13 +37,13 @@ def _models_command(config_path: str) -> None:
     def _fmt_pricing(p) -> str:
         if p is None:
             return ""
-        # Use first tier as representative if tiered pricing.
+        sym = "¥" if getattr(p, "currency", "CNY").upper() == "CNY" else "$"
         tier = p.tiers[0] if p.tiers else p
-        parts = [f"¥{tier.input:.3f}in", f"¥{tier.output:.3f}out"]
+        parts = [f"{sym}{tier.input:.3f}in", f"{sym}{tier.output:.3f}out"]
         if tier.cache_read is not None:
-            parts.append(f"¥{tier.cache_read:.3f}cr")
+            parts.append(f"{sym}{tier.cache_read:.3f}cr")
         if tier.cache_write is not None:
-            parts.append(f"¥{tier.cache_write:.3f}cw")
+            parts.append(f"{sym}{tier.cache_write:.3f}cw")
         suffix = "+  /MTok" if p.tiers else "  /MTok"
         return f"  {GREY}{' '.join(parts)}{suffix}{RESET}"
 

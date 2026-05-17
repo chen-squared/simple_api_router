@@ -588,7 +588,7 @@ class TestPricingConfig(unittest.TestCase):
         ]
         agg = _aggregate_by_model(records, config)["g/m"]
         expected = 0.105 + 0.616
-        self.assertAlmostEqual(agg["cost_usd"], expected, places=9)
+        self.assertAlmostEqual(agg["cost_cny"], expected, places=9)
         self.assertEqual(agg["requests"], 2)
         self.assertEqual(agg["input_tokens"], 400_000)
 
