@@ -200,12 +200,16 @@ def _fmt_tok(n: int) -> str:
 def _fmt_cost(agg: dict) -> str:
     if not agg.get("_has_cost"):
         return "-"
-    return f"${agg['cost_usd']:.4f}"
+    return f"¥{agg['cost_usd']:.4f}"
 
 
-_COLS: Tuple[str, ...] = ("Model", "Provider", "Req", "Input", "Output", "Cache↑", "Cache↓", "Cost")
-_COL_W: Tuple[int, ...] = (38, 12, 6, 9, 9, 9, 9, 10)
+_COLS: Tuple[str, ...] = ("Model", "Req", "Input", "Output", "Cache↑", "Cache↓", "Cost")
+_COL_W: Tuple[int, ...] = (38, 6, 9, 9, 9, 9, 10)
 _TABLE_W = sum(_COL_W) + 2 * (len(_COL_W) - 1)
+
+_BOLD  = "\033[1m"
+_GREY  = "\033[90m"
+_RESET = "\033[0m"
 
 
 def _hdr() -> str:
@@ -216,11 +220,10 @@ def _divider() -> str:
     return "─" * _TABLE_W
 
 
-def _format_row(model: str, agg: dict) -> str:
-    provider = model.split("/")[0] if "/" in model else "-"
+def _format_row(label: str, agg: dict, indent: int = 0) -> str:
+    """Format one data row. label is the display name (provider prefix stripped)."""
     cells = (
-        model,
-        provider,
+        " " * indent + label,
         str(agg["requests"]),
         _fmt_tok(agg["input_tokens"]),
         _fmt_tok(agg["output_tokens"]),
@@ -244,34 +247,65 @@ def _total_agg(rows: Dict[str, dict]) -> dict:
     return total
 
 
+def _group_by_provider(by_model: Dict[str, dict]) -> Dict[str, Dict[str, dict]]:
+    """Split a model→agg map into provider→{model→agg} groups."""
+    grouped: Dict[str, Dict[str, dict]] = defaultdict(dict)
+    for model, agg in by_model.items():
+        provider = model.split("/", 1)[0] if "/" in model else "(unknown)"
+        grouped[provider][model] = agg
+    return dict(grouped)
+
+
 # ---------------------------------------------------------------------------
 # Table output
 # ---------------------------------------------------------------------------
 
+def _print_provider_block(provider: str, models: Dict[str, dict],
+                          show_subtotal: bool = True) -> None:
+    """Print provider header, model rows, and optional subtotal."""
+    print(f"\n{_BOLD}{provider}{_RESET}")
+    for model, agg in sorted(models.items(), key=lambda kv: -kv[1]["requests"]):
+        name = model.split("/", 1)[1] if "/" in model else model
+        print("  " + _format_row(name, agg, indent=0))
+    if show_subtotal and len(models) > 1:
+        print(_GREY + "  " + _format_row("subtotal", _total_agg(models)) + _RESET)
+
+
 def _print_summary(by_model: Dict[str, dict], period_str: str) -> None:
-    print(f"\nUsage summary — {period_str}\n")
+    print(f"\nUsage summary — {period_str}")
     print(_hdr())
     print(_divider())
-    for model, agg in sorted(by_model.items(), key=lambda kv: -kv[1]["requests"]):
-        print(_format_row(model, agg))
+
+    grouped = _group_by_provider(by_model)
+    # Sort providers by total requests descending.
+    for provider in sorted(grouped, key=lambda p: -sum(a["requests"] for a in grouped[p].values())):
+        _print_provider_block(provider, grouped[provider], show_subtotal=True)
+
+    print()
     print(_divider())
     print(_format_row("TOTAL", _total_agg(by_model)))
     print()
 
 
 def _print_daily(by_day: Dict[str, Dict[str, dict]], period_str: str) -> None:
-    day_w = 12
     print(f"\nDaily breakdown — {period_str}\n")
-    print("  ".join(["Date".ljust(day_w), _hdr()]))
-    print("─" * (day_w + 2 + _TABLE_W))
     for day in sorted(by_day.keys(), reverse=True):
-        models = by_day[day]
-        first = True
-        for model, agg in sorted(models.items(), key=lambda kv: -kv[1]["requests"]):
-            prefix = day if first else ""
-            print("  ".join([prefix.ljust(day_w), _format_row(model, agg)]))
-            first = False
-    print()
+        print(f"{_BOLD}{day}{_RESET}")
+        print("  " + _hdr())
+        print("  " + _divider())
+        grouped = _group_by_provider(by_day[day])
+        for provider in sorted(grouped, key=lambda p: -sum(a["requests"] for a in grouped[p].values())):
+            models = grouped[provider]
+            print(f"  {_BOLD}{provider}{_RESET}")
+            for model, agg in sorted(models.items(), key=lambda kv: -kv[1]["requests"]):
+                name = model.split("/", 1)[1] if "/" in model else model
+                print("    " + _format_row(name, agg))
+            if len(models) > 1:
+                print(_GREY + "    " + _format_row("subtotal", _total_agg(models)) + _RESET)
+        day_total = _total_agg(by_day[day])
+        print("  " + _divider())
+        print("  " + _format_row("day total", day_total))
+        print()
 
 
 # ---------------------------------------------------------------------------
