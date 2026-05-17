@@ -13,7 +13,7 @@ from simple_api_router.app import create_app
 from simple_api_router.logger import setup_logging
 
 _SERVICE_COMMANDS = frozenset(
-    {"install", "uninstall", "start", "stop", "restart", "status", "log"}
+    {"install", "uninstall", "start", "stop", "restart", "status", "log", "usage"}
 )
 
 
@@ -67,6 +67,7 @@ def main() -> None:
             "  restart    Restart the service\n"
             "  status     Show service status\n"
             "  log        Tail service logs\n"
+            "  usage      Show API usage statistics\n"
             "\n"
             "examples:\n"
             "  simple-api-router                          # start server (config.yaml)\n"
@@ -119,6 +120,37 @@ def main() -> None:
     subparsers.add_parser("status",    help="Show service status")
     subparsers.add_parser("log",       help="Tail service logs")
 
+    # ── usage ───────────────────────────────────────────────────────────────
+    usage_p = subparsers.add_parser("usage", help="Show API usage statistics")
+    usage_p.add_argument(
+        "--last", type=int, default=7, metavar="N",
+        help="Number of days to include (default: 7)",
+    )
+    usage_p.add_argument(
+        "--period", choices=["day", "week", "month"], default=None,
+        help="Preset period (day/week/month); overrides --last",
+    )
+    usage_p.add_argument(
+        "--daily", action="store_true",
+        help="Show per-day breakdown instead of summary",
+    )
+    usage_p.add_argument(
+        "--model", default=None, metavar="PATTERN",
+        help="Filter by model name (substring match)",
+    )
+    usage_p.add_argument(
+        "--provider", default=None, metavar="NAME",
+        help="Filter by provider name",
+    )
+    usage_p.add_argument(
+        "--format", choices=["table", "json"], default="table",
+        help="Output format (default: table)",
+    )
+    usage_p.add_argument(
+        "--config", "-c", metavar="PATH", default=None,
+        help="Config file for pricing (default: auto-detect)",
+    )
+
     args = parser.parse_args()
     cmd = args.command
 
@@ -126,6 +158,11 @@ def main() -> None:
     if cmd == "install":
         from simple_api_router.service import install
         install(config=args.config, exe_override=args.exe)
+        return
+
+    if cmd == "usage":
+        from simple_api_router.usage_cli import usage_command
+        usage_command(args)
         return
 
     if cmd in _SERVICE_COMMANDS:

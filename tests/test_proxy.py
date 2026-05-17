@@ -455,3 +455,156 @@ class TestMultimodalFallbackRouting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ===========================================================================
+# Usage logger
+# ===========================================================================
+
+class TestUsageLogger(unittest.TestCase):
+    def test_log_usage_noop_when_not_configured(self):
+        """log_usage must be a no-op when setup_usage_logging was never called."""
+        import simple_api_router.usage_logger as ul
+        original = ul._usage_logger
+        ul._usage_logger = None
+        try:
+            ul.log_usage({"ts": "2026-01-01T00:00:00Z", "model": "x"})
+        finally:
+            ul._usage_logger = original
+
+    def test_setup_creates_logger(self):
+        import tempfile, os
+        import simple_api_router.usage_logger as ul
+        with tempfile.NamedTemporaryFile(suffix=".log", delete=False) as f:
+            log_path = f.name
+        try:
+            ul.setup_usage_logging(log_path)
+            self.assertIsNotNone(ul._usage_logger)
+            self.assertIsNotNone(ul.get_usage_log_path())
+            self.assertIn("router.usage.jsonl", ul.get_usage_log_path())
+        finally:
+            ul._usage_logger = None
+            ul._usage_log_path = None
+            os.unlink(log_path)
+            jsonl = log_path.replace(".log", "") + "/../router.usage.jsonl"
+            try:
+                os.unlink(ul.get_usage_log_path() or "")
+            except Exception:
+                pass
+
+
+# ===========================================================================
+# Pricing config and cost calculation
+# ===========================================================================
+
+class TestPricingConfig(unittest.TestCase):
+    def _make_pricing(self):
+        from simple_api_router.config import PricingEntry, PricingTier
+        return {
+            "flat/model": PricingEntry(input=10.0, output=30.0,
+                                       cache_read=1.0, cache_write=5.0),
+            "tiered/model": PricingEntry(tiers=[
+                PricingTier(threshold=0,      input=1.0, output=5.0),
+                PricingTier(threshold=128000, input=2.0, output=8.0),
+                PricingTier(threshold=200000, input=4.0, output=12.0),
+            ]),
+        }
+
+    def _rec(self, model, in_tok, out_tok, cr=0, cw=0):
+        return {"model": model, "input_tokens": in_tok, "output_tokens": out_tok,
+                "cache_read_tokens": cr, "cache_write_tokens": cw}
+
+    def test_flat_pricing(self):
+        from simple_api_router.usage_cli import _record_cost
+        pricing = self._make_pricing()
+        cost = _record_cost(self._rec("flat/model", 1_000_000, 1_000_000), pricing)
+        self.assertAlmostEqual(cost, 10.0 + 30.0)
+
+    def test_flat_pricing_with_cache(self):
+        from simple_api_router.usage_cli import _record_cost
+        pricing = self._make_pricing()
+        cost = _record_cost(
+            self._rec("flat/model", 1_000_000, 0, cr=1_000_000, cw=1_000_000), pricing
+        )
+        self.assertAlmostEqual(cost, 10.0 + 1.0 + 5.0)
+
+    def test_no_pricing_returns_none(self):
+        from simple_api_router.usage_cli import _record_cost
+        self.assertIsNone(_record_cost(self._rec("unknown/model", 1000, 500), {}))
+
+    def test_tiered_below_first_threshold(self):
+        from simple_api_router.usage_cli import _record_cost
+        pricing = self._make_pricing()
+        cost = _record_cost(self._rec("tiered/model", 50_000, 1_000), pricing)
+        # tier 0 applies (threshold=0, input=1.0/M, output=5.0/M)
+        expected = 50_000 / 1e6 * 1.0 + 1_000 / 1e6 * 5.0
+        self.assertAlmostEqual(cost, expected)
+
+    def test_tiered_above_middle_threshold(self):
+        from simple_api_router.usage_cli import _record_cost
+        pricing = self._make_pricing()
+        cost = _record_cost(self._rec("tiered/model", 150_000, 1_000), pricing)
+        # tier 128K applies (input=2.0/M, output=8.0/M)
+        expected = 150_000 / 1e6 * 2.0 + 1_000 / 1e6 * 8.0
+        self.assertAlmostEqual(cost, expected)
+
+    def test_tiered_exactly_at_threshold(self):
+        from simple_api_router.usage_cli import _record_cost
+        pricing = self._make_pricing()
+        cost = _record_cost(self._rec("tiered/model", 200_000, 0), pricing)
+        # exactly at 200K → top tier (input=4.0/M)
+        expected = 200_000 / 1e6 * 4.0
+        self.assertAlmostEqual(cost, expected)
+
+    def test_tiered_above_top_threshold(self):
+        from simple_api_router.usage_cli import _record_cost
+        pricing = self._make_pricing()
+        cost = _record_cost(self._rec("tiered/model", 500_000, 1_000), pricing)
+        # top tier applies (input=4.0/M, output=12.0/M)
+        expected = 500_000 / 1e6 * 4.0 + 1_000 / 1e6 * 12.0
+        self.assertAlmostEqual(cost, expected)
+
+    def test_aggregation_uses_per_request_tier(self):
+        """Two requests at different tiers should produce correct summed cost."""
+        from simple_api_router.usage_cli import _aggregate_by_model
+        from simple_api_router.config import PricingEntry, PricingTier
+        pricing = {
+            "g/m": PricingEntry(tiers=[
+                PricingTier(threshold=0,      input=1.0, output=5.0),
+                PricingTier(threshold=200000, input=2.0, output=8.0),
+            ])
+        }
+        today = __import__("datetime").date.today().isoformat()
+        records = [
+            {"ts": f"{today}T10:00:00Z", "model": "g/m",
+             "input_tokens": 100_000, "output_tokens": 1_000,
+             "cache_read_tokens": 0, "cache_write_tokens": 0},
+            {"ts": f"{today}T11:00:00Z", "model": "g/m",
+             "input_tokens": 300_000, "output_tokens": 2_000,
+             "cache_read_tokens": 0, "cache_write_tokens": 0},
+        ]
+        agg = _aggregate_by_model(records, pricing)["g/m"]
+        # rec1: tier0 → 100K*1/M + 1K*5/M = 0.1 + 0.005 = 0.105
+        # rec2: tier1 → 300K*2/M + 2K*8/M = 0.6 + 0.016 = 0.616
+        expected = 0.105 + 0.616
+        self.assertAlmostEqual(agg["cost_usd"], expected, places=9)
+        self.assertEqual(agg["requests"], 2)
+        self.assertEqual(agg["input_tokens"], 400_000)
+
+    def test_config_parses_pricing_section(self):
+        from simple_api_router.config import RouterConfig
+        raw = {
+            "pricing": {
+                "anthropic/claude-opus-4-5": {"input": 15.0, "output": 75.0},
+                "google/gemini-2.5-pro": {"tiers": [
+                    {"threshold": 0, "input": 1.25, "output": 10.0},
+                    {"threshold": 200000, "input": 2.50, "output": 15.0},
+                ]},
+            }
+        }
+        cfg = RouterConfig.model_validate(raw)
+        self.assertEqual(cfg.pricing["anthropic/claude-opus-4-5"].input, 15.0)
+        tiers = cfg.pricing["google/gemini-2.5-pro"].tiers
+        self.assertEqual(len(tiers), 2)
+        self.assertEqual(tiers[1].threshold, 200000)
+        self.assertAlmostEqual(tiers[1].input, 2.50)

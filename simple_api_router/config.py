@@ -108,9 +108,49 @@ class ProviderConfig(BaseModel):
         return wildcard
 
 
+class PricingTier(BaseModel):
+    """One pricing bracket for a model.
+
+    *threshold* is the minimum number of **input tokens** in a single request
+    for this tier's rates to apply.  The tier with the highest threshold that
+    is still ≤ the request's input_tokens is used for the whole request (i.e.
+    all tokens are billed at that tier — it is NOT a progressive tax).
+
+    Example (Gemini 2.5 Pro):
+        tiers:
+          - threshold: 0       # < 200 K tokens → low rate
+            input: 1.25
+            output: 10.0
+          - threshold: 200000  # ≥ 200 K tokens → high rate
+            input: 2.50
+            output: 15.0
+    """
+    threshold: int = 0
+    input: float = 0.0
+    output: float = 0.0
+    cache_read: float = 0.0
+    cache_write: float = 0.0
+
+
+class PricingEntry(BaseModel):
+    """Pricing for one model, in USD per million tokens.
+
+    Use ``tiers`` for tiered (non-linear) pricing; leave it empty for flat pricing.
+    When ``tiers`` is present the top-level ``input``/``output``/``cache_*``
+    fields are ignored.
+    """
+    input: float = 0.0
+    output: float = 0.0
+    cache_read: float = 0.0
+    cache_write: float = 0.0
+    tiers: List[PricingTier] = Field(default_factory=list)
+
+
 class RouterConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     providers: Dict[str, ProviderConfig] = Field(default_factory=dict)
+    # Keys are "provider/model" strings (same format as the client `model` field).
+    pricing: Dict[str, PricingEntry] = Field(default_factory=dict)
 
 
 _ENV_PATTERN = re.compile(r"\$\{([^}]+)\}")

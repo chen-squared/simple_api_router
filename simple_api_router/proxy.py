@@ -51,7 +51,7 @@ _UPSTREAM_ERRORS = (
 
 def _backoff(attempt: int, retry_after: Optional[float] = None) -> float:
     """Return seconds to wait before attempt N (0-based). Respects Retry-After when present."""
-    if retry_after is not None:
+    if retry_after is not None and retry_after > 0:
         return min(retry_after, 60.0)
     return min(0.5 * (2 ** attempt), 8.0)
 
@@ -349,6 +349,15 @@ async def route_request(
                     "is configured — forwarding anyway",
                     model,
                 )
+
+    # Stash routing metadata so app.py can log usage after the response is done.
+    request.state.usage_meta = {
+        "model": model_str,
+        "provider": next(
+            (name for name, p in config.providers.items() if p is provider), "unknown"
+        ),
+        "backend_model": backend_model,
+    }
 
     if api_format == "anthropic":
         return await _proxy_anthropic(request, body, backend_model, provider, endpoint, client, max_retries)

@@ -2,19 +2,83 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from watchfiles import awatch
 
 from .config import RouterConfig, load_config
 from .logger import setup_logging as setup_logger
 from .proxy import route_request
+from .usage_logger import log_usage, setup_usage_logging
+
+
+def _now_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+async def _sse_with_usage(
+    original: AsyncIterator[bytes],
+    meta: dict,
+    start: float,
+    app_logger,
+) -> AsyncIterator[bytes]:
+    """Wrap a streaming SSE body, extracting token counts from Anthropic events."""
+    input_tokens = 0
+    output_tokens = 0
+    cache_read_tokens = 0
+    cache_write_tokens = 0
+
+    async for chunk in original:
+        yield chunk
+        try:
+            text = chunk.decode("utf-8", errors="replace")
+            for line in text.splitlines():
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:].strip()
+                if not payload or payload == "[DONE]":
+                    continue
+                data = json.loads(payload)
+                t = data.get("type")
+                if t == "message_start":
+                    u = data.get("message", {}).get("usage", {})
+                    input_tokens = u.get("input_tokens", 0)
+                    cache_read_tokens = u.get("cache_read_input_tokens", 0)
+                    cache_write_tokens = u.get("cache_creation_input_tokens", 0)
+                elif t == "message_delta":
+                    u = data.get("usage", {})
+                    output_tokens = u.get("output_tokens", 0)
+        except Exception:
+            pass
+
+    duration_ms = round((time.time() - start) * 1000)
+    app_logger.info(
+        "POST /v1/messages model=%s provider=%s backend=%s "
+        "in=%d out=%d cache_r=%d cache_w=%d streaming=true status=200 duration=%dms",
+        meta["model"], meta["provider"], meta["backend_model"],
+        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, duration_ms,
+    )
+    log_usage({
+        "ts": _now_utc(),
+        "model": meta["model"],
+        "provider": meta["provider"],
+        "backend_model": meta["backend_model"],
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
+        "streaming": True,
+        "status": 200,
+        "duration_ms": duration_ms,
+    })
 
 
 async def _try_load_config(config_path: Path, logger, retries: int = 3, delay: float = 0.5):
@@ -59,6 +123,8 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         log_level=config.server.log_level,
         log_file=config.server.log_file,
     )
+    if config.server.log_file:
+        setup_usage_logging(config.server.log_file)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -101,12 +167,54 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     @app.post("/v1/messages")
     async def messages(request: Request) -> Any:
         body: Dict[str, Any] = await request.json()
-        return await route_request(
+        start = time.time()
+        response = await route_request(
             request=request,
             body=body,
             config=request.app.state.config,
             client=request.app.state.http_client,
         )
+
+        meta = getattr(request.state, "usage_meta", None)
+        if meta:
+            if isinstance(response, StreamingResponse):
+                response.body_iterator = _sse_with_usage(
+                    response.body_iterator, meta, start, logger
+                )
+            elif isinstance(response, JSONResponse):
+                try:
+                    data = json.loads(response.body)
+                    u = data.get("usage", {})
+                    in_tok = u.get("input_tokens", 0)
+                    out_tok = u.get("output_tokens", 0)
+                    cr_tok = u.get("cache_read_input_tokens", 0)
+                    cw_tok = u.get("cache_creation_input_tokens", 0)
+                    duration_ms = round((time.time() - start) * 1000)
+                    logger.info(
+                        "POST /v1/messages model=%s provider=%s backend=%s "
+                        "in=%d out=%d cache_r=%d cache_w=%d streaming=false "
+                        "status=%d duration=%dms",
+                        meta["model"], meta["provider"], meta["backend_model"],
+                        in_tok, out_tok, cr_tok, cw_tok,
+                        response.status_code, duration_ms,
+                    )
+                    log_usage({
+                        "ts": _now_utc(),
+                        "model": meta["model"],
+                        "provider": meta["provider"],
+                        "backend_model": meta["backend_model"],
+                        "input_tokens": in_tok,
+                        "output_tokens": out_tok,
+                        "cache_read_tokens": cr_tok,
+                        "cache_write_tokens": cw_tok,
+                        "streaming": False,
+                        "status": response.status_code,
+                        "duration_ms": duration_ms,
+                    })
+                except Exception:
+                    pass
+
+        return response
 
     # ------------------------------------------------------------------
     # GET /v1/models  — list available models
@@ -117,7 +225,7 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         model_data = []
         for prov_name, prov in cfg.providers.items():
             for fmt, ep in prov.endpoints.items():
-                for m in ep.models:
+                for m in ep.model_names():
                     model_data.append({
                         "id": f"{prov_name}/{m}",
                         "object": "model",
@@ -151,7 +259,7 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
             for fmt, ep in prov.endpoints.items():
                 endpoints_info[fmt] = {
                     "base_url": ep.resolve_base_url(fmt),
-                    "models": ep.models,
+                    "models": ep.model_names(),
                 }
             provider_info[name] = {"endpoints": endpoints_info}
         return JSONResponse({"providers": provider_info})

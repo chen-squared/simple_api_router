@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from typing import Optional
 
 
@@ -26,8 +26,8 @@ def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None) -> lo
     root.addHandler(console)
 
     if log_file:
-        file_handler = RotatingFileHandler(
-            log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+        file_handler = TimedRotatingFileHandler(
+            log_file, when="midnight", backupCount=90, encoding="utf-8", utc=False,
         )
         file_handler.setLevel(level)
         file_handler.setFormatter(fmt)

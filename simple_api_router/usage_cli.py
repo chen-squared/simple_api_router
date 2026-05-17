@@ -1,0 +1,383 @@
+"""Usage statistics command — reads router.usage.jsonl and prints reports.
+
+Tiered pricing note
+-------------------
+Cost is computed **per individual request** (not on the aggregated total) so
+that each request is billed at the correct tier.  The tier is selected by
+comparing the request's *input_tokens* against each tier's *threshold*: the
+tier with the highest threshold that is still ≤ input_tokens applies, and
+ALL tokens in that request are billed at that tier's rates.
+"""
+from __future__ import annotations
+
+import json
+import sys
+from collections import defaultdict
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Config / path helpers
+# ---------------------------------------------------------------------------
+
+def _find_config(explicit: Optional[str]) -> Optional[str]:
+    """Return a resolved config path, or None."""
+    from simple_api_router.service import resolve_config
+    try:
+        return str(resolve_config(explicit))
+    except SystemExit:
+        return None
+
+
+def _resolve_usage_path(config_file: str) -> Path:
+    """Derive the usage JSONL path from the config's log_file setting."""
+    from simple_api_router.config import load_config
+
+    cfg_path = Path(config_file).expanduser().resolve()
+    config = load_config(cfg_path)
+    log_file = config.server.log_file or "router.log"
+    log_path = Path(log_file)
+    if not log_path.is_absolute():
+        log_path = cfg_path.parent / log_file
+    return log_path.parent / "router.usage.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# Loading records
+# ---------------------------------------------------------------------------
+
+def _load_records(usage_path: Path, since: date, until: date) -> List[dict]:
+    """Load records from the current JSONL file and its rotated siblings."""
+    records: List[dict] = []
+    candidates: List[Path] = []
+
+    if usage_path.exists():
+        candidates.append(usage_path)
+
+    if usage_path.parent.exists():
+        for p in sorted(usage_path.parent.glob(f"{usage_path.name}.*")):
+            # Rotated files are named <base>.<YYYY-MM-DD>; skip clearly out-of-range ones.
+            suffix = p.name[len(usage_path.name) + 1:]
+            try:
+                file_date = date.fromisoformat(suffix)
+                if file_date < since or file_date >= until:
+                    continue
+            except ValueError:
+                pass  # unknown suffix — include anyway
+            candidates.append(p)
+
+    for path in candidates:
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    ts_str = rec.get("ts", "")
+                    rec_date = datetime.fromisoformat(ts_str.rstrip("Z")).date()
+                    if since <= rec_date < until:
+                        records.append(rec)
+                except (json.JSONDecodeError, ValueError, KeyError):
+                    pass
+        except OSError:
+            pass
+
+    return records
+
+
+# ---------------------------------------------------------------------------
+# Cost calculation (per-record, supports tiered pricing)
+# ---------------------------------------------------------------------------
+
+def _record_cost(rec: dict, pricing: dict) -> Optional[float]:
+    """Return the estimated cost in USD for a single request record, or None."""
+    model = rec.get("model", "")
+    entry = pricing.get(model)
+    if entry is None:
+        return None
+
+    in_tok = rec.get("input_tokens", 0)
+    out_tok = rec.get("output_tokens", 0)
+    cr_tok = rec.get("cache_read_tokens", 0)
+    cw_tok = rec.get("cache_write_tokens", 0)
+
+    if entry.tiers:
+        # Pick the tier with the highest threshold that is still ≤ input tokens.
+        rate = sorted(entry.tiers, key=lambda t: t.threshold)[0]
+        for tier in entry.tiers:
+            if in_tok >= tier.threshold:
+                rate = tier
+        return (
+            in_tok / 1_000_000 * rate.input
+            + out_tok / 1_000_000 * rate.output
+            + cr_tok / 1_000_000 * rate.cache_read
+            + cw_tok / 1_000_000 * rate.cache_write
+        )
+    else:
+        return (
+            in_tok / 1_000_000 * entry.input
+            + out_tok / 1_000_000 * entry.output
+            + cr_tok / 1_000_000 * entry.cache_read
+            + cw_tok / 1_000_000 * entry.cache_write
+        )
+
+
+# ---------------------------------------------------------------------------
+# Aggregation
+# ---------------------------------------------------------------------------
+
+def _empty_agg() -> Dict[str, Any]:
+    return {
+        "requests": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "cost_usd": 0.0,
+        "_has_cost": False,
+    }
+
+
+def _add(agg: dict, rec: dict, pricing: dict) -> None:
+    agg["requests"] += 1
+    agg["input_tokens"] += rec.get("input_tokens", 0)
+    agg["output_tokens"] += rec.get("output_tokens", 0)
+    agg["cache_read_tokens"] += rec.get("cache_read_tokens", 0)
+    agg["cache_write_tokens"] += rec.get("cache_write_tokens", 0)
+    cost = _record_cost(rec, pricing)
+    if cost is not None:
+        agg["cost_usd"] += cost
+        agg["_has_cost"] = True
+
+
+def _aggregate_by_model(records: List[dict], pricing: dict) -> Dict[str, dict]:
+    agg: Dict[str, dict] = defaultdict(_empty_agg)
+    for rec in records:
+        _add(agg[rec.get("model", "unknown")], rec, pricing)
+    return dict(agg)
+
+
+def _aggregate_by_day_model(
+    records: List[dict], pricing: dict
+) -> Dict[str, Dict[str, dict]]:
+    agg: Dict[str, Dict[str, dict]] = defaultdict(lambda: defaultdict(_empty_agg))
+    for rec in records:
+        try:
+            day = datetime.fromisoformat(rec.get("ts", "").rstrip("Z")).date().isoformat()
+        except ValueError:
+            day = "unknown"
+        _add(agg[day][rec.get("model", "unknown")], rec, pricing)
+    return {d: dict(models) for d, models in agg.items()}
+
+
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
+def _fmt_tok(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
+def _fmt_cost(agg: dict) -> str:
+    if not agg.get("_has_cost"):
+        return "-"
+    return f"${agg['cost_usd']:.4f}"
+
+
+_COLS: Tuple[str, ...] = ("Model", "Provider", "Req", "Input", "Output", "Cache↑", "Cache↓", "Cost")
+_COL_W: Tuple[int, ...] = (38, 12, 6, 9, 9, 9, 9, 10)
+_TABLE_W = sum(_COL_W) + 2 * (len(_COL_W) - 1)
+
+
+def _hdr() -> str:
+    return "  ".join(h.ljust(w) for h, w in zip(_COLS, _COL_W))
+
+
+def _divider() -> str:
+    return "─" * _TABLE_W
+
+
+def _format_row(model: str, agg: dict) -> str:
+    provider = model.split("/")[0] if "/" in model else "-"
+    cells = (
+        model,
+        provider,
+        str(agg["requests"]),
+        _fmt_tok(agg["input_tokens"]),
+        _fmt_tok(agg["output_tokens"]),
+        _fmt_tok(agg["cache_write_tokens"]),
+        _fmt_tok(agg["cache_read_tokens"]),
+        _fmt_cost(agg),
+    )
+    return "  ".join(str(c).ljust(w) for c, w in zip(cells, _COL_W))
+
+
+def _total_agg(rows: Dict[str, dict]) -> dict:
+    total = _empty_agg()
+    for a in rows.values():
+        total["requests"] += a["requests"]
+        total["input_tokens"] += a["input_tokens"]
+        total["output_tokens"] += a["output_tokens"]
+        total["cache_read_tokens"] += a["cache_read_tokens"]
+        total["cache_write_tokens"] += a["cache_write_tokens"]
+        total["cost_usd"] += a["cost_usd"]
+        total["_has_cost"] = total["_has_cost"] or a["_has_cost"]
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Table output
+# ---------------------------------------------------------------------------
+
+def _print_summary(by_model: Dict[str, dict], period_str: str) -> None:
+    print(f"\nUsage summary — {period_str}\n")
+    print(_hdr())
+    print(_divider())
+    for model, agg in sorted(by_model.items(), key=lambda kv: -kv[1]["requests"]):
+        print(_format_row(model, agg))
+    print(_divider())
+    print(_format_row("TOTAL", _total_agg(by_model)))
+    print()
+
+
+def _print_daily(by_day: Dict[str, Dict[str, dict]], period_str: str) -> None:
+    day_w = 12
+    print(f"\nDaily breakdown — {period_str}\n")
+    print("  ".join(["Date".ljust(day_w), _hdr()]))
+    print("─" * (day_w + 2 + _TABLE_W))
+    for day in sorted(by_day.keys(), reverse=True):
+        models = by_day[day]
+        first = True
+        for model, agg in sorted(models.items(), key=lambda kv: -kv[1]["requests"]):
+            prefix = day if first else ""
+            print("  ".join([prefix.ljust(day_w), _format_row(model, agg)]))
+            first = False
+    print()
+
+
+# ---------------------------------------------------------------------------
+# JSON output
+# ---------------------------------------------------------------------------
+
+def _agg_to_dict(model: str, agg: dict) -> dict:
+    return {
+        "model": model,
+        "provider": model.split("/")[0] if "/" in model else None,
+        "requests": agg["requests"],
+        "input_tokens": agg["input_tokens"],
+        "output_tokens": agg["output_tokens"],
+        "cache_read_tokens": agg["cache_read_tokens"],
+        "cache_write_tokens": agg["cache_write_tokens"],
+        "cost_usd": round(agg["cost_usd"], 6) if agg["_has_cost"] else None,
+    }
+
+
+def _json_summary(by_model: Dict[str, dict], period: dict) -> dict:
+    rows = [_agg_to_dict(m, a) for m, a in sorted(by_model.items())]
+    total = _total_agg(by_model)
+    return {
+        "period": period,
+        "by_model": rows,
+        "total": {
+            "requests": total["requests"],
+            "input_tokens": total["input_tokens"],
+            "output_tokens": total["output_tokens"],
+            "cache_read_tokens": total["cache_read_tokens"],
+            "cache_write_tokens": total["cache_write_tokens"],
+            "cost_usd": round(total["cost_usd"], 6) if total["_has_cost"] else None,
+        },
+    }
+
+
+def _json_daily(by_day: Dict[str, Dict[str, dict]], period: dict) -> dict:
+    days = []
+    for day in sorted(by_day.keys()):
+        days.append({
+            "date": day,
+            "models": [_agg_to_dict(m, a) for m, a in sorted(by_day[day].items())],
+        })
+    return {"period": period, "by_day": days}
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def usage_command(args) -> None:
+    """Execute the ``usage`` subcommand."""
+
+    # ── load config ────────────────────────────────────────────────────────
+    config_file = _find_config(getattr(args, "config", None))
+    if config_file is None:
+        print("Error: could not find config.yaml. Use --config PATH.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        from simple_api_router.config import load_config
+        config = load_config(config_file)
+        pricing = config.pricing
+    except Exception as exc:
+        print(f"Error loading config: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    # ── resolve usage log path ─────────────────────────────────────────────
+    try:
+        usage_path = _resolve_usage_path(config_file)
+    except Exception as exc:
+        print(f"Error resolving usage log: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    # ── date range ─────────────────────────────────────────────────────────
+    period = getattr(args, "period", None)
+    last_n: int = getattr(args, "last", 7)
+    if period == "day":
+        last_n = 1
+    elif period == "week":
+        last_n = 7
+    elif period == "month":
+        last_n = 30
+
+    today = date.today()
+    since = today - timedelta(days=last_n - 1)
+    until = today + timedelta(days=1)
+    period_str = f"{since.isoformat()} → {today.isoformat()}"
+    period_dict = {"from": since.isoformat(), "to": today.isoformat(), "days": last_n}
+
+    # ── load & filter records ──────────────────────────────────────────────
+    records = _load_records(usage_path, since, until)
+
+    model_filter: Optional[str] = getattr(args, "model", None)
+    provider_filter: Optional[str] = getattr(args, "provider", None)
+    if model_filter:
+        records = [r for r in records if model_filter.lower() in r.get("model", "").lower()]
+    if provider_filter:
+        records = [r for r in records if r.get("provider", "") == provider_filter]
+
+    if not records:
+        print(f"No usage records found for {period_str}.")
+        if not usage_path.exists():
+            print(f"  (Usage log not found: {usage_path})")
+        return
+
+    # ── output ─────────────────────────────────────────────────────────────
+    fmt: str = getattr(args, "format", "table")
+    daily: bool = getattr(args, "daily", False)
+
+    if daily:
+        by_day = _aggregate_by_day_model(records, pricing)
+        if fmt == "json":
+            print(json.dumps(_json_daily(by_day, period_dict), indent=2))
+        else:
+            _print_daily(by_day, period_str)
+    else:
+        by_model = _aggregate_by_model(records, pricing)
+        if fmt == "json":
+            print(json.dumps(_json_summary(by_model, period_dict), indent=2))
+        else:
+            _print_summary(by_model, period_str)
