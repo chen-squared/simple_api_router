@@ -266,9 +266,9 @@ def _print_provider_block(provider: str, models: Dict[str, dict],
     print(f"\n{_BOLD}{provider}{_RESET}")
     for model, agg in sorted(models.items(), key=lambda kv: -kv[1]["requests"]):
         name = model.split("/", 1)[1] if "/" in model else model
-        print("  " + _format_row(name, agg, indent=0))
+        print(_format_row(name, agg, indent=2))
     if show_subtotal and len(models) > 1:
-        print(_GREY + "  " + _format_row("subtotal", _total_agg(models)) + _RESET)
+        print(_GREY + _format_row("subtotal", _total_agg(models), indent=2) + _RESET)
 
 
 def _print_summary(by_model: Dict[str, dict], period_str: str) -> None:
@@ -291,20 +291,21 @@ def _print_daily(by_day: Dict[str, Dict[str, dict]], period_str: str) -> None:
     print(f"\nDaily breakdown — {period_str}\n")
     for day in sorted(by_day.keys(), reverse=True):
         print(f"{_BOLD}{day}{_RESET}")
-        print("  " + _hdr())
-        print("  " + _divider())
+        print(_hdr())
+        print(_divider())
         grouped = _group_by_provider(by_day[day])
         for provider in sorted(grouped, key=lambda p: -sum(a["requests"] for a in grouped[p].values())):
             models = grouped[provider]
-            print(f"  {_BOLD}{provider}{_RESET}")
+            print(f"\n{_BOLD}{provider}{_RESET}")
             for model, agg in sorted(models.items(), key=lambda kv: -kv[1]["requests"]):
                 name = model.split("/", 1)[1] if "/" in model else model
-                print("    " + _format_row(name, agg))
+                print(_format_row(name, agg, indent=2))
             if len(models) > 1:
-                print(_GREY + "    " + _format_row("subtotal", _total_agg(models)) + _RESET)
+                print(_GREY + _format_row("subtotal", _total_agg(models), indent=2) + _RESET)
         day_total = _total_agg(by_day[day])
-        print("  " + _divider())
-        print("  " + _format_row("day total", day_total))
+        print()
+        print(_divider())
+        print(_format_row("day total", day_total))
         print()
 
 
