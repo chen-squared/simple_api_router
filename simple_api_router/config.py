@@ -215,19 +215,22 @@ def _find_unexpanded(obj: Any, path: str = "") -> List[str]:
     return problems
 
 
-def load_config(path: Union[str, Path] = "config.yaml") -> RouterConfig:
+def load_config(path: Union[str, Path] = "config.yaml", *, skip_env_check: bool = False) -> RouterConfig:
     """Load and validate configuration from YAML file.
 
     Raises ValueError if any ${VAR} placeholders remain unexpanded
-    (i.e. the referenced environment variable is not set).
+    (i.e. the referenced environment variable is not set), unless
+    *skip_env_check* is True (useful for read-only commands like `usage`
+    that don't need API keys).
     """
     with open(path, "r") as f:
         raw = yaml.safe_load(f)
     raw = _expand_env_vars(raw)
-    unexpanded = _find_unexpanded(raw)
-    if unexpanded:
-        raise ValueError(
-            "Config contains unexpanded environment variables — "
-            "set them before starting:\n  " + "\n  ".join(unexpanded)
-        )
+    if not skip_env_check:
+        unexpanded = _find_unexpanded(raw)
+        if unexpanded:
+            raise ValueError(
+                "Config contains unexpanded environment variables — "
+                "set them before starting:\n  " + "\n  ".join(unexpanded)
+            )
     return RouterConfig.model_validate(raw)

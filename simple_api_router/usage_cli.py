@@ -36,7 +36,7 @@ def _resolve_usage_path(config_file: str) -> Path:
     from simple_api_router.config import load_config
 
     cfg_path = Path(config_file).expanduser().resolve()
-    config = load_config(cfg_path)
+    config = load_config(cfg_path, skip_env_check=True)
     log_file = config.server.log_file or "router.log"
     log_path = Path(log_file)
     if not log_path.is_absolute():
@@ -332,7 +332,7 @@ def usage_command(args) -> None:
         sys.exit(1)
     try:
         from simple_api_router.config import load_config
-        config = load_config(config_file)
+        config = load_config(config_file, skip_env_check=True)
     except Exception as exc:
         print(f"Error loading config: {exc}", file=sys.stderr)
         sys.exit(1)
