@@ -17,6 +17,43 @@ _SERVICE_COMMANDS = frozenset(
 )
 
 
+def _models_command(config_path: str) -> None:
+    """Display all configured providers and models."""
+    from simple_api_router.config import load_config, ModelEntry
+
+    cfg_path = Path(config_path).expanduser().resolve()
+    try:
+        cfg = load_config(cfg_path, skip_env_check=True)
+    except Exception as exc:
+        print(f"Error loading config: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    VISION = "\033[36mvision\033[0m"
+    TEXT   = "\033[90mtext \033[0m"
+    BOLD   = "\033[1m"
+    RESET  = "\033[0m"
+
+    total = 0
+    for pname, provider in cfg.providers.items():
+        for ename, ep in provider.endpoints.items():
+            if not ep.models:
+                continue
+            print(f"\n{BOLD}{pname}{RESET}  [{ename}]")
+            for m in ep.models:
+                entry = m if isinstance(m, ModelEntry) else ModelEntry(name=m)
+                cap = TEXT if entry.text_only else VISION
+                pricing = cfg.get_pricing(f"{pname}/{entry.name}")
+                pricing_str = (
+                    f"  \033[90m${pricing.input:.3f}/${pricing.output:.3f}/MTok\033[0m"
+                    if pricing else ""
+                )
+                print(f"  {entry.name:<50} {cap}{pricing_str}")
+                total += 1
+
+    print(f"\n{total} models across {len(cfg.providers)} providers")
+    print(f"Config: {cfg_path}")
+
+
 def _load_env_file(path: Path) -> None:
     """Source a KEY=VALUE env file into os.environ (skipping comments/blanks)."""
     if not path.exists():
@@ -68,6 +105,7 @@ def main() -> None:
             "  status     Show service status\n"
             "  log        Tail service logs\n"
             "  usage      Show API usage statistics\n"
+            "  models     List configured providers and models\n"
             "\n"
             "examples:\n"
             "  simple-api-router                          # start server (config.yaml)\n"
@@ -119,6 +157,7 @@ def main() -> None:
     subparsers.add_parser("restart",   help="Restart the service")
     subparsers.add_parser("status",    help="Show service status")
     subparsers.add_parser("log",       help="Tail service logs")
+    subparsers.add_parser("models",    help="List configured providers and models")
 
     # ── usage ───────────────────────────────────────────────────────────────
     usage_p = subparsers.add_parser("usage", help="Show API usage statistics")
@@ -158,6 +197,10 @@ def main() -> None:
     if cmd == "install":
         from simple_api_router.service import install
         install(config=args.config, exe_override=args.exe)
+        return
+
+    if cmd == "models":
+        _models_command(args.config or "config.yaml")
         return
 
     if cmd == "usage":
