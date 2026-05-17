@@ -74,35 +74,44 @@ providers:
   #       models: [gemini-2.5-pro, gemini-2.5-flash]
 
 # ── Pricing (optional) ────────────────────────────────────────────────────────
-# Keys are "provider/model" (same format as the client `model` field).
-# Units: USD per million tokens.
-# Leave empty (or omit) to skip cost estimation in `simple-api-router usage`.
+# Pricing can be set inline in each model entry (recommended — no name repetition):
 #
-# Flat pricing example:
+# providers:
+#   anthropic:
+#     endpoints:
+#       anthropic:
+#         models:
+#           - name: claude-opus-4-5
+#             pricing:
+#               input: 15.0
+#               output: 75.0
+#               cache_read: 1.50
+#               cache_write: 18.75
+#           - name: claude-sonnet-4-5
+#             pricing:
+#               input: 3.0
+#               output: 15.0
+#   google:
+#     api_key: "${GOOGLE_API_KEY}"
+#     endpoints:
+#       google:
+#         models:
+#           - name: gemini-2.5-pro
+#             pricing:
+#               tiers:             # tiered: whole request billed at matching tier
+#                 - threshold: 0   # < 200 K input tokens
+#                   input: 1.25
+#                   output: 10.0
+#                   cache_read: 0.31
+#                   cache_write: 4.50
+#                 - threshold: 200000   # ≥ 200 K input tokens
+#                   input: 2.50
+#                   output: 15.0
+#                   cache_read: 0.625
+#                   cache_write: 9.00
+#
+# Alternatively, use the top-level pricing section (falls back when inline is absent):
 # pricing:
 #   "anthropic/claude-opus-4-5":
 #     input: 15.0
 #     output: 75.0
-#     cache_read: 1.50
-#     cache_write: 18.75
-#   "openai/gpt-4o":
-#     input: 2.50
-#     output: 10.0
-#
-# Tiered pricing example (Gemini 2.5 Pro):
-# Each tier's threshold is the minimum input_tokens for that tier to apply.
-# The tier with the highest threshold that is ≤ the request's input_tokens
-# is used — ALL tokens in that request are billed at that tier's rates.
-# pricing:
-#   "google/gemini-2.5-pro":
-#     tiers:
-#       - threshold: 0         # < 200 K input tokens
-#         input: 1.25
-#         output: 10.0
-#         cache_read: 0.31
-#         cache_write: 4.50
-#       - threshold: 200000    # ≥ 200 K input tokens
-#         input: 2.50
-#         output: 15.0
-#         cache_read: 0.625
-#         cache_write: 9.00

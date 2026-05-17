@@ -40,6 +40,9 @@ class ModelEntry(BaseModel):
     text_only: bool = False
     # Override the global server.multimodal_fallback for just this model.
     multimodal_fallback: Optional[str] = None
+    # Inline pricing for this model.  Takes precedence over the top-level
+    # RouterConfig.pricing section when both are present.
+    pricing: Optional["PricingEntry"] = None
 
 
 class EndpointConfig(BaseModel):
@@ -150,7 +153,30 @@ class RouterConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     providers: Dict[str, ProviderConfig] = Field(default_factory=dict)
     # Keys are "provider/model" strings (same format as the client `model` field).
+    # Used as a fallback when a model's inline ModelEntry.pricing is not set.
     pricing: Dict[str, PricingEntry] = Field(default_factory=dict)
+
+    def get_pricing(self, model_str: str) -> Optional[PricingEntry]:
+        """Return PricingEntry for *model_str* ("provider/model"), or None.
+
+        Lookup order:
+          1. Inline ``ModelEntry.pricing`` on the matching model entry.
+          2. Top-level ``RouterConfig.pricing[model_str]``.
+        """
+        if "/" in model_str:
+            prov_name, model_name = model_str.split("/", 1)
+        else:
+            prov_name, model_name = None, model_str
+
+        if prov_name and prov_name in self.providers:
+            result = self.providers[prov_name].find_model(model_name)
+            if result is not None:
+                _, ep = result
+                entry = ep.get_model_entry(model_name)
+                if entry.pricing is not None:
+                    return entry.pricing
+
+        return self.pricing.get(model_str)
 
 
 _ENV_PATTERN = re.compile(r"\$\{([^}]+)\}")

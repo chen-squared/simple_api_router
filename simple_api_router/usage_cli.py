@@ -92,10 +92,14 @@ def _load_records(usage_path: Path, since: date, until: date) -> List[dict]:
 # Cost calculation (per-record, supports tiered pricing)
 # ---------------------------------------------------------------------------
 
-def _record_cost(rec: dict, pricing: dict) -> Optional[float]:
-    """Return the estimated cost in USD for a single request record, or None."""
+def _record_cost(rec: dict, config) -> Optional[float]:
+    """Return the estimated cost in USD for a single request record, or None.
+
+    Uses ``config.get_pricing(model)`` which checks inline ModelEntry.pricing
+    first, then falls back to the top-level RouterConfig.pricing section.
+    """
     model = rec.get("model", "")
-    entry = pricing.get(model)
+    entry = config.get_pricing(model)
     if entry is None:
         return None
 
@@ -141,27 +145,27 @@ def _empty_agg() -> Dict[str, Any]:
     }
 
 
-def _add(agg: dict, rec: dict, pricing: dict) -> None:
+def _add(agg: dict, rec: dict, config) -> None:
     agg["requests"] += 1
     agg["input_tokens"] += rec.get("input_tokens", 0)
     agg["output_tokens"] += rec.get("output_tokens", 0)
     agg["cache_read_tokens"] += rec.get("cache_read_tokens", 0)
     agg["cache_write_tokens"] += rec.get("cache_write_tokens", 0)
-    cost = _record_cost(rec, pricing)
+    cost = _record_cost(rec, config)
     if cost is not None:
         agg["cost_usd"] += cost
         agg["_has_cost"] = True
 
 
-def _aggregate_by_model(records: List[dict], pricing: dict) -> Dict[str, dict]:
+def _aggregate_by_model(records: List[dict], config) -> Dict[str, dict]:
     agg: Dict[str, dict] = defaultdict(_empty_agg)
     for rec in records:
-        _add(agg[rec.get("model", "unknown")], rec, pricing)
+        _add(agg[rec.get("model", "unknown")], rec, config)
     return dict(agg)
 
 
 def _aggregate_by_day_model(
-    records: List[dict], pricing: dict
+    records: List[dict], config
 ) -> Dict[str, Dict[str, dict]]:
     agg: Dict[str, Dict[str, dict]] = defaultdict(lambda: defaultdict(_empty_agg))
     for rec in records:
@@ -169,7 +173,7 @@ def _aggregate_by_day_model(
             day = datetime.fromisoformat(rec.get("ts", "").rstrip("Z")).date().isoformat()
         except ValueError:
             day = "unknown"
-        _add(agg[day][rec.get("model", "unknown")], rec, pricing)
+        _add(agg[day][rec.get("model", "unknown")], rec, config)
     return {d: dict(models) for d, models in agg.items()}
 
 
@@ -321,7 +325,6 @@ def usage_command(args) -> None:
     try:
         from simple_api_router.config import load_config
         config = load_config(config_file)
-        pricing = config.pricing
     except Exception as exc:
         print(f"Error loading config: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -370,13 +373,13 @@ def usage_command(args) -> None:
     daily: bool = getattr(args, "daily", False)
 
     if daily:
-        by_day = _aggregate_by_day_model(records, pricing)
+        by_day = _aggregate_by_day_model(records, config)
         if fmt == "json":
             print(json.dumps(_json_daily(by_day, period_dict), indent=2))
         else:
             _print_daily(by_day, period_str)
     else:
-        by_model = _aggregate_by_model(records, pricing)
+        by_model = _aggregate_by_model(records, config)
         if fmt == "json":
             print(json.dumps(_json_summary(by_model, period_dict), indent=2))
         else:

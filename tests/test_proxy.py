@@ -510,57 +510,59 @@ class TestPricingConfig(unittest.TestCase):
             ]),
         }
 
+    def _wrap(self, pricing_dict):
+        """Wrap a plain pricing dict in a minimal config-like object."""
+        mock = MagicMock()
+        mock.get_pricing.side_effect = lambda model: pricing_dict.get(model)
+        return mock
+
     def _rec(self, model, in_tok, out_tok, cr=0, cw=0):
         return {"model": model, "input_tokens": in_tok, "output_tokens": out_tok,
                 "cache_read_tokens": cr, "cache_write_tokens": cw}
 
     def test_flat_pricing(self):
         from simple_api_router.usage_cli import _record_cost
-        pricing = self._make_pricing()
-        cost = _record_cost(self._rec("flat/model", 1_000_000, 1_000_000), pricing)
+        config = self._wrap(self._make_pricing())
+        cost = _record_cost(self._rec("flat/model", 1_000_000, 1_000_000), config)
         self.assertAlmostEqual(cost, 10.0 + 30.0)
 
     def test_flat_pricing_with_cache(self):
         from simple_api_router.usage_cli import _record_cost
-        pricing = self._make_pricing()
+        config = self._wrap(self._make_pricing())
         cost = _record_cost(
-            self._rec("flat/model", 1_000_000, 0, cr=1_000_000, cw=1_000_000), pricing
+            self._rec("flat/model", 1_000_000, 0, cr=1_000_000, cw=1_000_000), config
         )
         self.assertAlmostEqual(cost, 10.0 + 1.0 + 5.0)
 
     def test_no_pricing_returns_none(self):
         from simple_api_router.usage_cli import _record_cost
-        self.assertIsNone(_record_cost(self._rec("unknown/model", 1000, 500), {}))
+        self.assertIsNone(_record_cost(self._rec("unknown/model", 1000, 500), self._wrap({})))
 
     def test_tiered_below_first_threshold(self):
         from simple_api_router.usage_cli import _record_cost
-        pricing = self._make_pricing()
-        cost = _record_cost(self._rec("tiered/model", 50_000, 1_000), pricing)
-        # tier 0 applies (threshold=0, input=1.0/M, output=5.0/M)
+        config = self._wrap(self._make_pricing())
+        cost = _record_cost(self._rec("tiered/model", 50_000, 1_000), config)
         expected = 50_000 / 1e6 * 1.0 + 1_000 / 1e6 * 5.0
         self.assertAlmostEqual(cost, expected)
 
     def test_tiered_above_middle_threshold(self):
         from simple_api_router.usage_cli import _record_cost
-        pricing = self._make_pricing()
-        cost = _record_cost(self._rec("tiered/model", 150_000, 1_000), pricing)
-        # tier 128K applies (input=2.0/M, output=8.0/M)
+        config = self._wrap(self._make_pricing())
+        cost = _record_cost(self._rec("tiered/model", 150_000, 1_000), config)
         expected = 150_000 / 1e6 * 2.0 + 1_000 / 1e6 * 8.0
         self.assertAlmostEqual(cost, expected)
 
     def test_tiered_exactly_at_threshold(self):
         from simple_api_router.usage_cli import _record_cost
-        pricing = self._make_pricing()
-        cost = _record_cost(self._rec("tiered/model", 200_000, 0), pricing)
-        # exactly at 200K → top tier (input=4.0/M)
+        config = self._wrap(self._make_pricing())
+        cost = _record_cost(self._rec("tiered/model", 200_000, 0), config)
         expected = 200_000 / 1e6 * 4.0
         self.assertAlmostEqual(cost, expected)
 
     def test_tiered_above_top_threshold(self):
         from simple_api_router.usage_cli import _record_cost
-        pricing = self._make_pricing()
-        cost = _record_cost(self._rec("tiered/model", 500_000, 1_000), pricing)
-        # top tier applies (input=4.0/M, output=12.0/M)
+        config = self._wrap(self._make_pricing())
+        cost = _record_cost(self._rec("tiered/model", 500_000, 1_000), config)
         expected = 500_000 / 1e6 * 4.0 + 1_000 / 1e6 * 12.0
         self.assertAlmostEqual(cost, expected)
 
@@ -574,6 +576,7 @@ class TestPricingConfig(unittest.TestCase):
                 PricingTier(threshold=200000, input=2.0, output=8.0),
             ])
         }
+        config = self._wrap(pricing)
         today = __import__("datetime").date.today().isoformat()
         records = [
             {"ts": f"{today}T10:00:00Z", "model": "g/m",
@@ -583,9 +586,7 @@ class TestPricingConfig(unittest.TestCase):
              "input_tokens": 300_000, "output_tokens": 2_000,
              "cache_read_tokens": 0, "cache_write_tokens": 0},
         ]
-        agg = _aggregate_by_model(records, pricing)["g/m"]
-        # rec1: tier0 → 100K*1/M + 1K*5/M = 0.1 + 0.005 = 0.105
-        # rec2: tier1 → 300K*2/M + 2K*8/M = 0.6 + 0.016 = 0.616
+        agg = _aggregate_by_model(records, config)["g/m"]
         expected = 0.105 + 0.616
         self.assertAlmostEqual(agg["cost_usd"], expected, places=9)
         self.assertEqual(agg["requests"], 2)
@@ -608,3 +609,57 @@ class TestPricingConfig(unittest.TestCase):
         self.assertEqual(len(tiers), 2)
         self.assertEqual(tiers[1].threshold, 200000)
         self.assertAlmostEqual(tiers[1].input, 2.50)
+
+    def test_inline_pricing_overrides_toplevel(self):
+        """Inline ModelEntry.pricing takes precedence over RouterConfig.pricing."""
+        from simple_api_router.config import RouterConfig
+        raw = {
+            "providers": {
+                "myprov": {
+                    "base_url": "http://localhost:1234",
+                    "endpoints": {
+                        "openai_chat": {
+                            "models": [
+                                {
+                                    "name": "mymodel",
+                                    "pricing": {"input": 99.0, "output": 199.0},
+                                }
+                            ]
+                        }
+                    },
+                }
+            },
+            "pricing": {
+                "myprov/mymodel": {"input": 1.0, "output": 2.0},
+            },
+        }
+        cfg = RouterConfig.model_validate(raw)
+        entry = cfg.get_pricing("myprov/mymodel")
+        # inline wins
+        self.assertAlmostEqual(entry.input, 99.0)
+        self.assertAlmostEqual(entry.output, 199.0)
+
+    def test_toplevel_pricing_fallback(self):
+        """Top-level pricing section is used when no inline pricing set."""
+        from simple_api_router.config import RouterConfig
+        raw = {
+            "providers": {
+                "myprov": {
+                    "base_url": "http://localhost:1234",
+                    "endpoints": {
+                        "openai_chat": {"models": ["mymodel"]}
+                    },
+                }
+            },
+            "pricing": {
+                "myprov/mymodel": {"input": 5.0, "output": 20.0},
+            },
+        }
+        cfg = RouterConfig.model_validate(raw)
+        entry = cfg.get_pricing("myprov/mymodel")
+        self.assertAlmostEqual(entry.input, 5.0)
+
+    def test_get_pricing_unknown_model_returns_none(self):
+        from simple_api_router.config import RouterConfig
+        cfg = RouterConfig.model_validate({})
+        self.assertIsNone(cfg.get_pricing("unknown/model"))
