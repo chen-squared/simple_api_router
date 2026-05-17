@@ -200,7 +200,8 @@ def main() -> None:
         return
 
     if cmd == "models":
-        _models_command(args.config or "config.yaml")
+        from simple_api_router.service import resolve_config
+        _models_command(str(resolve_config(args.config)))
         return
 
     if cmd == "usage":
