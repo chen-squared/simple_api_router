@@ -4,27 +4,31 @@
 
 ### Added
 - **Multi-format provider endpoints** — a single provider can now expose multiple API formats (`anthropic`, `openai_chat`, `openai_responses`, `google`) under one `api_key`. Each format has its own `base_url` and `models` list. Replaces the old flat `type`/`api_format` field on `ProviderConfig`.
-- **Google Gemini native format support** (`api_format: google`) — full bidirectional Anthropic ↔ Gemini `generateContent` conversion:
+- **Google Gemini native format support** (`google` endpoint) — full bidirectional Anthropic ↔ Gemini `generateContent` conversion:
   - Text messages, system prompt → `systemInstruction`
   - Tools → `functionDeclarations`; `tool_result` resolves function name from message history
   - Tool choice → `functionCallingConfig` (AUTO / NONE / ANY / specific function)
   - Image blocks → `inlineData` (base64) or `fileData` (URL)
-  - `finishReason` mapping (STOP → `end_turn`, MAX_TOKENS → `max_tokens`, STOP_SEQUENCE → `stop_sequence`, SAFETY → `end_turn`)
+  - `finishReason` mapping (STOP → `end_turn`, MAX_TOKENS → `max_tokens`, SAFETY → `end_turn`)
   - Full SSE streaming — text deltas, tool use blocks, usage in `message_delta`
-  - `thinking` / `redacted_thinking` blocks silently skipped
+- **Usage logging** — every request logged to `router.usage.jsonl` (daily-rotated, 90-day history)
+- **`simple-api-router usage`** subcommand — per-provider/model table with token counts and cost; supports `--last N`, `--period`, `--daily`, `--model`, `--provider`, `--format json`
+- **`simple-api-router models`** subcommand — lists configured providers, endpoints, models with multimodal/text-only label and per-currency pricing
+- **Multi-currency pricing** — `PricingEntry.currency` field (`"CNY"` default, `"USD"` supported); usage table shows `¥ Cost` and `$ Cost` columns separately so mixed-currency configs are reported accurately
+- **Tiered pricing** (`PricingEntry.tiers`) for models like Gemini 2.5 Pro; entire request billed at the matching tier
+- **Inline pricing** on `ModelEntry` — pricing attached directly to the model entry; falls back to top-level `pricing:` section
+- **Multimodal fallback routing** — `text_only` models automatically re-route image/video requests to a configurable fallback model (`server.multimodal_fallback` or per-model `multimodal_fallback`)
+- **Service management CLI** (`install`, `uninstall`, `start`, `stop`, `restart`, `status`, `log`) — replaces `scripts/service.sh`; supports both macOS launchd and Linux systemd
 - `EndpointConfig` model with `base_url`, `models`, `model_map`, `deepseek_reasoning`, default URL resolution per format
 - `ProviderConfig.find_model()` — exact match first, wildcard (empty `models`) as fallback; duplicate model detection across endpoints
-- 26 new tests for Google converter: request conversion, response conversion, streaming (150 total)
 
 ### Fixed
-- **Streaming errors return correct HTTP status codes** — upstream 401/403/404 now propagate as the actual HTTP status instead of always 200; achieved by inspecting upstream response headers before committing to `StreamingResponse`
-- **Retry exhaustion returns last upstream status code** — persistent 429/503 now propagated correctly instead of always 502; network-level exhaustion still returns 502
-- **Unexpanded `${VAR}` placeholders raise at startup** — `load_config` detects unset env vars and raises `ValueError` listing all affected paths, preventing silent auth failures
-- **Dual auth headers for Anthropic-type providers** — both `x-api-key` and `Authorization: Bearer` are sent; providers use whichever they recognise (fixes ollama.com compatibility without extra config)
-- **Fake key values ignored** — `api_key: "none"` / `"null"` / `"false"` / `"no"` / `"0"` treated as absent; no spurious auth header sent to upstream
-- **Non-JSON upstream error bodies handled** — providers returning plain-text error bodies (e.g. ollama.com's `"unauthorized\n"`) no longer cause 500; body falls back to raw text
-- **`service.sh status` false negative on macOS** — replaced `launchctl list | grep` (SIGPIPE + pipefail caused false "not loaded") with `launchctl list <label>` (direct exit code)
-- 21 new tests for the above fixes (118 total, now 150 with Google converter)
+- **Streaming errors return correct HTTP status codes** — upstream 401/403/404 now propagate as the actual HTTP status instead of always 200
+- **Retry exhaustion returns last upstream status code** — persistent 429/503 now propagated correctly instead of always 502
+- **Unexpanded `${VAR}` placeholders raise at startup** — `load_config` detects unset env vars and raises `ValueError` listing all affected paths
+- **Dual auth headers for Anthropic-type providers** — both `x-api-key` and `Authorization: Bearer` sent (fixes ollama.com compatibility)
+- **Non-JSON upstream error bodies handled** — plain-text error responses no longer cause 500
+- **Cache token fallback** — if `cache_read`/`cache_write` pricing is absent, those tokens are billed at the `input` rate
 
 ## [0.1.0] — Initial Release
 

@@ -13,13 +13,13 @@ from simple_api_router.app import create_app
 from simple_api_router.logger import setup_logging
 
 _SERVICE_COMMANDS = frozenset(
-    {"install", "uninstall", "start", "stop", "restart", "status", "log", "usage"}
+    {"uninstall", "start", "stop", "restart", "status", "log"}
 )
 
 
 def _models_command(config_path: str) -> None:
     """Display all configured providers and models."""
-    from simple_api_router.config import load_config, ModelEntry
+    from simple_api_router.config import ModelEntry
 
     cfg_path = Path(config_path).expanduser().resolve()
     try:
@@ -78,7 +78,7 @@ def _load_env_file(path: Path) -> None:
             os.environ.setdefault(key.strip(), value.strip())
 
 
-def _run_server(config_str: str, env_file: Optional[str] = None) -> None:  # noqa: F821
+def _run_server(config_str: str, env_file: Optional[str] = None) -> None:
     if env_file:
         _load_env_file(Path(env_file))
 

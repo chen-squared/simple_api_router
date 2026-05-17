@@ -7,6 +7,13 @@ that each request is billed at the correct tier.  The tier is selected by
 comparing the request's *input_tokens* against each tier's *threshold*: the
 tier with the highest threshold that is still ≤ input_tokens applies, and
 ALL tokens in that request are billed at that tier's rates.
+
+Multi-currency
+--------------
+Each ``PricingEntry`` carries a ``currency`` field (``"CNY"`` or ``"USD"``).
+Costs are accumulated separately into ``cost_cny`` and ``cost_usd`` buckets
+and displayed in distinct columns so mixed-currency configs are reported
+accurately without any implicit conversion.
 """
 from __future__ import annotations
 
@@ -320,13 +327,7 @@ def _print_daily(by_day: Dict[str, Dict[str, dict]], period_str: str) -> None:
         print(_divider())
         grouped = _group_by_provider(by_day[day])
         for provider in sorted(grouped, key=lambda p: -sum(a["requests"] for a in grouped[p].values())):
-            models = grouped[provider]
-            print(f"\n{_BOLD}{provider}{_RESET}")
-            for model, agg in sorted(models.items(), key=lambda kv: -kv[1]["requests"]):
-                name = model.split("/", 1)[1] if "/" in model else model
-                print(_format_row(name, agg, indent=2))
-            if len(models) > 1:
-                print(_GREY + _format_row("subtotal", _total_agg(models), indent=2) + _RESET)
+            _print_provider_block(provider, grouped[provider], show_subtotal=True)
         day_total = _total_agg(by_day[day])
         print()
         print(_divider())

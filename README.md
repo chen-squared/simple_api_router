@@ -1,6 +1,6 @@
 # Simple API Router
 
-A lightweight multi-provider LLM API router that exposes a **unified Anthropic Messages API** (`/v1/messages`) and routes requests to multiple backend providers — Anthropic, OpenAI, DeepSeek, or any OpenAI-compatible endpoint.
+A lightweight multi-provider LLM API router that exposes a **unified Anthropic Messages API** (`/v1/messages`) and routes requests to multiple backend providers — Anthropic, OpenAI, Google Gemini, DeepSeek, or any OpenAI-compatible endpoint.
 
 Designed for use with tools like [Claude Code](https://claude.ai/code) that speak the Anthropic API but need flexible model routing.
 
@@ -10,18 +10,20 @@ Designed for use with tools like [Claude Code](https://claude.ai/code) that spea
 
 - **Unified Anthropic API** — any Anthropic-compatible client (Claude Code, etc.) works out of the box
 - **`provider/model` routing** — `model: "openai/gpt-4o"`, `model: "deepseek/deepseek-chat"`, `model: "ant2/claude-opus-4-5"`, etc.
-- **Anthropic backend** — pure HTTP proxy, zero conversion; all Anthropic features (extended thinking, prompt caching, `anthropic-beta` headers, streaming) pass through verbatim
-- **OpenAI backend** — full bidirectional Anthropic ↔ OpenAI conversion:
-  - Text, multi-turn, system prompts
-  - Tool use / function calling (including streaming `input_json_delta`)
-  - Vision (base64 + URL images)
-  - Extended thinking → OpenAI reasoning effort (adaptive maps to `high`)
-  - Streaming SSE with all event types
-  - **OpenAI Responses API** (`api_format: openai_responses`) for providers that use `/v1/responses`
-- **DeepSeek reasoning passthrough** — `reasoning_content` preserved across request/response/streaming; auto-enabled for any `deepseek-*` model
-- **1M context suffix** — Claude Code's `[1m]` model suffix is stripped before forwarding but the full context window is honoured
-- **`model_map`** per provider — remap external model names to backend names
-- **Model catalog** — `GET /v1/models` lists all configured models
+- **Anthropic backend** — pure HTTP proxy; all features (extended thinking, prompt caching, `anthropic-beta` headers, streaming) pass through verbatim
+- **OpenAI backend** — full bidirectional Anthropic ↔ OpenAI Chat Completions conversion:
+  - Text, multi-turn, system prompts, tool use / function calling
+  - Vision (base64 + URL images), streaming SSE with all event types
+  - Extended thinking → reasoning effort; `input_json_delta` streaming
+  - **Responses API** (`openai_responses` endpoint) for `/v1/responses`
+- **Google Gemini backend** — full bidirectional Anthropic ↔ Gemini `generateContent` conversion:
+  - System prompt, tools, tool choice, images, streaming
+- **DeepSeek reasoning passthrough** — `reasoning_content` preserved; auto-enabled for `deepseek-*` models
+- **Multimodal fallback routing** — text-only models automatically re-route image/video requests to a configurable multimodal model
+- **Usage logging** — every request logged to `router.usage.jsonl`; view with `simple-api-router usage`
+- **Hot reload** — provider/model/key changes apply within a second, no restart needed
+- **`model_map`** — remap external model names to backend names per endpoint
+- **1M context suffix** — Claude Code's `[1m]` suffix stripped before forwarding
 
 ---
 
@@ -37,79 +39,76 @@ pip install -e ".[dev]"
 
 ### 2. Configure
 
-Create or edit `config.yaml`:
+The default config location is `~/.config/simple-api-router/config.yaml`.
 
 ```yaml
 server:
   host: "0.0.0.0"
   port: 8080
-  max_retries: 3        # retry upstream errors (429/5xx/529/network), default 3
+  log_level: "INFO"
+  log_file: "router.log"   # relative to config directory; null = stdout only
+  max_retries: 3
 
 providers:
   anthropic:
-    type: anthropic
     api_key: "${ANTHROPIC_API_KEY}"
-    models:
-      - claude-opus-4-5
-      - claude-sonnet-4-5
+    endpoints:
+      anthropic:
+        models:
+          - claude-opus-4-5
+          - claude-sonnet-4-5
 
   openai:
-    type: openai
     api_key: "${OPENAI_API_KEY}"
-    models:
-      - gpt-4o
-      - gpt-4o-mini
+    endpoints:
+      openai_chat:
+        models: [gpt-4o, gpt-4o-mini]
+      openai_responses:
+        models: [o3, o4-mini]
 
   deepseek:
-    type: openai
     api_key: "${DEEPSEEK_API_KEY}"
-    base_url: "https://api.deepseek.com/v1"
-    deepseek_reasoning: true   # enable reasoning_content passthrough
-    models:
-      - deepseek-chat
-      - deepseek-reasoner
+    endpoints:
+      openai_chat:
+        base_url: "https://api.deepseek.com"
+        models: [deepseek-chat, deepseek-reasoner]
 ```
 
+Store API keys in `~/.config/simple-api-router/env`:
+
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-export OPENAI_API_KEY="sk-..."
-export DEEPSEEK_API_KEY="sk-..."
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+DEEPSEEK_API_KEY=sk-...
 ```
 
 ### 3. Run
 
 ```bash
 # Foreground (for testing)
-simple-api-router --config config.yaml
+simple-api-router
 
-# Or via python -m
-python -m simple_api_router --config config.yaml
+# Explicit config path
+simple-api-router --config /path/to/config.yaml
 ```
 
-### 4. Run as a macOS background service (auto-start on login)
+### 4. Run as a background service
 
 ```bash
-# From the project directory:
-./scripts/service.sh install
+# Install and start (macOS launchd / Linux systemd)
+simple-api-router install
+
+# Control commands
+simple-api-router start
+simple-api-router stop
+simple-api-router restart
+simple-api-router status
+simple-api-router log        # tail live logs
+simple-api-router uninstall
 ```
 
-This will:
-- Auto-detect the `simple-api-router` executable
-- Create `~/.config/simple-api-router/env` for your API keys (edit this file)
-- Install a launchd plist to `~/Library/LaunchAgents/`
-- Start the service immediately and on every login
-
-**Control commands:**
-```bash
-./scripts/service.sh start    # start
-./scripts/service.sh stop     # stop
-./scripts/service.sh restart  # restart
-./scripts/service.sh status   # show launchd state + recent logs
-./scripts/service.sh log      # tail live logs
-./scripts/service.sh uninstall
-```
-
-**Hot reload:** just save `config.yaml` — provider/model/key/retry changes apply automatically within a second, with no restart and no dropped connections. Changes to `host` or `port` require a restart.
+**macOS:** installs to `~/Library/LaunchAgents/` (auto-starts on login).  
+**Linux:** installs to `~/.config/systemd/user/` (systemd user unit).
 
 ### 5. Use with Claude Code
 
@@ -120,9 +119,10 @@ ANTHROPIC_BASE_URL=http://localhost:8080 claude
 Then pick any configured model:
 
 ```
-/model deepseek/deepseek-reasoner
-/model openai/gpt-4o
 /model anthropic/claude-opus-4-5
+/model openai/gpt-4o
+/model deepseek/deepseek-reasoner
+/model google/gemini-2.5-pro
 ```
 
 ---
@@ -135,52 +135,50 @@ Then pick any configured model:
 |-------|---------|-------------|
 | `host` | `"0.0.0.0"` | Bind host |
 | `port` | `8080` | Bind port |
-| `log_level` | `"INFO"` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
-| `log_file` | `"router.log"` | Log file path; set to `null` to log to stdout only |
+| `log_level` | `"INFO"` | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `log_file` | `"router.log"` | Log file path (relative = next to config); `null` = stdout only |
+| `max_retries` | `3` | Retry attempts on upstream 429/5xx/network errors |
+| `multimodal_fallback` | `null` | Global fallback model for text-only → multimodal re-routing (`"provider/model"`) |
 
 ### `providers`
 
-Each key is the provider name used as the prefix in `provider/model` routing:
+Each key is the **provider name** used as the prefix in `provider/model` routing.
 
 ```yaml
 providers:
   <provider-name>:
-    type: anthropic | openai   # required
-    api_key: "..."             # required; supports ${ENV_VAR} expansion
-    base_url: "..."            # optional; defaults to official endpoint
-    models:                    # optional; if omitted, any model name is accepted
-      - model-name
-    model_map:                 # optional; remap external name → backend name
-      external-name: backend-name
-    api_format: openai_chat | openai_responses   # (openai type only) default: openai_chat
-    deepseek_reasoning: true | false             # (openai type only) default: auto-detect
+    api_key: "${ENV_VAR}"     # supports ${ENV_VAR} expansion; omit for keyless endpoints
+    base_url: "..."           # shared base URL; individual endpoints inherit unless overridden
+    endpoints:
+      <format>:               # one of: anthropic, openai_chat, openai_responses, google
+        base_url: "..."       # endpoint-level override (optional)
+        models:               # list of model names (plain strings or dicts)
+          - plain-model-name
+          - name: model-name
+            text_only: true
+            multimodal_fallback: "provider/model"
+            pricing:
+              input: 3.0
+              output: 15.0
+        model_map:            # remap client name → backend name (optional)
+          client-name: backend-name
+        deepseek_reasoning: true | false   # None = auto-detect from model name
 ```
 
-**`type: anthropic`** — pure HTTP proxy. All Anthropic headers and features (extended thinking, prompt caching, beta headers) pass through unchanged.
+#### Endpoint formats
 
-**`type: openai`** — full bidirectional conversion layer. Supports any OpenAI Chat Completions-compatible endpoint, plus the Responses API (`api_format: openai_responses`).
-
-#### `api_format`
-
-| Value | Endpoint | Use case |
+| Format | Default base URL | Use case |
 |---|---|---|
-| `openai_chat` (default) | `POST /chat/completions` | Standard OpenAI, DeepSeek, Ollama, etc. |
-| `openai_responses` | `POST /responses` | OpenAI Responses API |
+| `anthropic` | `https://api.anthropic.com` | Pure proxy — all Anthropic features pass through |
+| `openai_chat` | `https://api.openai.com` | OpenAI, DeepSeek, Ollama, vLLM, LM Studio, etc. |
+| `openai_responses` | `https://api.openai.com` | OpenAI Responses API (`/v1/responses`) |
+| `google` | `https://generativelanguage.googleapis.com` | Google Gemini native API |
 
-#### `deepseek_reasoning`
-
-Controls whether `reasoning_content` is passed through in requests/responses:
-
-- `true` — always enabled
-- `false` — always disabled
-- omitted — auto-detected from model name (enabled for any `deepseek-*` model)
+A single provider can have multiple endpoint formats, each with its own model list.
 
 #### `text_only` and multimodal fallback
 
-Models can be marked as text-only when they don't support image or video content.
-When a request containing such content is routed to a `text_only` model, the router
-automatically re-routes it to a multimodal model instead of forwarding and letting the
-upstream return an error.
+Mark text-only models so the router re-routes image/video requests instead of forwarding them and getting an error:
 
 ```yaml
 server:
@@ -188,81 +186,168 @@ server:
 
 providers:
   local:
-    base_url: "http://localhost:11434"
+    endpoints:
+      openai_chat:
+        base_url: "http://localhost:11434"
+        models:
+          - llava                              # plain string = multimodal capable
+          - name: deepseek-r1
+            text_only: true                   # uses server.multimodal_fallback
+          - name: qwen2.5-coder:32b
+            text_only: true
+            multimodal_fallback: "local/llava" # per-model override
+```
+
+Priority: **per-model `multimodal_fallback`** > **`server.multimodal_fallback`** > forward as-is (with a warning).
+
+### `pricing`
+
+Pricing can be set **inline** on each model entry (recommended) or in a top-level `pricing` section (fallback). Prices are per million tokens.
+
+```yaml
+providers:
+  anthropic:
+    endpoints:
+      anthropic:
+        models:
+          - name: claude-opus-4-5
+            pricing:
+              currency: USD          # "CNY" (default) or "USD"
+              input: 15.0
+              output: 75.0
+              cache_read: 1.50
+              cache_write: 18.75
+
+  deepseek:
     endpoints:
       openai_chat:
         models:
-          - llava                             # plain string = multimodal-capable
-          - name: deepseek-r1                 # dict form = with extra attributes
-            text_only: true                  # uses global server.multimodal_fallback
-          - name: qwen2.5-coder:32b
-            text_only: true
-            multimodal_fallback: "local/llava"  # per-model override
+          - name: deepseek-chat
+            pricing:
+              currency: CNY
+              input: 1.0
+              output: 2.0
+              cache_read: 0.1        # omit = billed at input rate
+              cache_write: 1.0       # omit = billed at input rate
 
   google:
-    api_key: "${GOOGLE_API_KEY}"
     endpoints:
       google:
-        models: [gemini-2.5-flash, gemini-2.5-pro]  # multimodal, no flags needed
+        models:
+          - name: gemini-2.5-pro
+            pricing:
+              currency: USD
+              tiers:                 # tiered: whole request billed at matching tier
+                - threshold: 0       # input_tokens < 200 K
+                  input: 1.25
+                  output: 10.0
+                  cache_read: 0.31
+                - threshold: 200000  # input_tokens ≥ 200 K
+                  input: 2.50
+                  output: 15.0
+                  cache_read: 0.625
 ```
 
-Priority: **model-level `multimodal_fallback`** > **`server.multimodal_fallback`** > warning logged, request forwarded as-is.
+Top-level fallback (when inline pricing is absent):
 
-The `model` field in the response always reflects the **original** model the client requested (routing is transparent to the client).
+```yaml
+pricing:
+  "anthropic/claude-opus-4-5":
+    currency: USD
+    input: 15.0
+    output: 75.0
+```
 
+---
 
+## CLI Reference
+
+### `simple-api-router [run]`
+
+Start the API server.
+
+```
+simple-api-router [--config PATH] [--env-file PATH]
+simple-api-router run [--config PATH] [--env-file PATH]
+```
+
+### `simple-api-router models`
+
+List all configured providers and models with capability and pricing info.
+
+```
+simple-api-router models [--config PATH]
+```
+
+Output example:
+```
+anthropic  [anthropic]
+  claude-opus-4-5                                    multimodal  ¥109.00in ¥545.00out ¥10.89cr ¥136.73cw  /MTok
+  claude-sonnet-4-5                                  multimodal  ¥21.82in ¥109.10out ¥2.18cr ¥27.27cw  /MTok
+
+openai  [openai_chat]
+  gpt-4o                                             multimodal
+```
+
+### `simple-api-router usage`
+
+Show API usage statistics from the usage log.
+
+```
+simple-api-router usage [--last N] [--period day|week|month]
+                        [--daily] [--model PATTERN] [--provider NAME]
+                        [--format table|json] [--config PATH]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--last N` | `7` | Number of days to include |
+| `--period` | — | Preset: `day` (1), `week` (7), `month` (30) |
+| `--daily` | off | Show per-day breakdown instead of summary |
+| `--model PATTERN` | — | Filter by model name (substring) |
+| `--provider NAME` | — | Filter by provider name |
+| `--format` | `table` | `table` or `json` |
+
+The `¥ Cost` and `$ Cost` columns show costs in CNY and USD respectively; a `-` means no pricing is configured for that model.
+
+### Service management commands
+
+```
+simple-api-router install [--config PATH] [--exe PATH]
+simple-api-router uninstall
+simple-api-router start | stop | restart | status | log
+```
+
+---
+
+## HTTP API
 
 ### `POST /v1/messages`
 
 Standard [Anthropic Messages API](https://docs.anthropic.com/en/api/messages). Use `model: "provider/model"` to route:
 
 ```bash
-# Anthropic backend (pure proxy)
 curl http://localhost:8080/v1/messages \
   -H "x-api-key: any" \
   -H "Content-Type: application/json" \
   -d '{"model":"anthropic/claude-opus-4-5","max_tokens":1024,"messages":[{"role":"user","content":"Hello!"}]}'
-
-# OpenAI backend (converted)
-curl http://localhost:8080/v1/messages \
-  -H "x-api-key: any" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"openai/gpt-4o","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
 If the provider prefix is omitted (e.g. `"model": "claude-opus-4-5"`), the first configured provider that lists that model is used.
 
 ### `GET /v1/models`
 
-Returns all configured models in Anthropic-compatible format:
-
-```json
-{
-  "object": "list",
-  "data": [
-    {"id": "anthropic/claude-opus-4-5", "object": "model", "owned_by": "anthropic"},
-    {"id": "openai/gpt-4o", "object": "model", "owned_by": "openai"},
-    {"id": "deepseek/deepseek-chat", "object": "model", "owned_by": "deepseek"}
-  ]
-}
-```
+Returns all configured models in Anthropic-compatible format.
 
 ### `GET /health`
 
 ```json
-{"status": "ok", "uptime_seconds": 42.1, "providers": ["anthropic", "openai", "deepseek"]}
+{"status": "ok", "uptime_seconds": 42.1, "providers": ["anthropic", "openai"]}
 ```
 
 ### `GET /stats`
 
-```json
-{
-  "providers": {
-    "anthropic": {"type": "anthropic", "models": ["claude-opus-4-5"], "base_url": "..."},
-    "openai":    {"type": "openai",    "models": ["gpt-4o"], "base_url": "..."}
-  }
-}
-```
+Returns per-provider model lists and base URLs.
 
 ---
 
@@ -270,18 +355,18 @@ Returns all configured models in Anthropic-compatible format:
 
 ### Multiple Anthropic Accounts
 
-Spread load across multiple API keys:
-
 ```yaml
 providers:
   ant1:
-    type: anthropic
     api_key: "${ANTHROPIC_KEY_1}"
-    models: [claude-opus-4-5, claude-sonnet-4-5]
+    endpoints:
+      anthropic:
+        models: [claude-opus-4-5, claude-sonnet-4-5]
   ant2:
-    type: anthropic
     api_key: "${ANTHROPIC_KEY_2}"
-    models: [claude-opus-4-5, claude-sonnet-4-5]
+    endpoints:
+      anthropic:
+        models: [claude-opus-4-5, claude-sonnet-4-5]
 ```
 
 Use `model: "ant1/claude-opus-4-5"` or `model: "ant2/claude-opus-4-5"`.
@@ -291,21 +376,28 @@ Use `model: "ant1/claude-opus-4-5"` or `model: "ant2/claude-opus-4-5"`.
 ```yaml
 providers:
   local:
-    base_url: "http://localhost:11434"
     endpoints:
       openai_chat:
-        models: [llama3.2, qwen2.5-coder]   # /v1 suffix on base_url is stripped automatically
+        base_url: "http://localhost:11434"
+        models: [llama3.2, qwen2.5-coder]
 ```
 
-### OpenAI Responses API
+The trailing `/v1` on a `base_url` is stripped automatically.
+
+### Multi-format provider (one key, multiple API styles)
 
 ```yaml
 providers:
-  openai-responses:
-    type: openai
-    api_key: "${OPENAI_API_KEY}"
-    api_format: openai_responses
-    models: [gpt-4o, o3]
+  myupstream:
+    api_key: "${MY_KEY}"
+    base_url: "https://api.myupstream.com"
+    endpoints:
+      anthropic:
+        models: [claude-opus-4-5]
+      openai_chat:
+        models: [gpt-4o]
+      google:
+        models: [gemini-2.5-pro]
 ```
 
 ### Model Name Remapping
@@ -313,35 +405,26 @@ providers:
 ```yaml
 providers:
   myapi:
-    type: openai
     api_key: "${MY_KEY}"
-    base_url: "https://api.my-provider.com/v1"
-    models: [fast, smart]
-    model_map:
-      fast: gpt-4o-mini
-      smart: gpt-4o
+    endpoints:
+      openai_chat:
+        base_url: "https://api.my-provider.com/v1"
+        models: [fast, smart]
+        model_map:
+          fast: gpt-4o-mini
+          smart: gpt-4o
 ```
 
 Client sends `model: "myapi/fast"`; backend receives `gpt-4o-mini`.
-
-### 1M Context Models
-
-Claude Code appends `[1m]` to model names to signal 1M-token context support. The router strips the suffix before forwarding and passes through all content — no truncation is applied.
-
-```
-/model deepseek/deepseek-chat[1m]
-```
 
 ---
 
 ## How Conversion Works
 
-For `type: openai` providers the router performs full bidirectional conversion between the Anthropic Messages format and OpenAI Chat Completions (or Responses API):
-
 | Anthropic concept | OpenAI equivalent |
 |---|---|
 | `system` (string or array) | `messages[0].role = "system"` |
-| `content[].type = "image_url"` | `content[].type = "image_url"` |
+| `content[].type = "image"` | `content[].type = "image_url"` |
 | `content[].type = "tool_use"` | `tool_calls[].function` |
 | `content[].type = "tool_result"` | `role = "tool"` message |
 | `content[].type = "thinking"` | `reasoning_content` (DeepSeek) / `reasoning.effort` (Responses API) |
@@ -349,12 +432,21 @@ For `type: openai` providers the router performs full bidirectional conversion b
 | `stop_reason: "tool_use"` | `finish_reason: "tool_calls"` |
 | Streaming `content_block_delta` | Streaming `delta.content` / `delta.tool_calls` |
 
+| Anthropic concept | Google Gemini equivalent |
+|---|---|
+| `system` | `systemInstruction` |
+| `content[].type = "image"` | `inlineData` (base64) or `fileData` (URL) |
+| `content[].type = "tool_use"` | `functionCall` |
+| `content[].type = "tool_result"` | `functionResponse` |
+| `tools` | `functionDeclarations` |
+| `tool_choice` | `functionCallingConfig` (AUTO / NONE / ANY / specific) |
+
 ---
 
 ## Development
 
 ```bash
-# Run all tests (97 tests)
+# Run all tests
 python -m pytest tests/ -v
 
 # Run with auto-reload during development
@@ -365,12 +457,16 @@ uvicorn simple_api_router.app:app --reload --port 8080
 
 ```
 simple_api_router/
-  config.py     — Pydantic config models + YAML loader with ${ENV_VAR} expansion
-  app.py        — FastAPI application factory and endpoint wiring
-  proxy.py      — Request routing, provider resolution, dispatch
-  converter.py  — Stateless Anthropic ↔ OpenAI format conversion (request/response/streaming)
-  logger.py     — Logging setup
-  cli.py        — CLI entry point
+  config.py           — Pydantic config models + YAML loader with ${ENV_VAR} expansion
+  app.py              — FastAPI application factory and endpoint wiring
+  proxy.py            — Request routing, provider resolution, dispatch
+  converter.py        — Anthropic ↔ OpenAI conversion (request/response/streaming)
+  converter_google.py — Anthropic ↔ Google Gemini conversion (request/response/streaming)
+  usage_logger.py     — Per-request JSONL usage logging (router.usage.jsonl)
+  usage_cli.py        — `usage` subcommand: load/aggregate/display usage stats
+  service.py          — Service management (launchd / systemd install/start/stop/…)
+  logger.py           — Logging setup
+  cli.py              — CLI entry point
 ```
 
 ---
