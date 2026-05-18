@@ -225,6 +225,62 @@ class TestModelEntry(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# parse_model + usage_meta model name
+# ---------------------------------------------------------------------------
+
+class TestParseModel(unittest.TestCase):
+
+    def test_strips_1m_suffix(self):
+        provider, model = parse_model("openai/gpt-4o[1m]")
+        self.assertEqual(provider, "openai")
+        self.assertEqual(model, "gpt-4o")
+
+    def test_strips_bracket_suffix_no_provider(self):
+        provider, model = parse_model("deepseek-chat[128k]")
+        self.assertIsNone(provider)
+        self.assertEqual(model, "deepseek-chat")
+
+    def test_no_suffix(self):
+        provider, model = parse_model("anthropic/claude-opus-4-5")
+        self.assertEqual(provider, "anthropic")
+        self.assertEqual(model, "claude-opus-4-5")
+
+    def test_usage_meta_model_has_no_bracket_suffix(self):
+        """route_request() must log 'provider/model' without [1m] so pricing lookup works."""
+        from simple_api_router.proxy import route_request
+        from simple_api_router.config import PricingEntry
+        import asyncio
+
+        ep = EndpointConfig(
+            base_url="https://api.openai.com",
+            models=[ModelEntry(name="gpt-4o", pricing=PricingEntry(input=5.0, output=15.0))],
+        )
+        prov = ProviderConfig(api_key="sk-test", endpoints={"openai_chat": ep})
+        config = RouterConfig(providers={"openai": prov})
+
+        # Fake request and httpx client — we only care about request.state.usage_meta
+        import httpx
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        fake_request = MagicMock()
+        fake_request.state = MagicMock()
+        fake_request.headers = {}
+
+        body = {"model": "openai/gpt-4o[1m]", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10}
+
+        # Patch _proxy_openai so we never hit the network
+        async def fake_proxy(*args, **kwargs):
+            return MagicMock()
+
+        with patch("simple_api_router.proxy._proxy_openai", side_effect=fake_proxy):
+            asyncio.get_event_loop().run_until_complete(route_request(fake_request, body, config, MagicMock()))
+
+        logged_model = fake_request.state.usage_meta["model"]
+        self.assertNotIn("[1m]", logged_model, "usage_meta should not contain bracket suffixes")
+        self.assertEqual(logged_model, "openai/gpt-4o")
+
+
+# ---------------------------------------------------------------------------
 # Multimodal fallback routing (unit, no HTTP)
 # ---------------------------------------------------------------------------
 

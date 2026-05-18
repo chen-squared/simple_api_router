@@ -351,8 +351,10 @@ async def route_request(
                 )
 
     # Stash routing metadata so app.py can log usage after the response is done.
+    # Use the clean "provider/model" form (bracket suffixes stripped) so pricing lookup works.
+    clean_model = f"{provider_name}/{model}" if provider_name else model
     request.state.usage_meta = {
-        "model": model_str,
+        "model": clean_model,
         "provider": next(
             (name for name, p in config.providers.items() if p is provider), "unknown"
         ),
