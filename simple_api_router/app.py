@@ -69,12 +69,20 @@ async def _sse_with_usage(
             pass
 
     duration_ms = round((time.time() - start) * 1000)
-    app_logger.info(
-        "POST /v1/messages model=%s provider=%s backend=%s "
-        "in=%d out=%d cache_r=%d cache_w=%d streaming=true status=200 duration=%dms",
-        meta["model"], meta["provider"], meta["backend_model"],
-        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, duration_ms,
-    )
+    if input_tokens == 0 and output_tokens == 0:
+        app_logger.warning(
+            "POST /v1/messages model=%s provider=%s backend=%s "
+            "in=0 out=0 (no usage events received — backend may have returned an error "
+            "or does not include usage in stream) streaming=true status=200 duration=%dms",
+            meta["model"], meta["provider"], meta["backend_model"], duration_ms,
+        )
+    else:
+        app_logger.info(
+            "POST /v1/messages model=%s provider=%s backend=%s "
+            "in=%d out=%d cache_r=%d cache_w=%d streaming=true status=200 duration=%dms",
+            meta["model"], meta["provider"], meta["backend_model"],
+            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, duration_ms,
+        )
     log_usage({
         "ts": _now_utc(),
         "model": meta["model"],

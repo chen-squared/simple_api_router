@@ -448,6 +448,30 @@ async def stream_openai_to_anthropic(
             except (json.JSONDecodeError, ValueError):
                 continue
 
+            # --- upstream error in stream (e.g. content-policy block, quota, etc.) ---
+            if error_obj := data.get("error"):
+                err_type = error_obj.get("type", "api_error") if isinstance(error_obj, dict) else "api_error"
+                err_msg = error_obj.get("message", str(error_obj)) if isinstance(error_obj, dict) else str(error_obj)
+                # Close any open blocks before emitting the error event so the
+                # client doesn't get stuck with half-open content blocks.
+                if thinking_block_open:
+                    yield _sse_bytes("content_block_stop", {
+                        "type": "content_block_stop", "index": thinking_block_index,
+                    })
+                if text_block_open:
+                    yield _sse_bytes("content_block_stop", {
+                        "type": "content_block_stop", "index": text_block_index,
+                    })
+                for ant_idx in sorted(open_tool_indices):
+                    yield _sse_bytes("content_block_stop", {
+                        "type": "content_block_stop", "index": ant_idx,
+                    })
+                yield _sse_bytes("error", {
+                    "type": "error",
+                    "error": {"type": err_type, "message": err_msg},
+                })
+                return
+
             choices = data.get("choices") or []
             choice = choices[0] if choices else {}
             delta = choice.get("delta", {})

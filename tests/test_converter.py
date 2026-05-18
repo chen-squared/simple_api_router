@@ -405,6 +405,43 @@ class TestStreamConversion(unittest.TestCase):
         self.assertTrue(len(tool_starts) > 0)
         self.assertEqual(tool_starts[0]["content_block"]["name"], "search")
 
+    def test_streaming_error_in_chunk(self):
+        """A streaming error object in a data chunk should emit an Anthropic error event."""
+        chunks = [
+            b'data: {"id":"c1","choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n\n',
+            b'data: {"error":{"type":"api_error","message":"Content policy violation"}}\n\n',
+            b'data: [DONE]\n\n',
+        ]
+        events = self._run(self._collect(chunks))
+        event_types = [k for k, _ in events if k == "event"]
+        data_events = [d for k, d in events if k == "data"]
+        event_names = [v for k, v in events if k == "event"]
+
+        # Should emit an 'error' SSE event (not message_delta/message_stop)
+        self.assertIn("error", event_names)
+        # The error data should contain our message
+        error_data = [d for d in data_events if d.get("type") == "error"]
+        self.assertTrue(len(error_data) > 0)
+        self.assertIn("Content policy violation", error_data[0]["error"]["message"])
+        # Should NOT emit message_delta or message_stop after an error
+        data_types = [d["type"] for d in data_events]
+        self.assertNotIn("message_delta", data_types)
+        self.assertNotIn("message_stop", data_types)
+
+    def test_streaming_error_closes_open_blocks(self):
+        """An error mid-stream should close open content blocks before emitting error."""
+        chunks = [
+            b'data: {"id":"c1","choices":[{"delta":{"content":"Partial"},"finish_reason":null}]}\n\n',
+            b'data: {"error":{"type":"overloaded_error","message":"Overloaded"}}\n\n',
+        ]
+        events = self._run(self._collect(chunks))
+        data_events = [d for k, d in events if k == "data"]
+        data_types = [d["type"] for d in data_events]
+        # content_block_stop should be emitted to close the open text block
+        self.assertIn("content_block_stop", data_types)
+        # error event should follow
+        self.assertIn("error", [v for k, v in events if k == "event"])
+
 
 # ---------------------------------------------------------------------------
 # Helpers: sanitize, clean_schema, strip_private, o-series detection
