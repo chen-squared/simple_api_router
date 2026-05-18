@@ -11,7 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import Any, AsyncIterator, Callable, Dict, Optional, Tuple
+import time
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import HTTPException, Request
@@ -452,21 +453,38 @@ async def route_request(
 
     # Stash routing metadata so app.py can log usage after the response is done.
     # Use the clean "provider/model" form (bracket suffixes stripped) so pricing lookup works.
+    resolved_provider_name = next(
+        (name for name, p in config.providers.items() if p is provider), "unknown"
+    )
     clean_model = f"{provider_name}/{model}" if provider_name else model
     request.state.usage_meta = {
         "model": clean_model,
-        "provider": next(
-            (name for name, p in config.providers.items() if p is provider), "unknown"
-        ),
+        "provider": resolved_provider_name,
         "backend_model": backend_model,
     }
 
+    is_stream = body.get("stream", False)
+    logger.info(
+        "POST /v1/messages model=%s provider=%s backend=%s stream=%s →",
+        clean_model, resolved_provider_name, backend_model, is_stream,
+    )
+
+    upstream_start = time.time()
     if api_format == "anthropic":
-        return await _proxy_anthropic(request, body, backend_model, provider, endpoint, client, max_retries)
+        result = await _proxy_anthropic(request, body, backend_model, provider, endpoint, client, max_retries)
     elif api_format == "google":
-        return await _proxy_google(request, body, model_str, backend_model, provider, endpoint, client, max_retries)
+        result = await _proxy_google(request, body, model_str, backend_model, provider, endpoint, client, max_retries)
     else:
-        return await _proxy_openai(request, body, model_str, backend_model, api_format, provider, endpoint, client, max_retries)
+        result = await _proxy_openai(request, body, model_str, backend_model, api_format, provider, endpoint, client, max_retries)
+
+    if is_stream:
+        ttfb_ms = round((time.time() - upstream_start) * 1000)
+        logger.info(
+            "POST /v1/messages model=%s provider=%s TTFB=%dms",
+            clean_model, resolved_provider_name, ttfb_ms,
+        )
+
+    return result
 
 
 # ---------------------------------------------------------------------------
