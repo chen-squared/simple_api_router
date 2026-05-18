@@ -439,6 +439,11 @@ async def stream_openai_to_anthropic(
         while b"\n" in partial:
             line, partial = partial.split(b"\n", 1)
             line = line.rstrip(b"\r")
+            # SSE comment (e.g. ": keep-alive") — forward as Anthropic ping so the
+            # downstream client doesn't time out during long provider queue waits.
+            if line.startswith(b":"):
+                yield _sse_bytes("ping", {"type": "ping"})
+                continue
             if not line.startswith(b"data: "):
                 continue
             payload = line[6:]
@@ -985,9 +990,18 @@ async def stream_responses_to_anthropic(
         while "\n\n" in pending:
             event_block, pending = pending.split("\n\n", 1)
             data_str: Optional[str] = None
+            is_comment_only = True
             for line in event_block.splitlines():
                 if line.startswith("data: "):
                     data_str = line[6:].strip()
+                    is_comment_only = False
+                elif line and not line.startswith(":"):
+                    is_comment_only = False
+
+            # SSE comment-only block (e.g. ": keep-alive") — forward as Anthropic ping.
+            if is_comment_only and event_block.strip():
+                yield _sse_bytes("ping", {"type": "ping"})
+                continue
 
             if not data_str or data_str == "[DONE]":
                 continue
