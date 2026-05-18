@@ -56,6 +56,15 @@ async def _sse_with_usage(
                 elif t == "message_delta":
                     u = data.get("usage", {})
                     output_tokens = u.get("output_tokens", 0)
+                    # Converted streams (OpenAI/Google) put the real input count here
+                    # because it's only known at end-of-stream.  Native Anthropic
+                    # message_delta never contains input_tokens, so this is safe.
+                    if "input_tokens" in u:
+                        input_tokens = u["input_tokens"]
+                    if "cache_read_input_tokens" in u:
+                        cache_read_tokens = u["cache_read_input_tokens"]
+                    if "cache_creation_input_tokens" in u:
+                        cache_write_tokens = u["cache_creation_input_tokens"]
         except Exception:
             pass
 
