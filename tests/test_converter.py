@@ -119,6 +119,17 @@ class TestAnthropicToOpenAI(unittest.TestCase):
         self.assertEqual(result["tool_choice"]["type"], "function")
         self.assertEqual(result["tool_choice"]["function"]["name"], "my_tool")
 
+    def test_tool_choice_none_stays_none(self):
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "go"}],
+            "tools": [{"name": "t", "description": "", "input_schema": {}}],
+            "tool_choice": {"type": "none"},
+        }
+        result = anthropic_to_openai_request(body, "gpt-4o")
+        self.assertEqual(result["tool_choice"], "none")
+
     def test_tool_result_becomes_tool_message(self):
         body = {
             "model": "x",
@@ -757,6 +768,29 @@ class TestOpenAIToAnthropicExtended(unittest.TestCase):
         }
         result = openai_to_anthropic_response(oai, "openai/gpt-4o")
         self.assertEqual(result["usage"].get("cache_read_input_tokens"), 80)
+
+    def test_null_message_does_not_crash(self):
+        """Upstream returning 'message': null (e.g. content-filter block) must not raise."""
+        oai = {
+            "id": "x",
+            "choices": [{"message": None, "finish_reason": "content_filter"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 0},
+        }
+        result = openai_to_anthropic_response(oai, "openai/gpt-4o")
+        # Should produce a valid (empty-content) Anthropic response, not raise
+        self.assertEqual(result["type"], "message")
+        self.assertEqual(result["content"], [])
+
+    def test_null_usage_does_not_crash(self):
+        """Upstream returning 'usage': null must not raise."""
+        oai = {
+            "id": "x",
+            "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": None,
+        }
+        result = openai_to_anthropic_response(oai, "openai/gpt-4o")
+        self.assertEqual(result["type"], "message")
+        self.assertEqual(result["usage"]["input_tokens"], 0)
 
 
 # ---------------------------------------------------------------------------
@@ -1529,6 +1563,17 @@ class TestResponsesAPIRequest(unittest.TestCase):
         result = anthropic_to_responses_request(body, "gpt-5")
         self.assertEqual(result["tool_choice"], "required")
 
+    def test_tool_choice_none_stays_none_responses(self):
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "x"}],
+            "tools": [{"name": "fn", "description": "d", "input_schema": {"type": "object", "properties": {}}}],
+            "tool_choice": {"type": "none"},
+        }
+        result = anthropic_to_responses_request(body, "gpt-5")
+        self.assertEqual(result["tool_choice"], "none")
+
     def test_thinking_block_in_messages_is_skipped(self):
         """Thinking blocks inside conversation messages must be skipped (not added to input)."""
         body = {
@@ -1827,6 +1872,45 @@ class TestResponsesAPIStreaming(unittest.TestCase):
         md_pos = types.index("message_delta")
         ms_pos = types.index("message_stop")
         self.assertLess(md_pos, ms_pos)
+
+    def test_stream_terminates_without_response_completed(self):
+        """If response.completed never arrives, the generator must still emit
+        message_delta + message_stop so the client doesn't hang forever."""
+        def _run(coro):
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+
+        chunks = [
+            _make_sse("response.created", {
+                "type": "response.created",
+                "response": {"id": "resp_trunc", "usage": {}},
+            }),
+            _make_sse("response.output_text.delta", {
+                "type": "response.output_text.delta",
+                "output_index": 0, "content_index": 0,
+                "delta": "partial answer",
+            }),
+            # Stream ends here — no response.completed
+            b"data: [DONE]\n\n",
+        ]
+
+        async def _collect():
+            async def _gen():
+                for c in chunks:
+                    yield c
+            events = []
+            async for raw in stream_responses_to_anthropic(_gen(), "gpt-5", "msg_trunc"):
+                for line in raw.decode().split("\n"):
+                    if line.startswith("event: "):
+                        events.append(line[7:])
+            return events
+
+        event_types = _run(_collect())
+        self.assertIn("message_delta", event_types, "message_delta must be emitted even if response.completed is missing")
+        self.assertIn("message_stop", event_types, "message_stop must be emitted even if response.completed is missing")
 
 
 # ---------------------------------------------------------------------------

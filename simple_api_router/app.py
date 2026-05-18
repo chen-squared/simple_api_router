@@ -36,66 +36,67 @@ async def _sse_with_usage(
     cache_read_tokens = 0
     cache_write_tokens = 0
 
-    async for chunk in original:
-        yield chunk
-        try:
-            text = chunk.decode("utf-8", errors="replace")
-            for line in text.splitlines():
-                if not line.startswith("data: "):
-                    continue
-                payload = line[6:].strip()
-                if not payload or payload == "[DONE]":
-                    continue
-                data = json.loads(payload)
-                t = data.get("type")
-                if t == "message_start":
-                    u = data.get("message", {}).get("usage", {})
-                    input_tokens = u.get("input_tokens", 0)
-                    cache_read_tokens = u.get("cache_read_input_tokens", 0)
-                    cache_write_tokens = u.get("cache_creation_input_tokens", 0)
-                elif t == "message_delta":
-                    u = data.get("usage", {})
-                    output_tokens = u.get("output_tokens", 0)
-                    # Converted streams (OpenAI/Google) put the real input count here
-                    # because it's only known at end-of-stream.  Native Anthropic
-                    # message_delta never contains input_tokens, so this is safe.
-                    if "input_tokens" in u:
-                        input_tokens = u["input_tokens"]
-                    if "cache_read_input_tokens" in u:
-                        cache_read_tokens = u["cache_read_input_tokens"]
-                    if "cache_creation_input_tokens" in u:
-                        cache_write_tokens = u["cache_creation_input_tokens"]
-        except Exception:
-            pass
-
-    duration_ms = round((time.time() - start) * 1000)
-    if input_tokens == 0 and output_tokens == 0:
-        app_logger.warning(
-            "POST /v1/messages model=%s provider=%s backend=%s "
-            "in=0 out=0 (no usage events received — backend may have returned an error "
-            "or does not include usage in stream) streaming=true status=200 duration=%dms",
-            meta["model"], meta["provider"], meta["backend_model"], duration_ms,
-        )
-    else:
-        app_logger.info(
-            "POST /v1/messages model=%s provider=%s backend=%s "
-            "in=%d out=%d cache_r=%d cache_w=%d streaming=true status=200 duration=%dms",
-            meta["model"], meta["provider"], meta["backend_model"],
-            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, duration_ms,
-        )
-    log_usage({
-        "ts": _now_local(),
-        "model": meta["model"],
-        "provider": meta["provider"],
-        "backend_model": meta["backend_model"],
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cache_read_tokens": cache_read_tokens,
-        "cache_write_tokens": cache_write_tokens,
-        "streaming": True,
-        "status": 200,
-        "duration_ms": duration_ms,
-    })
+    try:
+        async for chunk in original:
+            yield chunk
+            try:
+                text = chunk.decode("utf-8", errors="replace")
+                for line in text.splitlines():
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[6:].strip()
+                    if not payload or payload == "[DONE]":
+                        continue
+                    data = json.loads(payload)
+                    t = data.get("type")
+                    if t == "message_start":
+                        u = data.get("message", {}).get("usage", {})
+                        input_tokens = u.get("input_tokens", 0)
+                        cache_read_tokens = u.get("cache_read_input_tokens", 0)
+                        cache_write_tokens = u.get("cache_creation_input_tokens", 0)
+                    elif t == "message_delta":
+                        u = data.get("usage", {})
+                        output_tokens = u.get("output_tokens", 0)
+                        # Converted streams (OpenAI/Google) put the real input count here
+                        # because it's only known at end-of-stream.  Native Anthropic
+                        # message_delta never contains input_tokens, so this is safe.
+                        if "input_tokens" in u:
+                            input_tokens = u["input_tokens"]
+                        if "cache_read_input_tokens" in u:
+                            cache_read_tokens = u["cache_read_input_tokens"]
+                        if "cache_creation_input_tokens" in u:
+                            cache_write_tokens = u["cache_creation_input_tokens"]
+            except Exception:
+                pass
+    finally:
+        duration_ms = round((time.time() - start) * 1000)
+        if input_tokens == 0 and output_tokens == 0:
+            app_logger.warning(
+                "POST /v1/messages model=%s provider=%s backend=%s "
+                "in=0 out=0 (no usage events received — backend may have returned an error "
+                "or does not include usage in stream) streaming=true status=200 duration=%dms",
+                meta["model"], meta["provider"], meta["backend_model"], duration_ms,
+            )
+        else:
+            app_logger.info(
+                "POST /v1/messages model=%s provider=%s backend=%s "
+                "in=%d out=%d cache_r=%d cache_w=%d streaming=true status=200 duration=%dms",
+                meta["model"], meta["provider"], meta["backend_model"],
+                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, duration_ms,
+            )
+        log_usage({
+            "ts": _now_local(),
+            "model": meta["model"],
+            "provider": meta["provider"],
+            "backend_model": meta["backend_model"],
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+            "streaming": True,
+            "status": 200,
+            "duration_ms": duration_ms,
+        })
 
 
 async def _try_load_config(config_path: Path, logger, retries: int = 3, delay: float = 0.5):

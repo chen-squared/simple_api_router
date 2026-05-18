@@ -282,6 +282,8 @@ def _convert_tool_choice(tc: Dict) -> Any:
     tc_type = tc.get("type")
     if tc_type == "auto":
         return "auto"
+    if tc_type == "none":
+        return "none"
     if tc_type == "any":
         return "required"
     if tc_type == "tool":
@@ -305,7 +307,7 @@ _FINISH_REASON_MAP = {
 def openai_to_anthropic_response(body: Dict[str, Any], original_model: str) -> Dict[str, Any]:
     """Convert an OpenAI chat completions response to Anthropic Messages format."""
     choice = (body.get("choices") or [{}])[0]
-    message = choice.get("message", {})
+    message = choice.get("message") or {}
     finish_reason = choice.get("finish_reason", "stop")
     stop_reason = _FINISH_REASON_MAP.get(finish_reason, "end_turn")
 
@@ -353,7 +355,7 @@ def openai_to_anthropic_response(body: Dict[str, Any], original_model: str) -> D
             "input": args,
         })
 
-    usage = body.get("usage", {})
+    usage = body.get("usage") or {}
     # OpenAI's prompt_tokens includes cached tokens in the total.
     # Anthropic separates them: input_tokens = non-cached only.
     cache_read = (
@@ -737,6 +739,8 @@ def _responses_tool_choice(tc: Dict) -> Any:
     tc_type = tc.get("type")
     if tc_type == "auto":
         return "auto"
+    if tc_type == "none":
+        return "none"
     if tc_type == "any":
         return "required"
     if tc_type == "tool":
@@ -1147,3 +1151,20 @@ async def stream_responses_to_anthropic(
                 })
                 yield _sse_bytes("message_stop", {"type": "message_stop"})
                 return
+
+    # Post-loop safety net: if response.completed never arrived (provider dropped
+    # the connection or sent [DONE] prematurely), close any open blocks and emit
+    # the terminal events so the client doesn't hang.
+    for ant_idx in sorted(open_blocks):
+        yield _sse_bytes("content_block_stop", {
+            "type": "content_block_stop", "index": ant_idx,
+        })
+    open_blocks.clear()
+
+    fallback_stop_reason = "tool_use" if has_tool_use else "end_turn"
+    yield _sse_bytes("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": fallback_stop_reason, "stop_sequence": None},
+        "usage": _build_anthropic_usage_from_responses({}),
+    })
+    yield _sse_bytes("message_stop", {"type": "message_stop"})
