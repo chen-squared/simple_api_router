@@ -26,6 +26,7 @@ from .converter import (
     responses_to_anthropic_response,
     stream_openai_to_anthropic,
     stream_responses_to_anthropic,
+    _sse_bytes,
 )
 from .logger import get_logger
 
@@ -162,6 +163,105 @@ async def _stream_converted(
         yield _upstream_error_sse(exc)
     finally:
         await resp.aclose()
+
+
+async def _stream_converted_with_retry(
+    first_resp: httpx.Response,
+    client: httpx.AsyncClient,
+    url: str,
+    headers: Dict[str, str],
+    body: Dict[str, Any],
+    make_stream: Callable,
+    max_retries: int,
+) -> AsyncIterator[bytes]:
+    """Streaming pipeline with two-phase retry:
+
+    Phase 1 (HTTP level): handled by the caller via _streaming_request_with_retry
+    before this function is called.  ``first_resp`` is an already-open 200 response.
+
+    Phase 2 (in-stream error): this function buffers converter output until real
+    content (content_block_start / content_block_delta) arrives.  If an error
+    event is detected before any real content, the upstream request is retried
+    (up to max_retries times).  Once real content starts flowing the stream is
+    committed — no further retries are possible.
+
+    On retry, HTTP-level errors are handled inline: retryable codes are retried,
+    non-retryable codes / network errors are forwarded as SSE error events
+    (because HTTP 200 headers are already sent by then).
+    """
+    resp = first_resp
+
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            delay = _backoff(attempt - 1)
+            logger.warning(
+                "Stream retry %d/%d → %s (early in-stream error), waiting %.1fs",
+                attempt, max_retries, url, delay,
+            )
+            await asyncio.sleep(delay)
+            # Make a fresh HTTP request for this retry.
+            # HTTP 200 headers are already sent, so non-2xx errors become SSE events.
+            try:
+                req = client.build_request("POST", url, json=body, headers=headers)
+                resp = await client.send(req, stream=True)
+            except _UPSTREAM_ERRORS as exc:
+                if attempt < max_retries:
+                    continue
+                yield _upstream_error_sse(exc)
+                return
+            if resp.status_code in _RETRY_STATUS:
+                await resp.aclose()
+                continue
+            if not (200 <= resp.status_code < 300):
+                await resp.aread()
+                try:
+                    detail = resp.json()
+                except Exception:
+                    detail = resp.text
+                await resp.aclose()
+                logger.warning("Stream retry upstream %d for %s: %s", resp.status_code, url, detail)
+                yield _sse_bytes("error", {
+                    "type": "error",
+                    "error": {"type": "api_error", "message": f"Upstream HTTP {resp.status_code}"},
+                })
+                return
+
+        # --- stream + early-error buffer ---
+        buffer: List[bytes] = []
+        committed = False
+        early_error = False
+
+        async for chunk in _stream_converted(resp, make_stream, url):
+            if committed:
+                yield chunk
+                continue
+            buffer.append(chunk)
+            # A chunk from the converter is always a single SSE event.
+            if chunk.startswith(b"event: error\n"):
+                early_error = True
+                break
+            # Real content has started — commit and flush the buffer.
+            if b"content_block_start" in chunk or b"content_block_delta" in chunk:
+                committed = True
+                for c in buffer:
+                    yield c
+                buffer.clear()
+
+        if not early_error:
+            # Normal completion — flush any buffered preamble (message_start, ping,
+            # message_delta, message_stop for empty responses).
+            for c in buffer:
+                yield c
+            return
+
+        # Early error, no content delivered — retry if budget allows.
+        if attempt < max_retries:
+            continue
+
+        # Budget exhausted — forward the error to the client.
+        logger.warning("All %d stream retries exhausted (early in-stream error) for %s", max_retries, url)
+        for c in buffer:
+            yield c
 
 
 def _upstream_error_json(exc: Any) -> dict:
@@ -420,10 +520,17 @@ async def _proxy_openai(
     client: httpx.AsyncClient,
     max_retries: int,
 ) -> Any:
+    # Precedence: model-level flag → endpoint-level flag → auto-detect from model name
+    _, _req_model = parse_model(original_model)
+    _model_entry = endpoint.get_model_entry(_req_model)
     use_reasoning = (
-        endpoint.deepseek_reasoning
-        if endpoint.deepseek_reasoning is not None
-        else is_deepseek_model(backend_model)
+        _model_entry.deepseek_reasoning
+        if _model_entry.deepseek_reasoning is not None
+        else (
+            endpoint.deepseek_reasoning
+            if endpoint.deepseek_reasoning is not None
+            else is_deepseek_model(backend_model)
+        )
     )
 
     base_url = endpoint.resolve_base_url(api_format, provider.base_url)
@@ -437,7 +544,11 @@ async def _proxy_openai(
         if is_stream:
             resp = await _streaming_request_with_retry(client, url, headers, req_body, max_retries)
             return StreamingResponse(
-                _stream_converted(resp, lambda aiter: stream_responses_to_anthropic(aiter, original_model), url),
+                _stream_converted_with_retry(
+                    resp, client, url, headers, req_body,
+                    lambda aiter: stream_responses_to_anthropic(aiter, original_model),
+                    max_retries,
+                ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
@@ -461,7 +572,11 @@ async def _proxy_openai(
     if is_stream:
         resp = await _streaming_request_with_retry(client, url, headers, oai_body, max_retries)
         return StreamingResponse(
-            _stream_converted(resp, lambda aiter: stream_openai_to_anthropic(aiter, original_model), url),
+            _stream_converted_with_retry(
+                resp, client, url, headers, oai_body,
+                lambda aiter: stream_openai_to_anthropic(aiter, original_model),
+                max_retries,
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -505,7 +620,11 @@ async def _proxy_google(
         url = f"{base_url}/v1/models/{backend_model}:streamGenerateContent?alt=sse"
         resp = await _streaming_request_with_retry(client, url, headers, google_body, max_retries)
         return StreamingResponse(
-            _stream_converted(resp, lambda aiter: stream_google_to_anthropic(aiter, original_model), url),
+            _stream_converted_with_retry(
+                resp, client, url, headers, google_body,
+                lambda aiter: stream_google_to_anthropic(aiter, original_model),
+                max_retries,
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

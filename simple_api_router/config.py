@@ -43,6 +43,10 @@ class ModelEntry(BaseModel):
     # Inline pricing for this model.  Takes precedence over the top-level
     # RouterConfig.pricing section when both are present.
     pricing: Optional["PricingEntry"] = None
+    # Enable DeepSeek reasoning_content passthrough for this specific model.
+    # Overrides the endpoint-level deepseek_reasoning when set.
+    # None = fall through to endpoint setting, then auto-detect from model name.
+    deepseek_reasoning: Optional[bool] = None
 
 
 class EndpointConfig(BaseModel):
