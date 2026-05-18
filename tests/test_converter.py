@@ -588,30 +588,21 @@ class TestAnthropicToOpenAIExtended(unittest.TestCase):
         self.assertIn("reasoning_effort", result)
         self.assertEqual(result["reasoning_effort"], "medium")
 
-    def test_adaptive_thinking_maps_to_high_for_openai(self):
-        """thinking.type == 'adaptive' → 'high' for OpenAI models (they don't support 'max')."""
+    def test_adaptive_thinking_maps_to_xhigh(self):
+        """thinking.type == 'adaptive' → 'xhigh' for both OpenAI and DeepSeek.
+        DeepSeek maps xhigh→max internally.
+        """
         body = {
             "model": "x",
             "max_tokens": 1024,
             "thinking": {"type": "adaptive"},
             "messages": [{"role": "user", "content": "Hello"}],
         }
-        result = anthropic_to_openai_request(body, "gpt-5.4")
-        self.assertEqual(result.get("reasoning_effort"), "high")
+        self.assertEqual(anthropic_to_openai_request(body, "gpt-5.4").get("reasoning_effort"), "xhigh")
+        self.assertEqual(anthropic_to_openai_request(body, "deepseek-r1").get("reasoning_effort"), "xhigh")
 
-    def test_adaptive_thinking_maps_to_max_for_deepseek(self):
-        """thinking.type == 'adaptive' → 'max' for DeepSeek models."""
-        body = {
-            "model": "x",
-            "max_tokens": 1024,
-            "thinking": {"type": "adaptive"},
-            "messages": [{"role": "user", "content": "Hello"}],
-        }
-        result = anthropic_to_openai_request(body, "deepseek-r1")
-        self.assertEqual(result.get("reasoning_effort"), "max")
-
-    def test_max_budget_maps_to_max_for_deepseek(self):
-        """budget_tokens > 32000 → 'max' for DeepSeek, 'high' for OpenAI."""
+    def test_max_budget_maps_to_xhigh(self):
+        """budget_tokens > 32000 → 'xhigh' for both OpenAI and DeepSeek."""
         body = {
             "model": "x",
             "max_tokens": 4096,
@@ -619,10 +610,10 @@ class TestAnthropicToOpenAIExtended(unittest.TestCase):
             "messages": [{"role": "user", "content": "solve it"}],
         }
         self.assertEqual(
-            anthropic_to_openai_request(body, "deepseek-reasoner").get("reasoning_effort"), "max"
+            anthropic_to_openai_request(body, "deepseek-reasoner").get("reasoning_effort"), "xhigh"
         )
         self.assertEqual(
-            anthropic_to_openai_request(body, "o3").get("reasoning_effort"), "high"
+            anthropic_to_openai_request(body, "o3").get("reasoning_effort"), "xhigh"
         )
 
     def test_thinking_block_not_emitted_as_reasoning_content_by_default(self):

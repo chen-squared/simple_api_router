@@ -21,8 +21,6 @@ _O_SERIES_RE = re.compile(r"\bo[1-9](-|\b)|o4-mini|codex", re.IGNORECASE)
 _REASONING_EFFORT_MODELS_RE = re.compile(
     r"\bo[1-9](-|\b)|o4-mini|gpt-5|codex|deepseek", re.IGNORECASE
 )
-# DeepSeek supports "max" as a reasoning_effort value (maps to their highest tier).
-_DEEPSEEK_RE = re.compile(r"deepseek", re.IGNORECASE)
 
 
 def sanitize_system_text(text: str) -> str:
@@ -63,22 +61,19 @@ def supports_reasoning_effort(model: str) -> bool:
     return bool(_REASONING_EFFORT_MODELS_RE.search(model))
 
 
-def _top_reasoning_effort(model: str) -> str:
-    """Return the highest reasoning_effort string the model accepts.
+def _reasoning_effort_from_budget(budget_tokens: int) -> str:
+    """Map Anthropic budget_tokens to OpenAI reasoning_effort.
 
-    DeepSeek supports "max"; OpenAI o-series tops out at "high".
+    OpenAI (and DeepSeek, which maps xhigh→max internally) all accept:
+    none / minimal / low / medium / high / xhigh.
     """
-    return "max" if _DEEPSEEK_RE.search(model) else "high"
-
-
-def _reasoning_effort_from_budget(budget_tokens: int, model: str = "") -> str:
     if budget_tokens <= 1024:
         return "low"
     if budget_tokens <= 8192:
         return "medium"
     if budget_tokens <= 32000:
         return "high"
-    return _top_reasoning_effort(model)
+    return "xhigh"
 
 
 def strip_private_params(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -158,10 +153,10 @@ def anthropic_to_openai_request(
     thinking = body.get("thinking")
     if thinking and supports_reasoning_effort(backend_model):
         if thinking.get("type") == "adaptive":
-            oai["reasoning_effort"] = _top_reasoning_effort(backend_model)
+            oai["reasoning_effort"] = "xhigh"
         else:
             budget = thinking.get("budget_tokens", 8192)
-            oai["reasoning_effort"] = _reasoning_effort_from_budget(budget, backend_model)
+            oai["reasoning_effort"] = _reasoning_effort_from_budget(budget)
 
     # --- tools (filter BatchTool, clean schemas) ---
     tools = body.get("tools")
