@@ -14,7 +14,6 @@ from simple_api_router.converter import (
     sanitize_system_text,
     stream_openai_to_anthropic,
     strip_private_params,
-    supports_reasoning_effort,
 )
 
 
@@ -500,11 +499,7 @@ class TestHelpers(unittest.TestCase):
         self.assertFalse(is_o_series("gpt-4o"))
         self.assertFalse(is_o_series("claude-sonnet-4-5"))
 
-    def test_supports_reasoning_effort(self):
-        self.assertTrue(supports_reasoning_effort("o1"))
-        self.assertTrue(supports_reasoning_effort("o3-mini"))
-        self.assertTrue(supports_reasoning_effort("gpt-5"))
-        self.assertFalse(supports_reasoning_effort("gpt-4o"))
+
 
 
 class TestAnthropicToOpenAIExtended(unittest.TestCase):
@@ -578,15 +573,18 @@ class TestAnthropicToOpenAIExtended(unittest.TestCase):
         self.assertNotIn("max_completion_tokens", result)
 
     def test_thinking_maps_to_reasoning_effort(self):
+        """thinking is always forwarded as reasoning_effort regardless of model name."""
         body = {
             "model": "x",
             "max_tokens": 4096,
             "thinking": {"type": "enabled", "budget_tokens": 5000},
             "messages": [{"role": "user", "content": "solve it"}],
         }
-        result = anthropic_to_openai_request(body, "o3")
-        self.assertIn("reasoning_effort", result)
-        self.assertEqual(result["reasoning_effort"], "medium")
+        # Works for any model, not just known o-series names
+        for model in ("o3", "gpt-5.4", "deepseek-r1", "some-future-model"):
+            result = anthropic_to_openai_request(body, model)
+            self.assertIn("reasoning_effort", result)
+            self.assertEqual(result["reasoning_effort"], "medium")
 
     def test_adaptive_thinking_maps_to_xhigh(self):
         """thinking.type == 'adaptive' → 'xhigh' for both OpenAI and DeepSeek.

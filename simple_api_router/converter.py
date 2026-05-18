@@ -18,9 +18,6 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
 # ---------------------------------------------------------------------------
 
 _O_SERIES_RE = re.compile(r"\bo[1-9](-|\b)|o4-mini|codex", re.IGNORECASE)
-_REASONING_EFFORT_MODELS_RE = re.compile(
-    r"\bo[1-9](-|\b)|o4-mini|gpt-5|codex|deepseek", re.IGNORECASE
-)
 
 
 def sanitize_system_text(text: str) -> str:
@@ -54,12 +51,6 @@ def clean_schema(schema: Any) -> Any:
 def is_o_series(model: str) -> bool:
     """Return True for OpenAI o1/o3/o4-mini family that uses max_completion_tokens."""
     return bool(_O_SERIES_RE.search(model))
-
-
-def supports_reasoning_effort(model: str) -> bool:
-    """Return True for models that accept reasoning_effort instead of thinking.budget_tokens."""
-    return bool(_REASONING_EFFORT_MODELS_RE.search(model))
-
 
 def _reasoning_effort_from_budget(budget_tokens: int) -> str:
     """Map Anthropic budget_tokens to OpenAI reasoning_effort.
@@ -151,7 +142,7 @@ def anthropic_to_openai_request(
 
     # --- thinking / reasoning_effort ---
     thinking = body.get("thinking")
-    if thinking and supports_reasoning_effort(backend_model):
+    if thinking:
         if thinking.get("type") == "adaptive":
             oai["reasoning_effort"] = "xhigh"
         else:
