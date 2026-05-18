@@ -21,7 +21,7 @@ from .usage_logger import log_usage, setup_usage_logging
 
 
 def _now_local() -> str:
-    return datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 async def _sse_with_usage(
