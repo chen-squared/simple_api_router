@@ -16,7 +16,7 @@ from watchfiles import awatch
 
 from .config import RouterConfig, load_config
 from .logger import setup_logging as setup_logger
-from .proxy import route_request
+from .proxy import route_request, count_tokens_request
 from .usage_logger import log_usage, setup_usage_logging
 
 
@@ -177,6 +177,19 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         description="Multi-provider LLM router exposing a unified Anthropic Messages API",
         lifespan=lifespan,
     )
+
+    # ------------------------------------------------------------------
+    # POST /v1/messages/count_tokens  — token counting (used by Claude Code)
+    # ------------------------------------------------------------------
+    @app.post("/v1/messages/count_tokens")
+    async def count_tokens(request: Request) -> Any:
+        body: Dict[str, Any] = await request.json()
+        return await count_tokens_request(
+            request=request,
+            body=body,
+            config=request.app.state.config,
+            client=request.app.state.http_client,
+        )
 
     # ------------------------------------------------------------------
     # POST /v1/messages  — main entry point

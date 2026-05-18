@@ -249,8 +249,17 @@ async def _stream_converted_with_retry(
                 buffer.clear()
 
         if not early_error:
-            # Normal completion — flush any buffered preamble (message_start, ping,
-            # message_delta, message_stop for empty responses).
+            # If no real content arrived (committed=False), treat as retryable —
+            # upstream returned 200 with an empty body (0/0 tokens, no content blocks).
+            if not committed and attempt < max_retries:
+                logger.warning(
+                    "Stream completed without content from %s — retrying %d/%d in %.1fs",
+                    url, attempt + 1, max_retries, _backoff(attempt),
+                )
+                await asyncio.sleep(_backoff(attempt))
+                # buffer (preamble) is discarded; resp already closed by _stream_converted
+                continue
+            # Normal completion or retries exhausted — flush preamble/content.
             for c in buffer:
                 yield c
             return
@@ -469,20 +478,39 @@ async def route_request(
         clean_model, resolved_provider_name, backend_model, is_stream,
     )
 
-    upstream_start = time.time()
-    if api_format == "anthropic":
-        result = await _proxy_anthropic(request, body, backend_model, provider, endpoint, client, max_retries)
-    elif api_format == "google":
-        result = await _proxy_google(request, body, model_str, backend_model, provider, endpoint, client, max_retries)
-    else:
-        result = await _proxy_openai(request, body, model_str, backend_model, api_format, provider, endpoint, client, max_retries)
+    for attempt in range(max_retries + 1):
+        upstream_start = time.time()
+        if api_format == "anthropic":
+            result = await _proxy_anthropic(request, body, backend_model, provider, endpoint, client, max_retries)
+        elif api_format == "google":
+            result = await _proxy_google(request, body, model_str, backend_model, provider, endpoint, client, max_retries)
+        else:
+            result = await _proxy_openai(request, body, model_str, backend_model, api_format, provider, endpoint, client, max_retries)
 
-    if is_stream:
-        ttfb_ms = round((time.time() - upstream_start) * 1000)
-        logger.info(
-            "POST /v1/messages model=%s provider=%s TTFB=%dms",
-            clean_model, resolved_provider_name, ttfb_ms,
-        )
+        if is_stream:
+            ttfb_ms = round((time.time() - upstream_start) * 1000)
+            logger.info(
+                "POST /v1/messages model=%s provider=%s TTFB=%dms",
+                clean_model, resolved_provider_name, ttfb_ms,
+            )
+            break  # streaming handles retries internally
+
+        # Non-streaming: retry if upstream returned a 200 with 0/0 tokens
+        if isinstance(result, JSONResponse) and result.status_code == 200 and attempt < max_retries:
+            try:
+                data = json.loads(result.body)
+                u = data.get("usage", {})
+                if u.get("input_tokens", 0) == 0 and u.get("output_tokens", 0) == 0:
+                    delay = _backoff(attempt)
+                    logger.warning(
+                        "POST /v1/messages model=%s provider=%s 0/0 tokens — retrying %d/%d in %.1fs",
+                        clean_model, resolved_provider_name, attempt + 1, max_retries, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+            except Exception:
+                pass
+        break
 
     return result
 
@@ -659,3 +687,54 @@ async def _proxy_google(
             detail = resp.text
         raise HTTPException(status_code=resp.status_code, detail=detail)
     return JSONResponse(content=google_to_anthropic_response(resp.json(), original_model))
+
+
+# ---------------------------------------------------------------------------
+# Token counting
+# ---------------------------------------------------------------------------
+
+async def count_tokens_request(
+    request: Request,
+    body: Dict[str, Any],
+    config: RouterConfig,
+    client: httpx.AsyncClient,
+) -> Any:
+    """Handle POST /v1/messages/count_tokens.
+
+    For Anthropic backends the request is forwarded to the backend's own
+    count_tokens endpoint.  For OpenAI / Google backends (which have no
+    equivalent) we return a rough character-based estimate (~4 chars/token).
+    """
+    model_str: str = body.get("model", "")
+    if not model_str:
+        raise HTTPException(status_code=400, detail="'model' field is required")
+
+    provider_name, model = parse_model(model_str)
+    provider, endpoint, api_format, backend_model = resolve_provider(provider_name, model, config)
+
+    if api_format == "anthropic":
+        patched = {**body, "model": backend_model}
+        headers = _build_anthropic_headers(request, provider.api_key)
+        base_url = endpoint.resolve_base_url("anthropic", provider.base_url)
+        url = f"{base_url}/v1/messages/count_tokens"
+        resp, err = await _post_with_retry(client, url, headers, patched, config.server.max_retries)
+        if err:
+            raise HTTPException(status_code=502, detail=f"Upstream error: {err}")
+        if resp.status_code != 200:
+            try:
+                detail = resp.json()
+            except Exception:
+                detail = resp.text
+            raise HTTPException(status_code=resp.status_code, detail=detail)
+        return JSONResponse(content=resp.json())
+
+    # Non-Anthropic backend: estimate from input size (~4 chars per token)
+    total_chars = len(json.dumps(body.get("messages", [])))
+    sys = body.get("system")
+    if sys:
+        total_chars += len(sys) if isinstance(sys, str) else len(json.dumps(sys))
+    if "tools" in body:
+        total_chars += len(json.dumps(body["tools"]))
+    estimated = max(1, total_chars // 4)
+    logger.debug("count_tokens model=%s: estimated %d tokens (non-Anthropic backend)", model_str, estimated)
+    return JSONResponse({"input_tokens": estimated})
