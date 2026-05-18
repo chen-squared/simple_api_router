@@ -588,8 +588,8 @@ class TestAnthropicToOpenAIExtended(unittest.TestCase):
         self.assertIn("reasoning_effort", result)
         self.assertEqual(result["reasoning_effort"], "medium")
 
-    def test_adaptive_thinking_maps_to_xhigh_for_gpt5(self):
-        """thinking.type == 'adaptive' should produce reasoning_effort 'xhigh' for gpt-5 models."""
+    def test_adaptive_thinking_maps_to_high_for_openai(self):
+        """thinking.type == 'adaptive' → 'high' for OpenAI models (they don't support 'max')."""
         body = {
             "model": "x",
             "max_tokens": 1024,
@@ -597,7 +597,33 @@ class TestAnthropicToOpenAIExtended(unittest.TestCase):
             "messages": [{"role": "user", "content": "Hello"}],
         }
         result = anthropic_to_openai_request(body, "gpt-5.4")
-        self.assertEqual(result.get("reasoning_effort"), "xhigh")
+        self.assertEqual(result.get("reasoning_effort"), "high")
+
+    def test_adaptive_thinking_maps_to_max_for_deepseek(self):
+        """thinking.type == 'adaptive' → 'max' for DeepSeek models."""
+        body = {
+            "model": "x",
+            "max_tokens": 1024,
+            "thinking": {"type": "adaptive"},
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        result = anthropic_to_openai_request(body, "deepseek-r1")
+        self.assertEqual(result.get("reasoning_effort"), "max")
+
+    def test_max_budget_maps_to_max_for_deepseek(self):
+        """budget_tokens > 32000 → 'max' for DeepSeek, 'high' for OpenAI."""
+        body = {
+            "model": "x",
+            "max_tokens": 4096,
+            "thinking": {"type": "enabled", "budget_tokens": 100000},
+            "messages": [{"role": "user", "content": "solve it"}],
+        }
+        self.assertEqual(
+            anthropic_to_openai_request(body, "deepseek-reasoner").get("reasoning_effort"), "max"
+        )
+        self.assertEqual(
+            anthropic_to_openai_request(body, "o3").get("reasoning_effort"), "high"
+        )
 
     def test_thinking_block_not_emitted_as_reasoning_content_by_default(self):
         """thinking blocks in assistant history must NOT produce reasoning_content in OpenAI format."""

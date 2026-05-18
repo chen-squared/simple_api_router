@@ -18,7 +18,11 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
 # ---------------------------------------------------------------------------
 
 _O_SERIES_RE = re.compile(r"\bo[1-9](-|\b)|o4-mini|codex", re.IGNORECASE)
-_REASONING_EFFORT_MODELS_RE = re.compile(r"\bo[1-9](-|\b)|o4-mini|gpt-5|codex", re.IGNORECASE)
+_REASONING_EFFORT_MODELS_RE = re.compile(
+    r"\bo[1-9](-|\b)|o4-mini|gpt-5|codex|deepseek", re.IGNORECASE
+)
+# DeepSeek supports "max" as a reasoning_effort value (maps to their highest tier).
+_DEEPSEEK_RE = re.compile(r"deepseek", re.IGNORECASE)
 
 
 def sanitize_system_text(text: str) -> str:
@@ -59,14 +63,22 @@ def supports_reasoning_effort(model: str) -> bool:
     return bool(_REASONING_EFFORT_MODELS_RE.search(model))
 
 
-def _reasoning_effort_from_budget(budget_tokens: int) -> str:
+def _top_reasoning_effort(model: str) -> str:
+    """Return the highest reasoning_effort string the model accepts.
+
+    DeepSeek supports "max"; OpenAI o-series tops out at "high".
+    """
+    return "max" if _DEEPSEEK_RE.search(model) else "high"
+
+
+def _reasoning_effort_from_budget(budget_tokens: int, model: str = "") -> str:
     if budget_tokens <= 1024:
         return "low"
     if budget_tokens <= 8192:
         return "medium"
     if budget_tokens <= 32000:
         return "high"
-    return "high"  # OpenAI doesn't have "xhigh" in standard API
+    return _top_reasoning_effort(model)
 
 
 def strip_private_params(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -146,10 +158,10 @@ def anthropic_to_openai_request(
     thinking = body.get("thinking")
     if thinking and supports_reasoning_effort(backend_model):
         if thinking.get("type") == "adaptive":
-            oai["reasoning_effort"] = "xhigh"
+            oai["reasoning_effort"] = _top_reasoning_effort(backend_model)
         else:
             budget = thinking.get("budget_tokens", 8192)
-            oai["reasoning_effort"] = _reasoning_effort_from_budget(budget)
+            oai["reasoning_effort"] = _reasoning_effort_from_budget(budget, backend_model)
 
     # --- tools (filter BatchTool, clean schemas) ---
     tools = body.get("tools")
