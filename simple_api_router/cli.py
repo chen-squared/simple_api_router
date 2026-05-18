@@ -97,6 +97,7 @@ def _run_server(config_str: str, env_file: Optional[str] = None) -> None:
         host=config.server.host,
         port=config.server.port,
         log_level=config.server.log_level.lower(),
+        log_config=None,  # don't let uvicorn reconfigure logging; we own the format
     )
 
 

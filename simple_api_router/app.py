@@ -5,7 +5,7 @@ import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional
 
@@ -20,8 +20,8 @@ from .proxy import route_request, count_tokens_request
 from .usage_logger import log_usage, setup_usage_logging
 
 
-def _now_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _now_local() -> str:
+    return datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
 async def _sse_with_usage(
@@ -84,7 +84,7 @@ async def _sse_with_usage(
             input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, duration_ms,
         )
     log_usage({
-        "ts": _now_utc(),
+        "ts": _now_local(),
         "model": meta["model"],
         "provider": meta["provider"],
         "backend_model": meta["backend_model"],
@@ -229,7 +229,7 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
                         response.status_code, duration_ms,
                     )
                     log_usage({
-                        "ts": _now_utc(),
+                        "ts": _now_local(),
                         "model": meta["model"],
                         "provider": meta["provider"],
                         "backend_model": meta["backend_model"],
