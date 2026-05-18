@@ -356,15 +356,16 @@ def openai_to_anthropic_response(body: Dict[str, Any], original_model: str) -> D
         })
 
     usage = body.get("usage", {})
-    usage_out: Dict[str, Any] = {
-        "input_tokens": usage.get("prompt_tokens", 0),
-        "output_tokens": usage.get("completion_tokens", 0),
-    }
-    # Cache token counts
+    # OpenAI's prompt_tokens includes cached tokens in the total.
+    # Anthropic separates them: input_tokens = non-cached only.
     cache_read = (
         usage.get("cache_read_input_tokens")
         or (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
     )
+    usage_out: Dict[str, Any] = {
+        "input_tokens": max(0, usage.get("prompt_tokens", 0) - (cache_read or 0)),
+        "output_tokens": usage.get("completion_tokens", 0),
+    }
     if cache_read:
         usage_out["cache_read_input_tokens"] = cache_read
     cache_create = usage.get("cache_creation_input_tokens")
@@ -482,7 +483,7 @@ async def stream_openai_to_anthropic(
 
             # --- usage (comes in last chunk with stream_options) ---
             if usage_data := data.get("usage"):
-                input_tokens = usage_data.get("prompt_tokens", input_tokens)
+                raw_prompt = usage_data.get("prompt_tokens", input_tokens)
                 output_tokens = usage_data.get("completion_tokens", output_tokens)
                 raw_cache_read = (
                     usage_data.get("cache_read_input_tokens")
@@ -491,6 +492,8 @@ async def stream_openai_to_anthropic(
                 )
                 if raw_cache_read is not None:
                     cache_read_tokens = raw_cache_read
+                # OpenAI's prompt_tokens includes cached; subtract to get non-cached only
+                input_tokens = max(0, raw_prompt - (raw_cache_read or 0))
                 raw_cache_create = usage_data.get("cache_creation_input_tokens")
                 if raw_cache_create is not None:
                     cache_create_tokens = raw_cache_create
@@ -871,14 +874,16 @@ def _responses_stop_reason(
 
 
 def _build_anthropic_usage_from_responses(usage: Dict[str, Any]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {
-        "input_tokens": usage.get("input_tokens", 0),
-        "output_tokens": usage.get("output_tokens", 0),
-    }
+    # OpenAI Responses API: input_tokens is the total (includes cached).
+    # Anthropic: input_tokens is non-cached only.
     cache_read = (
         (usage.get("input_tokens_details") or {}).get("cached_tokens")
         or (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
     )
+    out: Dict[str, Any] = {
+        "input_tokens": max(0, usage.get("input_tokens", 0) - (cache_read or 0)),
+        "output_tokens": usage.get("output_tokens", 0),
+    }
     if cache_read:
         out["cache_read_input_tokens"] = cache_read
     return out

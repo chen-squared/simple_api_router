@@ -308,12 +308,13 @@ def google_to_anthropic_response(data: Dict[str, Any], model: str) -> Dict[str, 
     candidates_tokens = usage_meta.get("candidatesTokenCount", 0)
     total_tokens = usage_meta.get("totalTokenCount", 0)
     output_tokens = candidates_tokens or max(0, total_tokens - input_tokens)
+    # Google's promptTokenCount includes cached tokens; subtract for Anthropic semantics.
+    cache_tokens = usage_meta.get("cachedContentTokenCount", 0)
 
     usage: Dict[str, Any] = {
-        "input_tokens": input_tokens,
+        "input_tokens": max(0, input_tokens - cache_tokens),
         "output_tokens": output_tokens,
     }
-    cache_tokens = usage_meta.get("cachedContentTokenCount", 0)
     if cache_tokens:
         usage["cache_read_input_tokens"] = cache_tokens
 
@@ -384,12 +385,19 @@ async def stream_google_to_anthropic(
             # Capture usage from any chunk that provides it
             usage_meta = chunk_data.get("usageMetadata", {})
             if usage_meta:
-                accumulated_usage["input_tokens"] = usage_meta.get("promptTokenCount", 0)
+                prompt_tokens = usage_meta.get("promptTokenCount", 0)
                 c_tokens = usage_meta.get("candidatesTokenCount", 0)
                 total = usage_meta.get("totalTokenCount", 0)
+                cache_tokens = usage_meta.get("cachedContentTokenCount", 0)
+                # Google's promptTokenCount includes cached; subtract for Anthropic semantics.
+                accumulated_usage["input_tokens"] = max(0, prompt_tokens - cache_tokens)
                 accumulated_usage["output_tokens"] = (
-                    c_tokens or max(0, total - accumulated_usage["input_tokens"])
+                    c_tokens or max(0, total - prompt_tokens)
                 )
+                if cache_tokens:
+                    accumulated_usage["cache_read_input_tokens"] = cache_tokens
+                else:
+                    accumulated_usage.pop("cache_read_input_tokens", None)
 
             candidates = chunk_data.get("candidates", [])
             if not candidates:
@@ -479,7 +487,7 @@ async def stream_google_to_anthropic(
     yield _sse("message_delta", {
         "type": "message_delta",
         "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-        "usage": {"output_tokens": accumulated_usage["output_tokens"]},
+        "usage": {k: v for k, v in accumulated_usage.items()},
     })
 
     yield _sse("message_stop", {"type": "message_stop"})

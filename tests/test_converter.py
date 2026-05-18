@@ -2762,7 +2762,8 @@ class TestGoogleConverter(unittest.TestCase):
             },
         }
         result = google_to_anthropic_response(data, "gemini-2.0-flash")
-        self.assertEqual(result["usage"]["input_tokens"], 12)
+        # prompt=12 includes 3 cached; input_tokens = non-cached only = 9
+        self.assertEqual(result["usage"]["input_tokens"], 9)
         self.assertEqual(result["usage"]["output_tokens"], 8)   # 20 - 12
         self.assertEqual(result["usage"]["cache_read_input_tokens"], 3)
 
