@@ -8,8 +8,41 @@ Reference: Google Gemini API — https://ai.google.dev/api/generate-content
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional
+
+
+_GEMINI3_RE = re.compile(r"gemini-3", re.IGNORECASE)
+
+
+def _gemini_thinking_config(thinking: Dict[str, Any], model: str) -> Dict[str, Any]:
+    """Convert Anthropic thinking config to Gemini thinkingConfig dict.
+
+    Gemini 3+ uses thinkingLevel (string); Gemini 2.5 uses thinkingBudget (int).
+    """
+    thinking_type = thinking.get("type", "enabled")
+
+    if _GEMINI3_RE.search(model):
+        # Gemini 3+ — thinkingLevel
+        if thinking_type == "disabled":
+            return {"thinkingLevel": "minimal"}
+        budget = thinking.get("budget_tokens", 8192)
+        if thinking_type == "adaptive" or budget > 32000:
+            return {"thinkingLevel": "high"}
+        if budget <= 1024:
+            return {"thinkingLevel": "low"}
+        if budget <= 8192:
+            return {"thinkingLevel": "medium"}
+        return {"thinkingLevel": "high"}
+    else:
+        # Gemini 2.5 and earlier — thinkingBudget
+        if thinking_type == "disabled":
+            return {"thinkingBudget": 0}
+        if thinking_type == "adaptive":
+            return {}  # omit to let the model use dynamic thinking
+        budget = thinking.get("budget_tokens", 8192)
+        return {"thinkingBudget": budget}
 
 
 def _generate_tool_id() -> str:
@@ -134,7 +167,17 @@ def _content_block_to_gemini_part(
             fr["id"] = tool_use_id
         return {"functionResponse": fr}
 
-    # Skip thinking / redacted_thinking and anything unknown
+    # thinking → thought part (so Gemini sees prior reasoning in multi-turn)
+    if btype == "thinking":
+        text = block.get("thinking", "")
+        if text:
+            return {"text": text, "thought": True}
+        return None
+
+    if btype == "redacted_thinking":
+        return None  # encrypted; cannot round-trip to Gemini
+
+    # Skip anything else unknown
     return None
 
 
@@ -192,6 +235,13 @@ def anthropic_to_google_request(body: Dict[str, Any], model: str) -> Dict[str, A
         gc["stopSequences"] = body["stop_sequences"]
     if gc:
         result["generationConfig"] = gc
+
+    # thinking → thinkingConfig
+    thinking = body.get("thinking")
+    if thinking:
+        tc = _gemini_thinking_config(thinking, model)
+        if tc:
+            result.setdefault("generationConfig", {})["thinkingConfig"] = tc
 
     # Tools → functionDeclarations
     tools = body.get("tools")
@@ -285,7 +335,11 @@ def google_to_anthropic_response(data: Dict[str, Any], model: str) -> Dict[str, 
     for part in parts:
         if "text" in part:
             text = part["text"]
-            if text:
+            if not text:
+                continue
+            if part.get("thought"):
+                content_blocks.append({"type": "thinking", "thinking": text})
+            else:
                 content_blocks.append({"type": "text", "text": text})
         elif "functionCall" in part:
             fc = part["functionCall"]
@@ -358,9 +412,13 @@ async def stream_google_to_anthropic(
         },
     })
 
-    # Track open text block and accumulated tool calls
+    # Track open blocks and accumulated tool calls
+    next_block_index = 0
+    thinking_block_open = False
+    thinking_block_index = -1
+    accumulated_thinking = ""
     text_block_open = False
-    text_block_index = 0
+    text_block_index = -1
     accumulated_text = ""          # running total of text emitted so far
     tool_blocks: List[Dict[str, Any]] = []
     accumulated_usage = {"input_tokens": 0, "output_tokens": 0}
@@ -409,10 +467,48 @@ async def stream_google_to_anthropic(
 
             parts = candidate.get("content", {}).get("parts", [])
             for part in parts:
-                if "text" in part:
+                if part.get("thought") and "text" in part:
+                    # --- thinking delta ---
+                    new_thinking = part["text"]
+                    if not new_thinking:
+                        continue
+                    # Close text block if somehow open (shouldn't happen)
+                    if text_block_open:
+                        yield _sse("content_block_stop", {
+                            "type": "content_block_stop", "index": text_block_index,
+                        })
+                        text_block_open = False
+                    if not thinking_block_open:
+                        thinking_block_index = next_block_index
+                        next_block_index += 1
+                        yield _sse("content_block_start", {
+                            "type": "content_block_start",
+                            "index": thinking_block_index,
+                            "content_block": {"type": "thinking", "thinking": ""},
+                        })
+                        thinking_block_open = True
+                    if new_thinking.startswith(accumulated_thinking):
+                        delta = new_thinking[len(accumulated_thinking):]
+                        accumulated_thinking = new_thinking
+                    else:
+                        delta = new_thinking
+                        accumulated_thinking += new_thinking
+                    if delta:
+                        yield _sse("content_block_delta", {
+                            "type": "content_block_delta",
+                            "index": thinking_block_index,
+                            "delta": {"type": "thinking_delta", "thinking": delta},
+                        })
+                elif "text" in part:
                     new_text = part["text"]
                     if not new_text:
                         continue
+                    # Close thinking block if transitioning to answer
+                    if thinking_block_open:
+                        yield _sse("content_block_stop", {
+                            "type": "content_block_stop", "index": thinking_block_index,
+                        })
+                        thinking_block_open = False
                     # Gemini may send cumulative text (each chunk = full text so far)
                     # or incremental text (each chunk = new text only).  Handle both:
                     # if new_text starts with what we have so far it is cumulative.
@@ -425,6 +521,8 @@ async def stream_google_to_anthropic(
                     if not delta:
                         continue
                     if not text_block_open:
+                        text_block_index = next_block_index
+                        next_block_index += 1
                         yield _sse("content_block_start", {
                             "type": "content_block_start",
                             "index": text_block_index,
@@ -447,7 +545,12 @@ async def stream_google_to_anthropic(
                         "input": fc.get("args", {}),
                     })
 
-    # Close open text block
+    # Close any open blocks
+    if thinking_block_open:
+        yield _sse("content_block_stop", {
+            "type": "content_block_stop",
+            "index": thinking_block_index,
+        })
     if text_block_open:
         yield _sse("content_block_stop", {
             "type": "content_block_stop",
@@ -455,9 +558,8 @@ async def stream_google_to_anthropic(
         })
 
     # Emit tool use blocks
-    next_index = text_block_index + (1 if text_block_open else 0)
     for i, tool in enumerate(tool_blocks):
-        idx = next_index + i
+        idx = next_block_index + i
         yield _sse("content_block_start", {
             "type": "content_block_start",
             "index": idx,

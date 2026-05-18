@@ -2395,8 +2395,66 @@ class TestGoogleConverter(unittest.TestCase):
         }
         result = anthropic_to_google_request(body, "gemini-2.0-flash")
         parts = result["contents"][0]["parts"]
-        self.assertEqual(len(parts), 1)
-        self.assertEqual(parts[0]["text"], "Answer")
+        # thinking block is forwarded as thought: true so Gemini sees prior reasoning
+        self.assertEqual(len(parts), 2)
+        self.assertEqual(parts[0]["text"], "internal thought")
+        self.assertTrue(parts[0].get("thought"))
+        self.assertEqual(parts[1]["text"], "Answer")
+
+    def test_thinking_config_gemini25(self):
+        """budget_tokens → thinkingBudget for Gemini 2.5."""
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x", "max_tokens": 100,
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "enabled", "budget_tokens": 5000},
+        }
+        result = anthropic_to_google_request(body, "gemini-2.5-flash")
+        tc = result["generationConfig"]["thinkingConfig"]
+        self.assertEqual(tc["thinkingBudget"], 5000)
+
+    def test_thinking_config_gemini3(self):
+        """budget_tokens → thinkingLevel for Gemini 3."""
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x", "max_tokens": 100,
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "enabled", "budget_tokens": 5000},
+        }
+        result = anthropic_to_google_request(body, "gemini-3-flash")
+        tc = result["generationConfig"]["thinkingConfig"]
+        self.assertEqual(tc["thinkingLevel"], "medium")
+
+    def test_thinking_config_adaptive_gemini3(self):
+        """adaptive thinking → thinkingLevel: high for Gemini 3."""
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x", "max_tokens": 100,
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "adaptive"},
+        }
+        result = anthropic_to_google_request(body, "gemini-3-flash")
+        tc = result["generationConfig"]["thinkingConfig"]
+        self.assertEqual(tc["thinkingLevel"], "high")
+
+    def test_thought_part_becomes_thinking_block(self):
+        """Gemini response thought: true part → Anthropic thinking block."""
+        from simple_api_router.converter_google import google_to_anthropic_response
+        data = {
+            "candidates": [{
+                "finishReason": "STOP",
+                "content": {"parts": [
+                    {"text": "I need to think carefully", "thought": True},
+                    {"text": "The answer is 42"},
+                ]},
+            }],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5},
+        }
+        result = google_to_anthropic_response(data, "gemini-2.5-flash")
+        types = [b["type"] for b in result["content"]]
+        self.assertEqual(types, ["thinking", "text"])
+        self.assertEqual(result["content"][0]["thinking"], "I need to think carefully")
+        self.assertEqual(result["content"][1]["text"], "The answer is 42")
 
     # ------------------------------------------------------------------
     # google_to_anthropic_response
