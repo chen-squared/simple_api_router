@@ -259,7 +259,18 @@ async def _stream_converted_with_retry(
                 await asyncio.sleep(_backoff(attempt))
                 # buffer (preamble) is discarded; resp already closed by _stream_converted
                 continue
-            # Normal completion or retries exhausted — flush preamble/content.
+            # Retries exhausted with empty response — return error instead of empty preamble.
+            if not committed:
+                logger.error(
+                    "All %d attempts returned empty response from %s — returning error",
+                    max_retries + 1, url,
+                )
+                yield _sse_bytes("error", {
+                    "type": "error",
+                    "error": {"type": "api_error", "message": "Upstream returned empty response after retries"},
+                })
+                return
+            # Normal completion — flush buffer.
             for c in buffer:
                 yield c
             return
