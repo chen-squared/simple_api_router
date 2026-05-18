@@ -253,8 +253,8 @@ async def _stream_converted_with_retry(
             # upstream returned 200 with an empty body (0/0 tokens, no content blocks).
             if not committed and attempt < max_retries:
                 logger.warning(
-                    "Stream completed without content from %s — retrying %d/%d in %.1fs",
-                    url, attempt + 1, max_retries, _backoff(attempt),
+                    "Stream completed without content from %s — events: [%s] — retrying %d/%d in %.1fs",
+                    url, _buffer_event_summary(buffer), attempt + 1, max_retries, _backoff(attempt),
                 )
                 await asyncio.sleep(_backoff(attempt))
                 # buffer (preamble) is discarded; resp already closed by _stream_converted
@@ -262,8 +262,8 @@ async def _stream_converted_with_retry(
             # Retries exhausted with empty response — return error instead of empty preamble.
             if not committed:
                 logger.error(
-                    "All %d attempts returned empty response from %s — returning error",
-                    max_retries + 1, url,
+                    "All %d attempts returned empty response from %s — events: [%s]",
+                    max_retries + 1, url, _buffer_event_summary(buffer),
                 )
                 yield _sse_bytes("error", {
                     "type": "error",
@@ -285,7 +285,47 @@ async def _stream_converted_with_retry(
             yield c
 
 
-def _upstream_error_json(exc: Any) -> dict:
+def _buffer_event_summary(buffer: List[bytes]) -> str:
+    """Return a concise summary of SSE event types in the buffer for diagnostics.
+
+    For 'message_start' or 'message_delta' events, appends the usage/stop_reason
+    so we can tell if the upstream sent 0/0 tokens vs an unrecognised payload.
+    """
+    parts: List[str] = []
+    for chunk in buffer:
+        try:
+            text = chunk.decode(errors="replace")
+            lines = text.split("\n")
+            event_type = ""
+            data_str = ""
+            for line in lines:
+                if line.startswith("event: "):
+                    event_type = line[7:].strip()
+                elif line.startswith("data: "):
+                    data_str = line[6:].strip()
+            if not event_type:
+                parts.append("(unknown)")
+                continue
+            # For key events, include relevant fields to aid diagnosis.
+            if event_type in ("message_start", "message_delta") and data_str:
+                try:
+                    d = json.loads(data_str)
+                    usage = d.get("usage") or (d.get("message") or {}).get("usage") or {}
+                    stop = (d.get("delta") or {}).get("stop_reason", "")
+                    extra = f"in={usage.get('input_tokens','')} out={usage.get('output_tokens','')}"
+                    if stop:
+                        extra += f" stop={stop}"
+                    parts.append(f"{event_type}({extra})")
+                except Exception:
+                    parts.append(event_type)
+            else:
+                parts.append(event_type)
+        except Exception:
+            parts.append("?")
+    return ", ".join(parts) if parts else "(empty)"
+
+
+
     msg = f"HTTP {exc.status_code}" if isinstance(exc, httpx.Response) else str(exc)
     return {"type": "error", "error": {"type": "api_error", "message": f"Upstream error: {msg}"}}
 
