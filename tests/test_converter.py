@@ -1480,7 +1480,7 @@ class TestResponsesAPIRequest(unittest.TestCase):
         self.assertEqual(result["reasoning"]["effort"], "medium")
         self.assertEqual(result["reasoning"]["summary"], "auto")
 
-    def test_adaptive_thinking_becomes_high_effort(self):
+    def test_adaptive_thinking_becomes_xhigh_effort(self):
         body = {
             "model": "x",
             "max_tokens": 100,
@@ -1488,7 +1488,7 @@ class TestResponsesAPIRequest(unittest.TestCase):
             "thinking": {"type": "adaptive"},
         }
         result = anthropic_to_responses_request(body, "gpt-5")
-        self.assertEqual(result["reasoning"]["effort"], "high")
+        self.assertEqual(result["reasoning"]["effort"], "xhigh")
 
     def test_tool_choice_any_becomes_required(self):
         body = {

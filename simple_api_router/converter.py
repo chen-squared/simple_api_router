@@ -839,7 +839,7 @@ def anthropic_to_responses_request(body: Dict[str, Any], backend_model: str) -> 
     thinking = body.get("thinking")
     if thinking:
         if thinking.get("type") == "adaptive":
-            effort = "high"
+            effort = "xhigh"
         else:
             effort = _reasoning_effort_from_budget(thinking.get("budget_tokens", 8192))
         result["reasoning"] = {"effort": effort, "summary": "auto"}
