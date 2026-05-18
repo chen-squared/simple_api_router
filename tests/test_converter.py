@@ -1169,6 +1169,36 @@ class TestCCSwitchStreaming(unittest.TestCase):
         self.assertEqual(thinking_delta["delta"]["type"], "thinking_delta")
         self.assertEqual(thinking_delta["delta"]["thinking"], "think")
 
+    def test_whitespace_content_between_reasoning_does_not_split_thinking_block(self):
+        """A whitespace-only content delta between two reasoning_content chunks must not
+        close the thinking block, so all reasoning ends up in a single thinking block."""
+        chunks = [
+            b'data: {"id":"r1","choices":[{"delta":{"reasoning_content":"part1"}}]}\n\n',
+            # provider sends a bare "\n" between reasoning segments
+            b'data: {"id":"r1","choices":[{"delta":{"content":"\\n"}}]}\n\n',
+            b'data: {"id":"r1","choices":[{"delta":{"reasoning_content":"part2"}}]}\n\n',
+            b'data: {"id":"r1","choices":[{"delta":{"content":"answer"}}]}\n\n',
+            b'data: {"id":"r1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":5}}\n\n',
+            b'data: [DONE]\n\n',
+        ]
+        events = self._run(self._collect(chunks))
+        data_events = [d for k, d in events if k == "data"]
+        thinking_starts = [
+            d for d in data_events
+            if d["type"] == "content_block_start"
+            and d.get("content_block", {}).get("type") == "thinking"
+        ]
+        # All reasoning must be in ONE thinking block (no split from the "\n")
+        self.assertEqual(len(thinking_starts), 1, "consecutive reasoning must produce exactly one thinking block")
+        # Both reasoning parts must be present as thinking_deltas on the same index
+        thinking_deltas = [
+            d for d in data_events
+            if d["type"] == "content_block_delta"
+            and d.get("delta", {}).get("type") == "thinking_delta"
+        ]
+        combined = "".join(d["delta"]["thinking"] for d in thinking_deltas)
+        self.assertEqual(combined, "part1part2")
+
     def test_empty_content_delta_does_not_open_text_block(self):
         """An empty string content delta must not open a text block."""
         chunks = [

@@ -522,24 +522,32 @@ async def stream_openai_to_anthropic(
             # --- text delta ---
             if text := delta.get("content"):
                 if thinking_block_open:
-                    yield _sse_bytes("content_block_stop", {
-                        "type": "content_block_stop", "index": thinking_block_index,
+                    # Only close thinking for real content; skip whitespace-only
+                    # chunks that some providers insert between reasoning segments
+                    # (e.g. a bare "\n"), which would otherwise split one logical
+                    # thinking block into multiple consecutive blocks.
+                    if not text.strip():
+                        text = ""
+                    else:
+                        yield _sse_bytes("content_block_stop", {
+                            "type": "content_block_stop", "index": thinking_block_index,
+                        })
+                        thinking_block_open = False
+                if text:
+                    if not text_block_open:
+                        yield _sse_bytes("content_block_start", {
+                            "type": "content_block_start",
+                            "index": next_block_index,
+                            "content_block": {"type": "text", "text": ""},
+                        })
+                        text_block_index = next_block_index
+                        next_block_index += 1
+                        text_block_open = True
+                    yield _sse_bytes("content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": text_block_index,
+                        "delta": {"type": "text_delta", "text": text},
                     })
-                    thinking_block_open = False
-                if not text_block_open:
-                    yield _sse_bytes("content_block_start", {
-                        "type": "content_block_start",
-                        "index": next_block_index,
-                        "content_block": {"type": "text", "text": ""},
-                    })
-                    text_block_index = next_block_index
-                    next_block_index += 1
-                    text_block_open = True
-                yield _sse_bytes("content_block_delta", {
-                    "type": "content_block_delta",
-                    "index": text_block_index,
-                    "delta": {"type": "text_delta", "text": text},
-                })
 
             # --- tool_calls deltas ---
             for tc in delta.get("tool_calls") or []:
