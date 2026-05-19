@@ -228,7 +228,15 @@ def _assistant_blocks_to_openai(
         # redacted_thinking: silently skip
 
     msg: Dict[str, Any] = {"role": "assistant"}
-    msg["content"] = "\n".join(text_parts) if text_parts else None
+    if text_parts:
+        msg["content"] = "\n".join(text_parts)
+    elif not tool_calls:
+        # Interrupted message (e.g. only thinking was received, no text yet).
+        # Use empty string; null/None is only valid for tool-only assistant messages
+        # and many providers reject it otherwise.
+        msg["content"] = ""
+    else:
+        msg["content"] = None  # tool-only message: null is the OpenAI standard
     if tool_calls:
         msg["tool_calls"] = tool_calls
     if use_reasoning_content:
@@ -767,6 +775,7 @@ def _messages_to_responses_input(messages: List[Dict]) -> List[Dict[str, Any]]:
             continue
 
         current_parts: List[Dict[str, Any]] = []
+        result_start_idx = len(result)  # track how many items belong to this message
 
         for block in content:
             btype = block.get("type")
@@ -803,6 +812,13 @@ def _messages_to_responses_input(messages: List[Dict]) -> List[Dict[str, Any]]:
 
         if current_parts:
             result.append({"role": role, "content": current_parts})
+        elif role == "assistant" and len(result) == result_start_idx:
+            # No Responses-API items were emitted for this assistant turn at all:
+            # content was empty (interrupted before first block) or contained only
+            # thinking/redacted_thinking.  Emit an empty placeholder so the
+            # conversation keeps proper structure — the model must not see two
+            # consecutive user messages with no assistant turn between them.
+            result.append({"role": "assistant", "content": [{"type": "output_text", "text": ""}]})
 
     return result
 

@@ -1432,6 +1432,88 @@ class TestDeepSeekReasoning(unittest.TestCase):
         self.assertEqual(msg["tool_calls"][0]["id"], "call_date")
         self.assertEqual(msg["tool_calls"][0]["function"]["name"], "get_date")
 
+    # ------------------------------------------------------------------
+    # Interrupted-response history (openai_chat path)
+    # ------------------------------------------------------------------
+
+    def _make_interrupted_follow_up(self, partial_assistant_content):
+        """Return a minimal follow-up request with a partial assistant turn."""
+        return {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "Do something"},
+                {"role": "assistant", "content": partial_assistant_content},
+                {"role": "user", "content": "Never mind, do this instead"},
+            ],
+        }
+
+    def test_interrupted_empty_content_not_null(self):
+        """Interrupted before any block → content must be '' not null."""
+        body = self._make_interrupted_follow_up([])
+        result = anthropic_to_openai_request(body, "gpt-4o")
+        asst = next(m for m in result["messages"] if m["role"] == "assistant")
+        self.assertEqual(asst["content"], "")
+        self.assertNotIn("tool_calls", asst)
+
+    def test_interrupted_thinking_only_not_null(self):
+        """Interrupted during thinking (no text yet) → content must be '' not null."""
+        body = self._make_interrupted_follow_up([
+            {"type": "thinking", "thinking": "partial reasoning..."},
+        ])
+        result = anthropic_to_openai_request(body, "gpt-4o")
+        asst = next(m for m in result["messages"] if m["role"] == "assistant")
+        self.assertEqual(asst["content"], "")
+        self.assertNotIn("tool_calls", asst)
+
+    def test_interrupted_thinking_only_deepseek_not_null(self):
+        """Same as above but DeepSeek mode: thinking → reasoning_content, content → ''."""
+        body = self._make_interrupted_follow_up([
+            {"type": "thinking", "thinking": "partial reasoning..."},
+        ])
+        result = anthropic_to_openai_request(body, "deepseek-r1", use_reasoning_content=True)
+        asst = next(m for m in result["messages"] if m["role"] == "assistant")
+        self.assertEqual(asst["content"], "")
+        self.assertEqual(asst["reasoning_content"], "partial reasoning...")
+
+    def test_interrupted_redacted_thinking_not_null(self):
+        """Only redacted_thinking block → content must be '' not null."""
+        body = self._make_interrupted_follow_up([
+            {"type": "redacted_thinking", "data": "ENCRYPTED"},
+        ])
+        result = anthropic_to_openai_request(body, "gpt-4o")
+        asst = next(m for m in result["messages"] if m["role"] == "assistant")
+        self.assertEqual(asst["content"], "")
+
+    def test_interrupted_partial_text_preserved(self):
+        """Interrupted during text streaming → partial text is preserved."""
+        body = self._make_interrupted_follow_up([
+            {"type": "text", "text": "Partial answer..."},
+        ])
+        result = anthropic_to_openai_request(body, "gpt-4o")
+        asst = next(m for m in result["messages"] if m["role"] == "assistant")
+        self.assertEqual(asst["content"], "Partial answer...")
+
+    def test_interrupted_tool_only_null_is_correct(self):
+        """Tool-only (interrupted during tool streaming) → content: null is the OpenAI standard."""
+        body = self._make_interrupted_follow_up([
+            {"type": "tool_use", "id": "call_abc", "name": "do_thing", "input": {}},
+        ])
+        result = anthropic_to_openai_request(body, "gpt-4o")
+        asst = next(m for m in result["messages"] if m["role"] == "assistant")
+        self.assertIsNone(asst["content"])
+        self.assertEqual(asst["tool_calls"][0]["function"]["name"], "do_thing")
+
+    def test_new_user_message_survives_interrupted_history(self):
+        """The follow-up user message is present after an interrupted empty assistant turn."""
+        body = self._make_interrupted_follow_up([])
+        result = anthropic_to_openai_request(body, "gpt-4o")
+        roles = [m["role"] for m in result["messages"]]
+        # Conversation structure: system?, user, assistant, user
+        self.assertEqual(roles[-1], "user")
+        last_user = result["messages"][-1]
+        self.assertEqual(last_user["content"], "Never mind, do this instead")
+
 
 # ---------------------------------------------------------------------------
 # Responses API — request conversion
@@ -1594,6 +1676,85 @@ class TestResponsesAPIRequest(unittest.TestCase):
         self.assertEqual(item["role"], "assistant")
         self.assertEqual(len(item["content"]), 1)
         self.assertEqual(item["content"][0]["type"], "output_text")
+
+    # ------------------------------------------------------------------
+    # Interrupted-response history (openai_responses path)
+    # ------------------------------------------------------------------
+
+    def _interrupted_responses_body(self, partial_assistant_content):
+        return {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "Do something"},
+                {"role": "assistant", "content": partial_assistant_content},
+                {"role": "user", "content": "Never mind"},
+            ],
+        }
+
+    def test_responses_interrupted_empty_content_placeholder(self):
+        """Interrupted before first block (content=[]) → empty output_text placeholder."""
+        body = self._interrupted_responses_body([])
+        result = anthropic_to_responses_request(body, "gpt-5")
+        items = result["input"]
+        asst = next(it for it in items if isinstance(it, dict) and it.get("role") == "assistant")
+        self.assertEqual(asst["content"][0]["type"], "output_text")
+        self.assertEqual(asst["content"][0]["text"], "")
+
+    def test_responses_interrupted_thinking_only_placeholder(self):
+        """Interrupted during thinking (no text) → empty output_text placeholder."""
+        body = self._interrupted_responses_body([
+            {"type": "thinking", "thinking": "partial reasoning..."},
+        ])
+        result = anthropic_to_responses_request(body, "gpt-5")
+        items = result["input"]
+        asst = next(it for it in items if isinstance(it, dict) and it.get("role") == "assistant")
+        self.assertEqual(asst["content"][0]["text"], "")
+
+    def test_responses_interrupted_redacted_thinking_placeholder(self):
+        """Only redacted_thinking → empty output_text placeholder."""
+        body = self._interrupted_responses_body([
+            {"type": "redacted_thinking", "data": "ENCRYPTED"},
+        ])
+        result = anthropic_to_responses_request(body, "gpt-5")
+        items = result["input"]
+        asst = next(it for it in items if isinstance(it, dict) and it.get("role") == "assistant")
+        self.assertEqual(asst["content"][0]["text"], "")
+
+    def test_responses_interrupted_tool_use_no_extra_message(self):
+        """Tool-only interrupted turn → function_call added, no spurious empty text message."""
+        body = self._interrupted_responses_body([
+            {"type": "tool_use", "id": "call_abc", "name": "do_thing", "input": {}},
+        ])
+        result = anthropic_to_responses_request(body, "gpt-5")
+        items = result["input"]
+        func_calls = [it for it in items if isinstance(it, dict) and it.get("type") == "function_call"]
+        self.assertEqual(len(func_calls), 1)
+        # Must NOT have a spurious empty assistant message
+        spurious = [
+            it for it in items
+            if isinstance(it, dict)
+            and it.get("role") == "assistant"
+            and it.get("content", [{}])[0].get("text") == ""
+        ]
+        self.assertEqual(len(spurious), 0)
+
+    def test_responses_interrupted_text_preserved(self):
+        """Partial text survives."""
+        body = self._interrupted_responses_body([
+            {"type": "text", "text": "Partial answer..."},
+        ])
+        result = anthropic_to_responses_request(body, "gpt-5")
+        asst = next(it for it in result["input"] if isinstance(it, dict) and it.get("role") == "assistant")
+        self.assertEqual(asst["content"][0]["text"], "Partial answer...")
+
+    def test_responses_follow_up_user_message_present(self):
+        """The new user message is always the last item in input, even after interrupted turn."""
+        body = self._interrupted_responses_body([])
+        result = anthropic_to_responses_request(body, "gpt-5")
+        last = result["input"][-1]
+        self.assertEqual(last.get("role"), "user")
+        self.assertEqual(last["content"][0]["text"], "Never mind")
 
 
 # ---------------------------------------------------------------------------
@@ -3118,6 +3279,78 @@ class TestGoogleConverter(unittest.TestCase):
             and d.get("content_block", {}).get("type") == "tool_use"
         )
         self.assertTrue(tool_start["content_block"]["id"].startswith("toolu_"))
+
+    # ------------------------------------------------------------------
+    # Interrupted-response history (Google path)
+    # ------------------------------------------------------------------
+
+    def _google_interrupted_body(self, partial_assistant_content):
+        from simple_api_router.converter_google import anthropic_to_google_request
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "Do something"},
+                {"role": "assistant", "content": partial_assistant_content},
+                {"role": "user", "content": "Never mind"},
+            ],
+        }
+        return anthropic_to_google_request(body, "gemini-2.5-flash")
+
+    def test_google_interrupted_empty_content_placeholder(self):
+        """Interrupted before any block (content=[]) → model placeholder, not dropped."""
+        result = self._google_interrupted_body([])
+        roles = [c["role"] for c in result["contents"]]
+        # user, model, user  — alternating
+        self.assertEqual(roles, ["user", "model", "user"])
+        model_parts = result["contents"][1]["parts"]
+        self.assertEqual(len(model_parts), 1)
+        self.assertEqual(model_parts[0]["text"], "")
+
+    def test_google_interrupted_redacted_thinking_placeholder(self):
+        """Only redacted_thinking (cannot round-trip) → placeholder, not dropped."""
+        result = self._google_interrupted_body([
+            {"type": "redacted_thinking", "data": "ENCRYPTED"},
+        ])
+        roles = [c["role"] for c in result["contents"]]
+        self.assertEqual(roles, ["user", "model", "user"])
+
+    def test_google_interrupted_thinking_only_preserved(self):
+        """Partial thinking-only turn → thought part present (not a placeholder)."""
+        result = self._google_interrupted_body([
+            {"type": "thinking", "thinking": "some reasoning"},
+        ])
+        roles = [c["role"] for c in result["contents"]]
+        self.assertEqual(roles, ["user", "model", "user"])
+        model_parts = result["contents"][1]["parts"]
+        self.assertTrue(model_parts[0].get("thought"))
+        self.assertEqual(model_parts[0]["text"], "some reasoning")
+
+    def test_google_interrupted_partial_text_preserved(self):
+        """Partial text survives."""
+        result = self._google_interrupted_body([
+            {"type": "text", "text": "partial answer"},
+        ])
+        roles = [c["role"] for c in result["contents"]]
+        self.assertEqual(roles, ["user", "model", "user"])
+        self.assertEqual(result["contents"][1]["parts"][0]["text"], "partial answer")
+
+    def test_google_interrupted_tool_only_no_placeholder(self):
+        """Tool-only turn already has parts → no extra placeholder."""
+        result = self._google_interrupted_body([
+            {"type": "tool_use", "id": "call_xyz", "name": "search", "input": {"q": "hi"}},
+        ])
+        roles = [c["role"] for c in result["contents"]]
+        self.assertEqual(roles, ["user", "model", "user"])
+        model_parts = result["contents"][1]["parts"]
+        self.assertIn("functionCall", model_parts[0])
+
+    def test_google_follow_up_user_message_present(self):
+        """The new user message is the last content item after an interrupted turn."""
+        result = self._google_interrupted_body([])
+        last = result["contents"][-1]
+        self.assertEqual(last["role"], "user")
+        self.assertEqual(last["parts"][0]["text"], "Never mind")
 
 
 if __name__ == "__main__":

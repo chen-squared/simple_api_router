@@ -203,6 +203,13 @@ def anthropic_to_google_request(body: Dict[str, Any], model: str) -> Dict[str, A
 
         if parts:
             contents.append({"role": role, "parts": parts})
+        elif role == "model":
+            # Empty model turn: content list was empty (interrupted before first
+            # block) or contained only redacted_thinking (cannot round-trip).
+            # Gemini requires strictly alternating user/model turns, so synthesise
+            # a placeholder rather than dropping the turn and causing a turn-order
+            # error.
+            contents.append({"role": "model", "parts": [{"text": ""}]})
 
     result: Dict[str, Any] = {"contents": contents}
 
