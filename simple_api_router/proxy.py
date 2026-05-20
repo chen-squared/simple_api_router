@@ -518,8 +518,9 @@ async def route_request(
                 provider, endpoint, api_format, backend_model = resolve_provider(
                     fb_provider_name, fb_model, config
                 )
-                # Update provider_name/model so usage_meta reflects the actual model billed.
+                # Update provider_name/model so usage_meta and effort resolution use the fallback model.
                 provider_name, model = fb_provider_name, fb_model
+                model_str = f"{provider_name}/{model}" if provider_name else model
             else:
                 logger.warning(
                     "text_only model '%s' received media content but no multimodal_fallback "
