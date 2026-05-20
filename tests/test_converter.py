@@ -733,6 +733,9 @@ class TestOpenAIToAnthropicExtended(unittest.TestCase):
         self.assertEqual(thinking["thinking"], "Let me think step by step...")
         # thinking must come before text
         self.assertLess(types.index("thinking"), types.index("text"))
+        # thinking block must include signature field (protocol conformance)
+        self.assertIn("signature", thinking, "non-streaming thinking block must include 'signature' field")
+        self.assertEqual(thinking["signature"], "")
 
     def test_refusal_becomes_text_block(self):
         oai = {
@@ -1256,6 +1259,48 @@ class TestCCSwitchStreaming(unittest.TestCase):
         ]
         combined = "".join(d["delta"]["thinking"] for d in thinking_deltas)
         self.assertEqual(combined, "part1part2")
+
+    def test_thinking_block_stream_has_signature_and_signature_delta(self):
+        """Per Anthropic spec: content_block_start for thinking must include signature:'',
+        and a signature_delta must be emitted just before content_block_stop."""
+        chunks = [
+            b'data: {"id":"r1","choices":[{"delta":{"reasoning_content":"I think"}}]}\n\n',
+            b'data: {"id":"r1","choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n',
+            b'data: [DONE]\n\n',
+        ]
+        events = self._run(self._collect(chunks))
+        data_events = [d for k, d in events if k == "data"]
+
+        # 1. content_block_start for thinking must have signature: ""
+        thinking_start = next(
+            (d for d in data_events
+             if d["type"] == "content_block_start"
+             and d.get("content_block", {}).get("type") == "thinking"),
+            None,
+        )
+        self.assertIsNotNone(thinking_start)
+        self.assertIn("signature", thinking_start["content_block"],
+                      "thinking content_block_start must include 'signature' field")
+        self.assertEqual(thinking_start["content_block"]["signature"], "")
+
+        # 2. A signature_delta must appear before content_block_stop for the thinking block
+        thinking_idx = thinking_start["index"]
+        thinking_stop = next(
+            (d for d in data_events
+             if d["type"] == "content_block_stop" and d.get("index") == thinking_idx),
+            None,
+        )
+        self.assertIsNotNone(thinking_stop)
+        stop_pos = data_events.index(thinking_stop)
+        sig_delta = next(
+            (d for d in data_events[:stop_pos]
+             if d["type"] == "content_block_delta"
+             and d.get("index") == thinking_idx
+             and d.get("delta", {}).get("type") == "signature_delta"),
+            None,
+        )
+        self.assertIsNotNone(sig_delta,
+            "signature_delta must be emitted before content_block_stop for thinking blocks")
 
     def test_empty_content_delta_does_not_open_text_block(self):
         """An empty string content delta must not open a text block."""

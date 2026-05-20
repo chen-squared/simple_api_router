@@ -354,7 +354,7 @@ def google_to_anthropic_response(data: Dict[str, Any], model: str) -> Dict[str, 
             if not text:
                 continue
             if part.get("thought"):
-                content_blocks.append({"type": "thinking", "thinking": text})
+                content_blocks.append({"type": "thinking", "thinking": text, "signature": ""})
             else:
                 content_blocks.append({"type": "text", "text": text})
         elif "functionCall" in part:
@@ -406,6 +406,20 @@ def google_to_anthropic_response(data: Dict[str, Any], model: str) -> Dict[str, 
 
 def _sse(event: str, data: Any) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
+
+
+def _google_thinking_close_events(index: int) -> List[bytes]:
+    """Return [signature_delta, content_block_stop] bytes for a thinking block."""
+    return [
+        _sse("content_block_delta", {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "signature_delta", "signature": ""},
+        }),
+        _sse("content_block_stop", {
+            "type": "content_block_stop", "index": index,
+        }),
+    ]
 
 
 async def stream_google_to_anthropic(
@@ -500,7 +514,7 @@ async def stream_google_to_anthropic(
                         yield _sse("content_block_start", {
                             "type": "content_block_start",
                             "index": thinking_block_index,
-                            "content_block": {"type": "thinking", "thinking": ""},
+                            "content_block": {"type": "thinking", "thinking": "", "signature": ""},
                         })
                         thinking_block_open = True
                     if new_thinking.startswith(accumulated_thinking):
@@ -521,9 +535,8 @@ async def stream_google_to_anthropic(
                         continue
                     # Close thinking block if transitioning to answer
                     if thinking_block_open:
-                        yield _sse("content_block_stop", {
-                            "type": "content_block_stop", "index": thinking_block_index,
-                        })
+                        for ev in _google_thinking_close_events(thinking_block_index):
+                            yield ev
                         thinking_block_open = False
                     # Gemini may send cumulative text (each chunk = full text so far)
                     # or incremental text (each chunk = new text only).  Handle both:
@@ -563,10 +576,8 @@ async def stream_google_to_anthropic(
 
     # Close any open blocks
     if thinking_block_open:
-        yield _sse("content_block_stop", {
-            "type": "content_block_stop",
-            "index": thinking_block_index,
-        })
+        for ev in _google_thinking_close_events(thinking_block_index):
+            yield ev
     if text_block_open:
         yield _sse("content_block_stop", {
             "type": "content_block_stop",

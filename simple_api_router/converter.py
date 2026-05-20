@@ -328,7 +328,7 @@ def openai_to_anthropic_response(body: Dict[str, Any], original_model: str) -> D
     # reasoning_content (o-series) → thinking block (before text)
     reasoning = message.get("reasoning_content") or message.get("reasoning")
     if reasoning:
-        content.append({"type": "thinking", "thinking": reasoning})
+        content.append({"type": "thinking", "thinking": reasoning, "signature": ""})
 
     # text content
     text = message.get("content")
@@ -473,9 +473,8 @@ async def stream_openai_to_anthropic(
                 # Close any open blocks before emitting the error event so the
                 # client doesn't get stuck with half-open content blocks.
                 if thinking_block_open:
-                    yield _sse_bytes("content_block_stop", {
-                        "type": "content_block_stop", "index": thinking_block_index,
-                    })
+                    for ev in _thinking_close_events(thinking_block_index):
+                        yield ev
                 if text_block_open:
                     yield _sse_bytes("content_block_stop", {
                         "type": "content_block_stop", "index": text_block_index,
@@ -527,7 +526,7 @@ async def stream_openai_to_anthropic(
                     yield _sse_bytes("content_block_start", {
                         "type": "content_block_start",
                         "index": next_block_index,
-                        "content_block": {"type": "thinking", "thinking": ""},
+                        "content_block": {"type": "thinking", "thinking": "", "signature": ""},
                     })
                     thinking_block_index = next_block_index
                     next_block_index += 1
@@ -548,9 +547,8 @@ async def stream_openai_to_anthropic(
                     if not text.strip():
                         text = ""
                     else:
-                        yield _sse_bytes("content_block_stop", {
-                            "type": "content_block_stop", "index": thinking_block_index,
-                        })
+                        for ev in _thinking_close_events(thinking_block_index):
+                            yield ev
                         thinking_block_open = False
                 if text:
                     if not text_block_open:
@@ -575,9 +573,8 @@ async def stream_openai_to_anthropic(
                 if oai_idx not in tool_states:
                     # Close open text/thinking blocks
                     if thinking_block_open:
-                        yield _sse_bytes("content_block_stop", {
-                            "type": "content_block_stop", "index": thinking_block_index,
-                        })
+                        for ev in _thinking_close_events(thinking_block_index):
+                            yield ev
                         thinking_block_open = False
                     if text_block_open:
                         yield _sse_bytes("content_block_stop", {
@@ -639,9 +636,8 @@ async def stream_openai_to_anthropic(
             # --- legacy function_call ---
             if fc_delta := delta.get("function_call"):
                 if thinking_block_open:
-                    yield _sse_bytes("content_block_stop", {
-                        "type": "content_block_stop", "index": thinking_block_index,
-                    })
+                    for ev in _thinking_close_events(thinking_block_index):
+                        yield ev
                     thinking_block_open = False
                 if text_block_open:
                     yield _sse_bytes("content_block_stop", {
@@ -702,9 +698,8 @@ async def stream_openai_to_anthropic(
 
     # --- close any still-open blocks ---
     if thinking_block_open:
-        yield _sse_bytes("content_block_stop", {
-            "type": "content_block_stop", "index": thinking_block_index,
-        })
+        for ev in _thinking_close_events(thinking_block_index):
+            yield ev
     if text_block_open:
         yield _sse_bytes("content_block_stop", {
             "type": "content_block_stop", "index": text_block_index,
@@ -734,6 +729,25 @@ async def stream_openai_to_anthropic(
 
 def _sse_bytes(event: str, data: Dict[str, Any]) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
+
+
+def _thinking_close_events(index: int) -> List[bytes]:
+    """Return [signature_delta, content_block_stop] bytes for a thinking block.
+
+    Per Anthropic streaming spec, a signature_delta must be emitted just before
+    content_block_stop for every thinking block.  For non-Anthropic backends we
+    have no real cryptographic signature, so we emit an empty string.
+    """
+    return [
+        _sse_bytes("content_block_delta", {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "signature_delta", "signature": ""},
+        }),
+        _sse_bytes("content_block_stop", {
+            "type": "content_block_stop", "index": index,
+        }),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -965,7 +979,7 @@ def responses_to_anthropic_response(
             texts = [s.get("text", "") for s in summary if s.get("type") == "summary_text"]
             joined = "\n\n".join(t for t in texts if t)
             if joined:
-                content.append({"type": "thinking", "thinking": joined})
+                content.append({"type": "thinking", "thinking": joined, "signature": ""})
 
     status = body.get("status", "completed")
     incomplete_reason = (body.get("incomplete_details") or {}).get("reason")
@@ -1003,6 +1017,7 @@ async def stream_responses_to_anthropic(
     # output_index → anthropic block index (for function_call items)
     tool_map: Dict[int, int] = {}
     open_blocks: Set[int] = set()
+    thinking_blocks: Set[int] = set()  # ant_indices that are thinking blocks
     has_tool_use = False
 
     pending = ""
@@ -1142,10 +1157,11 @@ async def stream_responses_to_anthropic(
                     next_index += 1
                     block_map[key] = ant_index
                     open_blocks.add(ant_index)
+                    thinking_blocks.add(ant_index)
                     yield _sse_bytes("content_block_start", {
                         "type": "content_block_start",
                         "index": ant_index,
-                        "content_block": {"type": "thinking", "thinking": ""},
+                        "content_block": {"type": "thinking", "thinking": "", "signature": ""},
                     })
                 else:
                     ant_index = block_map[key]
@@ -1164,16 +1180,19 @@ async def stream_responses_to_anthropic(
                 ant_index = block_map.get((oi, ci))
                 if ant_index is not None and ant_index in open_blocks:
                     open_blocks.discard(ant_index)
-                    yield _sse_bytes("content_block_stop", {
-                        "type": "content_block_stop", "index": ant_index,
-                    })
+                    for ev in _thinking_close_events(ant_index):
+                        yield ev
 
             elif etype == "response.completed":
                 # Close any remaining open blocks
                 for ant_idx in sorted(open_blocks):
-                    yield _sse_bytes("content_block_stop", {
-                        "type": "content_block_stop", "index": ant_idx,
-                    })
+                    if ant_idx in thinking_blocks:
+                        for ev in _thinking_close_events(ant_idx):
+                            yield ev
+                    else:
+                        yield _sse_bytes("content_block_stop", {
+                            "type": "content_block_stop", "index": ant_idx,
+                        })
                 open_blocks.clear()
 
                 status = resp_obj.get("status", "completed")
@@ -1193,9 +1212,13 @@ async def stream_responses_to_anthropic(
     # the connection or sent [DONE] prematurely), close any open blocks and emit
     # the terminal events so the client doesn't hang.
     for ant_idx in sorted(open_blocks):
-        yield _sse_bytes("content_block_stop", {
-            "type": "content_block_stop", "index": ant_idx,
-        })
+        if ant_idx in thinking_blocks:
+            for ev in _thinking_close_events(ant_idx):
+                yield ev
+        else:
+            yield _sse_bytes("content_block_stop", {
+                "type": "content_block_stop", "index": ant_idx,
+            })
     open_blocks.clear()
 
     fallback_stop_reason = "tool_use" if has_tool_use else "end_turn"
