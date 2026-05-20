@@ -407,71 +407,6 @@ def _request_has_media(body: Dict[str, Any]) -> bool:
     return False
 
 
-def _last_user_has_media(body: Dict[str, Any]) -> bool:
-    """Return True if the last user message contains image, video, or PDF content."""
-    for msg in reversed(body.get("messages", [])):
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            return isinstance(content, list) and _blocks_have_media(content)
-    return False
-
-
-def _strip_media_from_history(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Replace media blocks in historical messages with text placeholders.
-
-    The last user message is left intact (caller already confirmed it has no media).
-    All other messages have image/video/document blocks replaced with [<type> omitted]
-    so that text-only upstream models don't choke on stale image blocks in history.
-    """
-    last_user_idx = -1
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].get("role") == "user":
-            last_user_idx = i
-            break
-
-    result: List[Dict[str, Any]] = []
-    for i, msg in enumerate(messages):
-        if i == last_user_idx:
-            result.append(msg)
-            continue
-        content = msg.get("content")
-        if isinstance(content, list):
-            stripped = []
-            changed = False
-            for block in content:
-                btype = block.get("type")
-                if btype in ("image", "video"):
-                    stripped.append({"type": "text", "text": f"[{btype} omitted]"})
-                    changed = True
-                elif btype == "document":
-                    src_type = (block.get("source") or {}).get("type")
-                    if src_type != "text":
-                        stripped.append({"type": "text", "text": "[document omitted]"})
-                        changed = True
-                        continue
-                    stripped.append(block)
-                elif btype == "tool_result":
-                    nested = block.get("content", "")
-                    if isinstance(nested, list) and _blocks_have_media(nested):
-                        cleaned = [
-                            {"type": "text", "text": f"[{b.get('type')} omitted]"}
-                            if b.get("type") in ("image", "video")
-                            else b
-                            for b in nested
-                        ]
-                        stripped.append({**block, "content": cleaned})
-                        changed = True
-                    else:
-                        stripped.append(block)
-                else:
-                    stripped.append(block)
-            if changed:
-                result.append({**msg, "content": stripped})
-                continue
-        result.append(msg)
-    return result
-
-
 def resolve_provider(
     provider_name: Optional[str],
     model: str,
@@ -567,14 +502,12 @@ async def route_request(
     provider, endpoint, api_format, backend_model = resolve_provider(provider_name, model, config)
     max_retries = config.server.max_retries
 
-    # Multimodal fallback: if the resolved model is text-only, handle media appropriately.
-    # Only check the LAST user message to decide whether to fallback — images in earlier
-    # history should not permanently strand the conversation on the fallback model.
-    # If the last user message has no media but history does, strip the stale media blocks
-    # so the text-only upstream doesn't choke on them.
-    entry = endpoint.get_model_entry(model)
-    if entry.text_only:
-        if _last_user_has_media(body):
+    # Multimodal fallback: if the resolved model is text-only and the request contains
+    # image or video blocks, re-route to a multimodal model instead of forwarding and
+    # letting the upstream return a (confusing) format error.
+    if _request_has_media(body):
+        entry = endpoint.get_model_entry(model)
+        if entry.text_only:
             fallback = entry.multimodal_fallback or config.server.multimodal_fallback
             if fallback:
                 logger.info(
@@ -594,14 +527,6 @@ async def route_request(
                     "is configured — forwarding anyway",
                     model,
                 )
-        elif _request_has_media(body):
-            # Last user message is text-only but earlier history has image/video blocks.
-            # Strip them so the text-only model doesn't error on stale media in history.
-            logger.debug(
-                "text_only model '%s': stripping stale media blocks from conversation history",
-                model,
-            )
-            body = {**body, "messages": _strip_media_from_history(body.get("messages", []))}
 
     # Stash routing metadata so app.py can log usage after the response is done.
     # Use the clean "provider/model" form (bracket suffixes stripped) so pricing lookup works.
