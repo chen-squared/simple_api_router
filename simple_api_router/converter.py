@@ -532,25 +532,31 @@ async def stream_openai_to_anthropic(
             # --- reasoning / thinking delta (o-series) ---
             reasoning_text = delta.get("reasoning") or delta.get("reasoning_content")
             if reasoning_text:
-                if not thinking_block_open:
-                    if text_block_open:
-                        yield _sse_bytes("content_block_stop", {
-                            "type": "content_block_stop", "index": text_block_index,
+                # Skip reasoning if tool blocks are already open.  Some providers
+                # stream tool_calls first and reasoning_content afterward; opening a
+                # thinking block at that point would create overlapping open blocks
+                # (protocol violation) and show thinking *after* tools in Claude Code.
+                # Post-tool reasoning is discarded; pre-tool reasoning works normally.
+                if not open_tool_indices:
+                    if not thinking_block_open:
+                        if text_block_open:
+                            yield _sse_bytes("content_block_stop", {
+                                "type": "content_block_stop", "index": text_block_index,
+                            })
+                            text_block_open = False
+                        yield _sse_bytes("content_block_start", {
+                            "type": "content_block_start",
+                            "index": next_block_index,
+                            "content_block": {"type": "thinking", "thinking": "", "signature": ""},
                         })
-                        text_block_open = False
-                    yield _sse_bytes("content_block_start", {
-                        "type": "content_block_start",
-                        "index": next_block_index,
-                        "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+                        thinking_block_index = next_block_index
+                        next_block_index += 1
+                        thinking_block_open = True
+                    yield _sse_bytes("content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": thinking_block_index,
+                        "delta": {"type": "thinking_delta", "thinking": reasoning_text},
                     })
-                    thinking_block_index = next_block_index
-                    next_block_index += 1
-                    thinking_block_open = True
-                yield _sse_bytes("content_block_delta", {
-                    "type": "content_block_delta",
-                    "index": thinking_block_index,
-                    "delta": {"type": "thinking_delta", "thinking": reasoning_text},
-                })
 
             # --- text delta ---
             if text := delta.get("content"):
@@ -607,24 +613,20 @@ async def stream_openai_to_anthropic(
                 oai_idx: int = tc.get("index", 0)
 
                 if oai_idx not in tool_states:
-                    # Close open text/thinking blocks
-                    if thinking_block_open:
-                        for ev in _thinking_close_events(thinking_block_index):
-                            yield ev
-                        thinking_block_open = False
-                    if text_block_open:
-                        yield _sse_bytes("content_block_stop", {
-                            "type": "content_block_stop", "index": text_block_index,
-                        })
-                        text_block_open = False
+                    # Create entry WITHOUT reserving an anthropic index yet.
+                    # We defer index assignment to the moment we actually emit
+                    # content_block_start (when both id and name are known).
+                    # This means any interleaved reasoning_content that arrives
+                    # before the tool is fully identified will claim a lower index
+                    # and display *before* the tool call in Claude Code.
                     tool_states[oai_idx] = {
-                        "anthropic_index": next_block_index,
+                        "oai_index": oai_idx,
+                        "anthropic_index": None,
                         "id": "",
                         "name": "",
                         "started": False,
                         "pending_args": "",
                     }
-                    next_block_index += 1
 
                 state = tool_states[oai_idx]
                 fn = tc.get("function") or {}
@@ -635,6 +637,18 @@ async def stream_openai_to_anthropic(
 
                 # Defer block start until both id AND name are known
                 if not state["started"] and state["id"] and state["name"]:
+                    # Close open text/thinking blocks right before opening the tool
+                    if thinking_block_open:
+                        for ev in _thinking_close_events(thinking_block_index):
+                            yield ev
+                        thinking_block_open = False
+                    if text_block_open:
+                        yield _sse_bytes("content_block_stop", {
+                            "type": "content_block_stop", "index": text_block_index,
+                        })
+                        text_block_open = False
+                    state["anthropic_index"] = next_block_index
+                    next_block_index += 1
                     state["started"] = True
                     yield _sse_bytes("content_block_start", {
                         "type": "content_block_start",
@@ -703,11 +717,23 @@ async def stream_openai_to_anthropic(
 
             # --- finish_reason: flush any unstarted tool blocks ---
             if finish:
-                for state in sorted(tool_states.values(), key=lambda s: s["anthropic_index"]):
+                # Close any open thinking/text before flushing unstarted tools
+                if thinking_block_open:
+                    for ev in _thinking_close_events(thinking_block_index):
+                        yield ev
+                    thinking_block_open = False
+                if text_block_open:
+                    yield _sse_bytes("content_block_stop", {
+                        "type": "content_block_stop", "index": text_block_index,
+                    })
+                    text_block_open = False
+                for state in sorted(tool_states.values(), key=lambda s: s["oai_index"]):
                     if state["started"]:
                         continue
                     if not state["id"] and not state["name"] and not state["pending_args"]:
                         continue
+                    state["anthropic_index"] = next_block_index
+                    next_block_index += 1
                     fallback_id = state["id"] or f"tool_call_{state['anthropic_index']}"
                     fallback_name = state["name"] or "unknown_tool"
                     state["started"] = True
