@@ -652,8 +652,9 @@ class TestAnthropicToOpenAIExtended(unittest.TestCase):
         self.assertEqual(anthropic_to_openai_request(body, "deepseek-r1").get("reasoning_effort"), "high")
 
     def test_adaptive_thinking_with_output_config_effort(self):
-        """output_config.effort overrides the adaptive default."""
-        for effort in ("max", "xhigh", "medium", "low"):
+        """output_config.effort overrides the adaptive default; 'max' maps to 'xhigh'."""
+        # For DeepSeek: max→xhigh, xhigh→xhigh, others pass through
+        for effort, expected in (("max", "xhigh"), ("xhigh", "xhigh"), ("medium", "medium"), ("low", "low")):
             body = {
                 "model": "x",
                 "max_tokens": 1024,
@@ -662,8 +663,21 @@ class TestAnthropicToOpenAIExtended(unittest.TestCase):
                 "messages": [{"role": "user", "content": "Hello"}],
             }
             self.assertEqual(
-                anthropic_to_openai_request(body, "gpt-5.4").get("reasoning_effort"), effort,
-                f"expected effort={effort}",
+                anthropic_to_openai_request(body, "deepseek-v3").get("reasoning_effort"), expected,
+                f"deepseek effort={effort}",
+            )
+        # For OpenAI: max→xhigh (OpenAI also supports xhigh now), others pass through
+        for effort, expected in (("max", "xhigh"), ("xhigh", "xhigh"), ("high", "high"), ("medium", "medium")):
+            body = {
+                "model": "x",
+                "max_tokens": 1024,
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": effort},
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+            self.assertEqual(
+                anthropic_to_openai_request(body, "gpt-5.4").get("reasoning_effort"), expected,
+                f"openai effort={effort}",
             )
 
     def test_budget_thinking_with_output_config_effort_override(self):

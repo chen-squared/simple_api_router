@@ -60,11 +60,7 @@ def is_o_series(model: str) -> bool:
     return bool(_O_SERIES_RE.search(model))
 
 def _reasoning_effort_from_budget(budget_tokens: int) -> str:
-    """Map Anthropic budget_tokens to OpenAI reasoning_effort.
-
-    OpenAI (and DeepSeek, which maps xhigh→max internally) all accept:
-    none / minimal / low / medium / high / xhigh.
-    """
+    """Map Anthropic budget_tokens to OpenAI reasoning_effort."""
     if budget_tokens <= 1024:
         return "low"
     if budget_tokens <= 8192:
@@ -72,6 +68,18 @@ def _reasoning_effort_from_budget(budget_tokens: int) -> str:
     if budget_tokens <= 32000:
         return "high"
     return "xhigh"
+
+
+def _normalize_effort(effort: str, backend_model: str) -> str:
+    """Normalize Anthropic effort level to backend-appropriate reasoning_effort value.
+
+    Anthropic uses "max" as the highest level; both OpenAI and DeepSeek use "xhigh".
+    DeepSeek additionally accepts "max" directly (maps it to "xhigh" internally),
+    but using "xhigh" is cleaner and works for all backends.
+    """
+    if effort == "max":
+        return "xhigh"
+    return effort
 
 
 def strip_private_params(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -156,10 +164,12 @@ def anthropic_to_openai_request(
     if thinking:
         if thinking.get("type") == "adaptive":
             # Respect explicit effort; default is "high" per Anthropic docs
-            oai["reasoning_effort"] = explicit_effort or "high"
+            oai["reasoning_effort"] = _normalize_effort(explicit_effort or "high", backend_model)
         else:
             budget = thinking.get("budget_tokens", 8192)
-            oai["reasoning_effort"] = explicit_effort or _reasoning_effort_from_budget(budget)
+            oai["reasoning_effort"] = _normalize_effort(
+                explicit_effort or _reasoning_effort_from_budget(budget), backend_model
+            )
 
     # --- tools (skip Anthropic server tools like web_search, computer_use, etc.) ---
     tools = body.get("tools")
@@ -935,9 +945,12 @@ def anthropic_to_responses_request(body: Dict[str, Any], backend_model: str) -> 
     explicit_effort = body.get("effort") or output_config.get("effort")
     if thinking:
         if thinking.get("type") == "adaptive":
-            effort = explicit_effort or "high"
+            effort = _normalize_effort(explicit_effort or "high", backend_model)
         else:
-            effort = explicit_effort or _reasoning_effort_from_budget(thinking.get("budget_tokens", 8192))
+            effort = _normalize_effort(
+                explicit_effort or _reasoning_effort_from_budget(thinking.get("budget_tokens", 8192)),
+                backend_model,
+            )
         result["reasoning"] = {"effort": effort, "summary": "auto"}
 
     # tools (skip Anthropic server tools like web_search, computer_use, etc.)
