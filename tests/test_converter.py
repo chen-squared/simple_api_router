@@ -44,8 +44,7 @@ class TestAnthropicToOpenAI(unittest.TestCase):
         self.assertEqual(result["messages"][0]["content"], "Be helpful.")
 
     def test_system_block_list(self):
-        # Multiple system blocks each become their own system message so that
-        # cache_control can be preserved per-block.
+        # Multiple system blocks are merged into one system message (OpenAI only allows one).
         body = {
             "model": "x",
             "max_tokens": 100,
@@ -57,9 +56,9 @@ class TestAnthropicToOpenAI(unittest.TestCase):
         }
         result = anthropic_to_openai_request(body, "gpt-4o")
         sys_msgs = [m for m in result["messages"] if m["role"] == "system"]
-        self.assertEqual(len(sys_msgs), 2)
-        self.assertEqual(sys_msgs[0]["content"], "Part 1.")
-        self.assertEqual(sys_msgs[1]["content"], "Part 2.")
+        self.assertEqual(len(sys_msgs), 1)
+        self.assertIn("Part 1.", sys_msgs[0]["content"])
+        self.assertIn("Part 2.", sys_msgs[0]["content"])
 
     def test_content_block_list_text(self):
         body = {
@@ -1093,8 +1092,8 @@ class TestCCSwitchTransform(unittest.TestCase):
         sys_msgs = [m for m in result["messages"] if m["role"] == "system"]
         self.assertEqual(len(sys_msgs), 0)
 
-    def test_cache_control_preserved_in_system_block(self):
-        """cache_control on a system text block is passed through to the OpenAI message."""
+    def test_cache_control_not_forwarded_in_system_block(self):
+        """cache_control is Anthropic-specific and is not forwarded to OpenAI format messages."""
         body = {
             "model": "x",
             "max_tokens": 100,
@@ -1105,7 +1104,8 @@ class TestCCSwitchTransform(unittest.TestCase):
         }
         result = anthropic_to_openai_request(body, "gpt-4o")
         sys_msg = next(m for m in result["messages"] if m["role"] == "system")
-        self.assertEqual(sys_msg.get("cache_control"), {"type": "ephemeral"})
+        self.assertEqual(sys_msg.get("content"), "sys")
+        self.assertNotIn("cache_control", sys_msg)
 
     def test_cache_control_forces_array_format_in_user_block(self):
         """User text block with cache_control should appear as an array item (not a plain string)."""

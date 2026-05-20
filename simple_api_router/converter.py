@@ -93,6 +93,9 @@ def anthropic_to_openai_request(
     messages: List[Dict[str, Any]] = []
 
     # --- system prompt ---
+    # Merge all system text blocks into a single system message.
+    # OpenAI format only allows one system message, and cache_control is
+    # Anthropic-specific so it is dropped here.
     system = body.get("system")
     if system:
         if isinstance(system, str):
@@ -100,16 +103,14 @@ def anthropic_to_openai_request(
             if sanitized.strip():
                 messages.append({"role": "system", "content": sanitized})
         elif isinstance(system, list):
-            for b in system:
-                if b.get("type") != "text":
-                    continue
-                sanitized = sanitize_system_text(b.get("text", ""))
-                if not sanitized.strip():
-                    continue
-                sys_msg: Dict[str, Any] = {"role": "system", "content": sanitized}
-                if cc := b.get("cache_control"):
-                    sys_msg["cache_control"] = cc
-                messages.append(sys_msg)
+            parts = [
+                sanitize_system_text(b.get("text", ""))
+                for b in system
+                if b.get("type") == "text"
+            ]
+            merged = "\n".join(p for p in parts if p.strip())
+            if merged:
+                messages.append({"role": "system", "content": merged})
 
     # --- conversation messages ---
     for msg in body.get("messages", []):
