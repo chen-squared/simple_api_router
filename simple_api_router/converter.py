@@ -141,13 +141,17 @@ def anthropic_to_openai_request(
         oai["stream_options"] = {"include_usage": True}
 
     # --- thinking / reasoning_effort ---
+    # Priority: output_config.effort (explicit) > thinking.budget_tokens > default
     thinking = body.get("thinking")
+    output_config = body.get("output_config") or {}
+    explicit_effort = output_config.get("effort")  # "max"/"xhigh"/"high"/"medium"/"low"
     if thinking:
         if thinking.get("type") == "adaptive":
-            oai["reasoning_effort"] = "xhigh"
+            # Respect explicit effort from output_config; default is "high" per Anthropic docs
+            oai["reasoning_effort"] = explicit_effort or "high"
         else:
             budget = thinking.get("budget_tokens", 8192)
-            oai["reasoning_effort"] = _reasoning_effort_from_budget(budget)
+            oai["reasoning_effort"] = explicit_effort or _reasoning_effort_from_budget(budget)
 
     # --- tools (filter BatchTool, clean schemas) ---
     tools = body.get("tools")
@@ -860,12 +864,15 @@ def anthropic_to_responses_request(body: Dict[str, Any], backend_model: str) -> 
     result["stream"] = body.get("stream", False)
 
     # thinking → reasoning
+    # Priority: output_config.effort (explicit) > thinking.budget_tokens > default
     thinking = body.get("thinking")
+    output_config = body.get("output_config") or {}
+    explicit_effort = output_config.get("effort")
     if thinking:
         if thinking.get("type") == "adaptive":
-            effort = "xhigh"
+            effort = explicit_effort or "high"
         else:
-            effort = _reasoning_effort_from_budget(thinking.get("budget_tokens", 8192))
+            effort = explicit_effort or _reasoning_effort_from_budget(thinking.get("budget_tokens", 8192))
         result["reasoning"] = {"effort": effort, "summary": "auto"}
 
     # tools (skip BatchTool, convert to Responses format)

@@ -597,18 +597,42 @@ class TestAnthropicToOpenAIExtended(unittest.TestCase):
             self.assertIn("reasoning_effort", result)
             self.assertEqual(result["reasoning_effort"], "medium")
 
-    def test_adaptive_thinking_maps_to_xhigh(self):
-        """thinking.type == 'adaptive' → 'xhigh' for both OpenAI and DeepSeek.
-        DeepSeek maps xhigh→max internally.
-        """
+    def test_adaptive_thinking_maps_to_high(self):
+        """thinking.type == 'adaptive' without output_config → 'high' (Anthropic docs default)."""
         body = {
             "model": "x",
             "max_tokens": 1024,
             "thinking": {"type": "adaptive"},
             "messages": [{"role": "user", "content": "Hello"}],
         }
-        self.assertEqual(anthropic_to_openai_request(body, "gpt-5.4").get("reasoning_effort"), "xhigh")
-        self.assertEqual(anthropic_to_openai_request(body, "deepseek-r1").get("reasoning_effort"), "xhigh")
+        self.assertEqual(anthropic_to_openai_request(body, "gpt-5.4").get("reasoning_effort"), "high")
+        self.assertEqual(anthropic_to_openai_request(body, "deepseek-r1").get("reasoning_effort"), "high")
+
+    def test_adaptive_thinking_with_output_config_effort(self):
+        """output_config.effort overrides the adaptive default."""
+        for effort in ("max", "xhigh", "medium", "low"):
+            body = {
+                "model": "x",
+                "max_tokens": 1024,
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": effort},
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+            self.assertEqual(
+                anthropic_to_openai_request(body, "gpt-5.4").get("reasoning_effort"), effort,
+                f"expected effort={effort}",
+            )
+
+    def test_budget_thinking_with_output_config_effort_override(self):
+        """output_config.effort overrides budget_tokens-derived effort."""
+        body = {
+            "model": "x",
+            "max_tokens": 1024,
+            "thinking": {"type": "enabled", "budget_tokens": 1000},  # would map to "low"
+            "output_config": {"effort": "high"},
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        self.assertEqual(anthropic_to_openai_request(body, "gpt-5.4").get("reasoning_effort"), "high")
 
     def test_max_budget_maps_to_xhigh(self):
         """budget_tokens > 32000 → 'xhigh' for both OpenAI and DeepSeek."""
@@ -1624,7 +1648,8 @@ class TestResponsesAPIRequest(unittest.TestCase):
         self.assertEqual(result["reasoning"]["effort"], "medium")
         self.assertEqual(result["reasoning"]["summary"], "auto")
 
-    def test_adaptive_thinking_becomes_xhigh_effort(self):
+    def test_adaptive_thinking_becomes_high_effort(self):
+        """adaptive without output_config → effort: 'high' (Anthropic docs default)."""
         body = {
             "model": "x",
             "max_tokens": 100,
@@ -1632,7 +1657,19 @@ class TestResponsesAPIRequest(unittest.TestCase):
             "thinking": {"type": "adaptive"},
         }
         result = anthropic_to_responses_request(body, "gpt-5")
-        self.assertEqual(result["reasoning"]["effort"], "xhigh")
+        self.assertEqual(result["reasoning"]["effort"], "high")
+
+    def test_adaptive_thinking_with_output_config_effort_responses(self):
+        """output_config.effort overrides adaptive default for Responses API."""
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Think"}],
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "medium"},
+        }
+        result = anthropic_to_responses_request(body, "gpt-5")
+        self.assertEqual(result["reasoning"]["effort"], "medium")
 
     def test_tool_choice_any_becomes_required(self):
         body = {
@@ -2701,7 +2738,7 @@ class TestGoogleConverter(unittest.TestCase):
         self.assertEqual(tc["thinkingLevel"], "medium")
 
     def test_thinking_config_adaptive_gemini3(self):
-        """adaptive thinking → thinkingLevel: high for Gemini 3."""
+        """adaptive thinking without output_config → thinkingLevel: high for Gemini 3."""
         from simple_api_router.converter_google import anthropic_to_google_request
         body = {
             "model": "x", "max_tokens": 100,
@@ -2711,6 +2748,20 @@ class TestGoogleConverter(unittest.TestCase):
         result = anthropic_to_google_request(body, "gemini-3-flash")
         tc = result["generationConfig"]["thinkingConfig"]
         self.assertEqual(tc["thinkingLevel"], "high")
+
+    def test_thinking_config_adaptive_output_effort_gemini3(self):
+        """output_config.effort overrides adaptive default for Gemini 3."""
+        from simple_api_router.converter_google import anthropic_to_google_request
+        for effort, expected in [("low", "low"), ("medium", "medium"), ("max", "high")]:
+            body = {
+                "model": "x", "max_tokens": 100,
+                "messages": [{"role": "user", "content": "hi"}],
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": effort},
+            }
+            result = anthropic_to_google_request(body, "gemini-3-flash")
+            tc = result["generationConfig"]["thinkingConfig"]
+            self.assertEqual(tc["thinkingLevel"], expected, f"effort={effort}")
 
     def test_thought_part_becomes_thinking_block(self):
         """Gemini response thought: true part → Anthropic thinking block."""

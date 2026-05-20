@@ -16,17 +16,23 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 _GEMINI3_RE = re.compile(r"gemini-3", re.IGNORECASE)
 
 
-def _gemini_thinking_config(thinking: Dict[str, Any], model: str) -> Dict[str, Any]:
+def _gemini_thinking_config(thinking: Dict[str, Any], model: str, output_effort: Optional[str] = None) -> Dict[str, Any]:
     """Convert Anthropic thinking config to Gemini thinkingConfig dict.
 
     Gemini 3+ uses thinkingLevel (string); Gemini 2.5 uses thinkingBudget (int).
+    output_effort is the value from output_config.effort in the Anthropic request.
     """
     thinking_type = thinking.get("type", "enabled")
+
+    # Map Anthropic output_config.effort to Gemini thinkingLevel
+    _EFFORT_TO_LEVEL = {"max": "high", "xhigh": "high", "high": "high", "medium": "medium", "low": "low"}
 
     if _GEMINI3_RE.search(model):
         # Gemini 3+ — thinkingLevel
         if thinking_type == "disabled":
             return {"thinkingLevel": "minimal"}
+        if output_effort:
+            return {"thinkingLevel": _EFFORT_TO_LEVEL.get(output_effort, "high")}
         budget = thinking.get("budget_tokens", 8192)
         if thinking_type == "adaptive" or budget > 32000:
             return {"thinkingLevel": "high"}
@@ -40,7 +46,9 @@ def _gemini_thinking_config(thinking: Dict[str, Any], model: str) -> Dict[str, A
         if thinking_type == "disabled":
             return {"thinkingBudget": 0}
         if thinking_type == "adaptive":
-            return {}  # omit to let the model use dynamic thinking
+            # No direct budget equivalent; omit to let Gemini use dynamic thinking.
+            # Effort guidance is not supported in this API.
+            return {}
         budget = thinking.get("budget_tokens", 8192)
         return {"thinkingBudget": budget}
 
@@ -246,7 +254,8 @@ def anthropic_to_google_request(body: Dict[str, Any], model: str) -> Dict[str, A
     # thinking → thinkingConfig
     thinking = body.get("thinking")
     if thinking:
-        tc = _gemini_thinking_config(thinking, model)
+        output_effort = (body.get("output_config") or {}).get("effort")
+        tc = _gemini_thinking_config(thinking, model, output_effort)
         if tc:
             result.setdefault("generationConfig", {})["thinkingConfig"] = tc
 
