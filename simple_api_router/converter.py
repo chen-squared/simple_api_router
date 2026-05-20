@@ -12,26 +12,19 @@ import re
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
 
+from .converter_utils import (
+    ANTHROPIC_SERVER_TOOL_RE as _ANTHROPIC_SERVER_TOOL_RE,
+    is_anthropic_server_tool as _is_anthropic_server_tool,
+    sse as _sse_bytes,
+    thinking_close_events as _thinking_close_events,
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 _O_SERIES_RE = re.compile(r"\bo[1-9](-|\b)|o4-mini|codex", re.IGNORECASE)
-
-# Anthropic server-executed tools — handled entirely by Anthropic's infrastructure,
-# so they cannot be forwarded to OpenAI/Gemini backends.  Pattern covers all versioned
-# variants, e.g. web_search_20260209, code_execution_20250522, mcp_toolset, etc.
-_ANTHROPIC_SERVER_TOOL_RE = re.compile(
-    r"^(web_search|web_fetch|code_execution|mcp_toolset|advisor|tool_search_tool_|BatchTool)",
-    re.IGNORECASE,
-)
-
-
-def _is_anthropic_server_tool(tool: Dict) -> bool:
-    """Return True for tools that Anthropic executes server-side (not forwarded to backends)."""
-    t = tool.get("type") or ""
-    return bool(_ANTHROPIC_SERVER_TOOL_RE.match(t))
 
 
 def sanitize_system_text(text: str) -> str:
@@ -787,29 +780,6 @@ async def stream_openai_to_anthropic(
         "usage": usage_delta,
     })
     yield _sse_bytes("message_stop", {"type": "message_stop"})
-
-
-def _sse_bytes(event: str, data: Dict[str, Any]) -> bytes:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
-
-
-def _thinking_close_events(index: int) -> List[bytes]:
-    """Return [signature_delta, content_block_stop] bytes for a thinking block.
-
-    Per Anthropic streaming spec, a signature_delta must be emitted just before
-    content_block_stop for every thinking block.  For non-Anthropic backends we
-    have no real cryptographic signature, so we emit an empty string.
-    """
-    return [
-        _sse_bytes("content_block_delta", {
-            "type": "content_block_delta",
-            "index": index,
-            "delta": {"type": "signature_delta", "signature": ""},
-        }),
-        _sse_bytes("content_block_stop", {
-            "type": "content_block_stop", "index": index,
-        }),
-    ]
 
 
 # ---------------------------------------------------------------------------

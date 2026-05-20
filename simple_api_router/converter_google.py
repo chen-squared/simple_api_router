@@ -12,13 +12,14 @@ import re
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+from .converter_utils import (
+    ANTHROPIC_SERVER_TOOL_RE as _ANTHROPIC_SERVER_TOOL_RE,
+    is_anthropic_server_tool as _is_anthropic_server_tool,
+    sse as _sse,
+    thinking_close_events as _google_thinking_close_events,
+)
 
 _GEMINI3_RE = re.compile(r"gemini-3", re.IGNORECASE)
-
-_ANTHROPIC_SERVER_TOOL_RE = re.compile(
-    r"^(web_search|web_fetch|code_execution|mcp_toolset|advisor|tool_search_tool_|BatchTool)",
-    re.IGNORECASE,
-)
 
 
 def _gemini_thinking_config(thinking: Dict[str, Any], model: str, output_effort: Optional[str] = None) -> Dict[str, Any]:
@@ -423,24 +424,6 @@ def google_to_anthropic_response(data: Dict[str, Any], model: str) -> Dict[str, 
 # Gemini SSE stream → Anthropic SSE stream
 # ---------------------------------------------------------------------------
 
-def _sse(event: str, data: Any) -> bytes:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
-
-
-def _google_thinking_close_events(index: int) -> List[bytes]:
-    """Return [signature_delta, content_block_stop] bytes for a thinking block."""
-    return [
-        _sse("content_block_delta", {
-            "type": "content_block_delta",
-            "index": index,
-            "delta": {"type": "signature_delta", "signature": ""},
-        }),
-        _sse("content_block_stop", {
-            "type": "content_block_stop", "index": index,
-        }),
-    ]
-
-
 async def stream_google_to_anthropic(
     aiter: AsyncIterator[bytes], model: str
 ) -> AsyncIterator[bytes]:
@@ -461,7 +444,7 @@ async def stream_google_to_anthropic(
         },
     })
 
-    # Track open blocks and accumulated tool calls
+    # Track open blocks
     next_block_index = 0
     thinking_block_open = False
     thinking_block_index = -1
@@ -469,7 +452,7 @@ async def stream_google_to_anthropic(
     text_block_open = False
     text_block_index = -1
     accumulated_text = ""          # running total of text emitted so far
-    tool_blocks: List[Dict[str, Any]] = []
+    has_tool_use = False
     accumulated_usage = {"input_tokens": 0, "output_tokens": 0}
     finish_reason = "STOP"
 
@@ -559,6 +542,7 @@ async def stream_google_to_anthropic(
                         for ev in _google_thinking_close_events(thinking_block_index):
                             yield ev
                         thinking_block_open = False
+                        accumulated_thinking = ""  # reset so next thought segment deltas correctly
                     # Gemini may send cumulative text (each chunk = full text so far)
                     # or incremental text (each chunk = new text only).  Handle both:
                     # if new_text starts with what we have so far it is cumulative.
@@ -586,13 +570,43 @@ async def stream_google_to_anthropic(
                     })
                 elif "functionCall" in part:
                     fc = part["functionCall"]
-                    # Preserve real Gemini ids; synthesise only when absent/empty
-                    fc_id = fc.get("id", "")
-                    tool_id = fc_id if fc_id else _generate_tool_id()
-                    tool_blocks.append({
-                        "id": tool_id,
-                        "name": fc.get("name", ""),
-                        "input": fc.get("args", {}),
+                    # Close any open thinking/text blocks before emitting the tool
+                    if thinking_block_open:
+                        for ev in _google_thinking_close_events(thinking_block_index):
+                            yield ev
+                        thinking_block_open = False
+                        accumulated_thinking = ""
+                    if text_block_open:
+                        yield _sse("content_block_stop", {
+                            "type": "content_block_stop", "index": text_block_index,
+                        })
+                        text_block_open = False
+                    # Emit the tool block inline (not accumulated) so it appears in
+                    # the correct position relative to thinking blocks.
+                    fc_id = fc.get("id", "") or _generate_tool_id()
+                    tool_idx = next_block_index
+                    next_block_index += 1
+                    has_tool_use = True
+                    yield _sse("content_block_start", {
+                        "type": "content_block_start",
+                        "index": tool_idx,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": fc_id,
+                            "name": fc.get("name", ""),
+                            "input": {},
+                        },
+                    })
+                    yield _sse("content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": tool_idx,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": json.dumps(fc.get("args", {})),
+                        },
+                    })
+                    yield _sse("content_block_stop", {
+                        "type": "content_block_stop", "index": tool_idx,
                     })
 
     # Close any open blocks
@@ -605,33 +619,6 @@ async def stream_google_to_anthropic(
             "index": text_block_index,
         })
 
-    # Emit tool use blocks
-    for i, tool in enumerate(tool_blocks):
-        idx = next_block_index + i
-        yield _sse("content_block_start", {
-            "type": "content_block_start",
-            "index": idx,
-            "content_block": {
-                "type": "tool_use",
-                "id": tool["id"],
-                "name": tool["name"],
-                "input": {},
-            },
-        })
-        yield _sse("content_block_delta", {
-            "type": "content_block_delta",
-            "index": idx,
-            "delta": {
-                "type": "input_json_delta",
-                "partial_json": json.dumps(tool["input"]),
-            },
-        })
-        yield _sse("content_block_stop", {
-            "type": "content_block_stop",
-            "index": idx,
-        })
-
-    has_tool_use = len(tool_blocks) > 0
     stop_reason = "tool_use" if has_tool_use else _FINISH_REASON_MAP.get(finish_reason, "end_turn")
 
     yield _sse("message_delta", {

@@ -325,7 +325,7 @@ def _buffer_event_summary(buffer: List[bytes]) -> str:
     return ", ".join(parts) if parts else "(empty)"
 
 
-
+def _upstream_error_json(exc: Any) -> Dict[str, Any]:
     msg = f"HTTP {exc.status_code}" if isinstance(exc, httpx.Response) else str(exc)
     return {"type": "error", "error": {"type": "api_error", "message": f"Upstream error: {msg}"}}
 
