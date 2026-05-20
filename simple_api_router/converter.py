@@ -19,6 +19,20 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
 
 _O_SERIES_RE = re.compile(r"\bo[1-9](-|\b)|o4-mini|codex", re.IGNORECASE)
 
+# Anthropic server-executed tools — handled entirely by Anthropic's infrastructure,
+# so they cannot be forwarded to OpenAI/Gemini backends.  Pattern covers all versioned
+# variants, e.g. web_search_20260209, code_execution_20250522, mcp_toolset, etc.
+_ANTHROPIC_SERVER_TOOL_RE = re.compile(
+    r"^(web_search|web_fetch|code_execution|mcp_toolset|advisor|tool_search_tool_|BatchTool)",
+    re.IGNORECASE,
+)
+
+
+def _is_anthropic_server_tool(tool: Dict) -> bool:
+    """Return True for tools that Anthropic executes server-side (not forwarded to backends)."""
+    t = tool.get("type") or ""
+    return bool(_ANTHROPIC_SERVER_TOOL_RE.match(t))
+
 
 def sanitize_system_text(text: str) -> str:
     """Strip lines containing x-anthropic-billing-header injected by Claude Code.
@@ -156,7 +170,7 @@ def anthropic_to_openai_request(
     # --- tools (skip Anthropic server tools like web_search, computer_use, etc.) ---
     tools = body.get("tools")
     if tools:
-        filtered = [t for t in tools if t.get("type") in (None, "custom")]
+        filtered = [t for t in tools if not _is_anthropic_server_tool(t)]
         if filtered:
             oai["tools"] = [_anthropic_tool_to_openai(t) for t in filtered]
             tool_choice = body.get("tool_choice")
@@ -914,7 +928,7 @@ def anthropic_to_responses_request(body: Dict[str, Any], backend_model: str) -> 
     # tools (skip Anthropic server tools like web_search, computer_use, etc.)
     tools = body.get("tools")
     if tools:
-        filtered = [t for t in tools if t.get("type") in (None, "custom")]
+        filtered = [t for t in tools if not _is_anthropic_server_tool(t)]
         if filtered:
             result["tools"] = [
                 {

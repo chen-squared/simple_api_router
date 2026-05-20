@@ -15,6 +15,11 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 _GEMINI3_RE = re.compile(r"gemini-3", re.IGNORECASE)
 
+_ANTHROPIC_SERVER_TOOL_RE = re.compile(
+    r"^(web_search|web_fetch|code_execution|mcp_toolset|advisor|tool_search_tool_|BatchTool)",
+    re.IGNORECASE,
+)
+
 
 def _gemini_thinking_config(thinking: Dict[str, Any], model: str, output_effort: Optional[str] = None) -> Dict[str, Any]:
     """Convert Anthropic thinking config to Gemini thinkingConfig dict.
@@ -262,10 +267,10 @@ def anthropic_to_google_request(body: Dict[str, Any], model: str) -> Dict[str, A
         if tc:
             result.setdefault("generationConfig", {})["thinkingConfig"] = tc
 
-    # Tools → functionDeclarations (skip Anthropic server tools like web_search, computer_use)
+    # Tools → functionDeclarations (skip Anthropic server tools like web_search, code_execution)
     tools = body.get("tools")
     if tools:
-        user_tools = [t for t in tools if t.get("type") in (None, "custom")]
+        user_tools = [t for t in tools if not _ANTHROPIC_SERVER_TOOL_RE.match(t.get("type") or "")]
         decls: List[Dict[str, Any]] = []
         for tool in user_tools:
             decl: Dict[str, Any] = {"name": tool["name"]}
