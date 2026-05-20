@@ -161,6 +161,11 @@ def anthropic_to_openai_request(
             budget = thinking.get("budget_tokens", 8192)
             oai["reasoning_effort"] = explicit_effort or _reasoning_effort_from_budget(budget)
 
+    # --- metadata.user_id → user ---
+    user_id = (body.get("metadata") or {}).get("user_id")
+    if user_id:
+        oai["user"] = user_id if isinstance(user_id, str) else str(user_id)
+
     # --- tools (skip Anthropic server tools like web_search, computer_use, etc.) ---
     tools = body.get("tools")
     if tools:
