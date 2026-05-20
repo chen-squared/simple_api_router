@@ -21,6 +21,7 @@ def _gemini_thinking_config(thinking: Dict[str, Any], model: str, output_effort:
 
     Gemini 3+ uses thinkingLevel (string); Gemini 2.5 uses thinkingBudget (int).
     output_effort is the value from output_config.effort in the Anthropic request.
+    includeThoughts must be true for thought summaries to be included in response parts.
     """
     thinking_type = thinking.get("type", "enabled")
 
@@ -32,25 +33,24 @@ def _gemini_thinking_config(thinking: Dict[str, Any], model: str, output_effort:
         if thinking_type == "disabled":
             return {"thinkingLevel": "minimal"}
         if output_effort:
-            return {"thinkingLevel": _EFFORT_TO_LEVEL.get(output_effort, "high")}
+            return {"thinkingLevel": _EFFORT_TO_LEVEL.get(output_effort, "high"), "includeThoughts": True}
         budget = thinking.get("budget_tokens", 8192)
         if thinking_type == "adaptive" or budget > 32000:
-            return {"thinkingLevel": "high"}
+            return {"thinkingLevel": "high", "includeThoughts": True}
         if budget <= 1024:
-            return {"thinkingLevel": "low"}
+            return {"thinkingLevel": "low", "includeThoughts": True}
         if budget <= 8192:
-            return {"thinkingLevel": "medium"}
-        return {"thinkingLevel": "high"}
+            return {"thinkingLevel": "medium", "includeThoughts": True}
+        return {"thinkingLevel": "high", "includeThoughts": True}
     else:
         # Gemini 2.5 and earlier — thinkingBudget
         if thinking_type == "disabled":
             return {"thinkingBudget": 0}
         if thinking_type == "adaptive":
             # No direct budget equivalent; omit to let Gemini use dynamic thinking.
-            # Effort guidance is not supported in this API.
-            return {}
+            return {"includeThoughts": True}
         budget = thinking.get("budget_tokens", 8192)
-        return {"thinkingBudget": budget}
+        return {"thinkingBudget": budget, "includeThoughts": True}
 
 
 def _generate_tool_id() -> str:
@@ -185,6 +185,9 @@ def _content_block_to_gemini_part(
     if btype == "redacted_thinking":
         return None  # encrypted; cannot round-trip to Gemini
 
+    if btype in ("server_tool_use", "web_search_tool_result"):
+        return None  # Anthropic server-executed tools; no Gemini equivalent
+
     # Skip anything else unknown
     return None
 
@@ -259,11 +262,12 @@ def anthropic_to_google_request(body: Dict[str, Any], model: str) -> Dict[str, A
         if tc:
             result.setdefault("generationConfig", {})["thinkingConfig"] = tc
 
-    # Tools → functionDeclarations
+    # Tools → functionDeclarations (skip Anthropic server tools like web_search, computer_use)
     tools = body.get("tools")
     if tools:
+        user_tools = [t for t in tools if t.get("type") in (None, "custom")]
         decls: List[Dict[str, Any]] = []
-        for tool in tools:
+        for tool in user_tools:
             decl: Dict[str, Any] = {"name": tool["name"]}
             if "description" in tool:
                 decl["description"] = tool["description"]
@@ -277,7 +281,8 @@ def anthropic_to_google_request(body: Dict[str, Any], model: str) -> Dict[str, A
                 else:
                     decl["parameters"] = schema
             decls.append(decl)
-        result["tools"] = [{"functionDeclarations": decls}]
+        if decls:
+            result["tools"] = [{"functionDeclarations": decls}]
 
     # Tool choice → functionCallingConfig
     tool_choice = body.get("tool_choice")
@@ -306,6 +311,13 @@ _FINISH_REASON_MAP: Dict[str, str] = {
     "SPII": "end_turn",
     "OTHER": "end_turn",
     "FINISH_REASON_UNSPECIFIED": "end_turn",
+    # Additional values from Gemini API reference
+    "LANGUAGE": "end_turn",
+    "BLOCKLIST": "end_turn",
+    "PROHIBITED_CONTENT": "end_turn",
+    "MALFORMED_FUNCTION_CALL": "end_turn",
+    "MISSING_THOUGHT_SIGNATURE": "end_turn",
+    "MALFORMED_RESPONSE": "end_turn",
 }
 
 
@@ -377,7 +389,9 @@ def google_to_anthropic_response(data: Dict[str, Any], model: str) -> Dict[str, 
     input_tokens = usage_meta.get("promptTokenCount", 0)
     candidates_tokens = usage_meta.get("candidatesTokenCount", 0)
     total_tokens = usage_meta.get("totalTokenCount", 0)
-    output_tokens = candidates_tokens or max(0, total_tokens - input_tokens)
+    # thoughtsTokenCount is separate from candidatesTokenCount (thinking tokens are billed)
+    thoughts_tokens = usage_meta.get("thoughtsTokenCount", 0)
+    output_tokens = (candidates_tokens or max(0, total_tokens - input_tokens)) + thoughts_tokens
     # Google's promptTokenCount includes cached tokens; subtract for Anthropic semantics.
     cache_tokens = usage_meta.get("cachedContentTokenCount", 0)
 
@@ -477,11 +491,13 @@ async def stream_google_to_anthropic(
                 c_tokens = usage_meta.get("candidatesTokenCount", 0)
                 total = usage_meta.get("totalTokenCount", 0)
                 cache_tokens = usage_meta.get("cachedContentTokenCount", 0)
+                # thoughtsTokenCount is separate from candidatesTokenCount (thinking tokens are billed)
+                thoughts_tokens = usage_meta.get("thoughtsTokenCount", 0)
                 # Google's promptTokenCount includes cached; subtract for Anthropic semantics.
                 accumulated_usage["input_tokens"] = max(0, prompt_tokens - cache_tokens)
                 accumulated_usage["output_tokens"] = (
                     c_tokens or max(0, total - prompt_tokens)
-                )
+                ) + thoughts_tokens
                 if cache_tokens:
                     accumulated_usage["cache_read_input_tokens"] = cache_tokens
                 else:

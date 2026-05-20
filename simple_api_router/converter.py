@@ -141,22 +141,22 @@ def anthropic_to_openai_request(
         oai["stream_options"] = {"include_usage": True}
 
     # --- thinking / reasoning_effort ---
-    # Priority: output_config.effort (explicit) > thinking.budget_tokens > default
+    # Priority: top-level effort > output_config.effort > thinking.budget_tokens > default
     thinking = body.get("thinking")
     output_config = body.get("output_config") or {}
-    explicit_effort = output_config.get("effort")  # "max"/"xhigh"/"high"/"medium"/"low"
+    explicit_effort = body.get("effort") or output_config.get("effort")  # "max"/"xhigh"/"high"/"medium"/"low"
     if thinking:
         if thinking.get("type") == "adaptive":
-            # Respect explicit effort from output_config; default is "high" per Anthropic docs
+            # Respect explicit effort; default is "high" per Anthropic docs
             oai["reasoning_effort"] = explicit_effort or "high"
         else:
             budget = thinking.get("budget_tokens", 8192)
             oai["reasoning_effort"] = explicit_effort or _reasoning_effort_from_budget(budget)
 
-    # --- tools (filter BatchTool, clean schemas) ---
+    # --- tools (skip Anthropic server tools like web_search, computer_use, etc.) ---
     tools = body.get("tools")
     if tools:
-        filtered = [t for t in tools if t.get("type") != "BatchTool"]
+        filtered = [t for t in tools if t.get("type") in (None, "custom")]
         if filtered:
             oai["tools"] = [_anthropic_tool_to_openai(t) for t in filtered]
             tool_choice = body.get("tool_choice")
@@ -230,6 +230,7 @@ def _assistant_blocks_to_openai(
                 },
             })
         # redacted_thinking: silently skip
+        # server_tool_use / web_search_tool_result: Anthropic server-executed; no OpenAI equivalent
 
     msg: Dict[str, Any] = {"role": "assistant"}
     if text_parts:
@@ -312,7 +313,7 @@ _FINISH_REASON_MAP = {
     "length": "max_tokens",
     "tool_calls": "tool_use",
     "function_call": "tool_use",
-    "content_filter": "end_turn",
+    "content_filter": "refusal",
 }
 
 
@@ -565,6 +566,27 @@ async def stream_openai_to_anthropic(
                         "index": text_block_index,
                         "delta": {"type": "text_delta", "text": text},
                     })
+
+            # --- refusal delta (content_filter responses) ---
+            if refusal_text := delta.get("refusal"):
+                if thinking_block_open:
+                    for ev in _thinking_close_events(thinking_block_index):
+                        yield ev
+                    thinking_block_open = False
+                if not text_block_open:
+                    yield _sse_bytes("content_block_start", {
+                        "type": "content_block_start",
+                        "index": next_block_index,
+                        "content_block": {"type": "text", "text": ""},
+                    })
+                    text_block_index = next_block_index
+                    next_block_index += 1
+                    text_block_open = True
+                yield _sse_bytes("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": text_block_index,
+                    "delta": {"type": "text_delta", "text": refusal_text},
+                })
 
             # --- tool_calls deltas ---
             for tc in delta.get("tool_calls") or []:
@@ -878,10 +900,10 @@ def anthropic_to_responses_request(body: Dict[str, Any], backend_model: str) -> 
     result["stream"] = body.get("stream", False)
 
     # thinking → reasoning
-    # Priority: output_config.effort (explicit) > thinking.budget_tokens > default
+    # Priority: top-level effort > output_config.effort > thinking.budget_tokens > default
     thinking = body.get("thinking")
     output_config = body.get("output_config") or {}
-    explicit_effort = output_config.get("effort")
+    explicit_effort = body.get("effort") or output_config.get("effort")
     if thinking:
         if thinking.get("type") == "adaptive":
             effort = explicit_effort or "high"
@@ -889,10 +911,10 @@ def anthropic_to_responses_request(body: Dict[str, Any], backend_model: str) -> 
             effort = explicit_effort or _reasoning_effort_from_budget(thinking.get("budget_tokens", 8192))
         result["reasoning"] = {"effort": effort, "summary": "auto"}
 
-    # tools (skip BatchTool, convert to Responses format)
+    # tools (skip Anthropic server tools like web_search, computer_use, etc.)
     tools = body.get("tools")
     if tools:
-        filtered = [t for t in tools if t.get("type") != "BatchTool"]
+        filtered = [t for t in tools if t.get("type") in (None, "custom")]
         if filtered:
             result["tools"] = [
                 {
