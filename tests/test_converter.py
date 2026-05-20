@@ -1100,6 +1100,62 @@ class TestProxy(unittest.TestCase):
         prov, ep, api_format, bmodel = resolve_provider("anthropic", "claude-opus-4-5", cfg)
         self.assertEqual(bmodel, "claude-opus-4-5")
 
+    def test_last_user_has_media_true(self):
+        from simple_api_router.proxy import _last_user_has_media
+        body = {"messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+            {"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}}]},
+        ]}
+        self.assertTrue(_last_user_has_media(body))
+
+    def test_last_user_has_media_false_when_image_only_in_history(self):
+        from simple_api_router.proxy import _last_user_has_media
+        body = {"messages": [
+            {"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}}]},
+            {"role": "assistant", "content": "I see the image."},
+            {"role": "user", "content": "What did you say?"},
+        ]}
+        self.assertFalse(_last_user_has_media(body))
+
+    def test_strip_media_from_history_removes_stale_images(self):
+        from simple_api_router.proxy import _strip_media_from_history
+        messages = [
+            {"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}},
+                {"type": "text", "text": "Look at this"},
+            ]},
+            {"role": "assistant", "content": "I see it."},
+            {"role": "user", "content": "Follow-up question"},
+        ]
+        result = _strip_media_from_history(messages)
+        # First user message: image block should become text placeholder
+        self.assertEqual(len(result[0]["content"]), 2)
+        self.assertEqual(result[0]["content"][0]["type"], "text")
+        self.assertIn("omitted", result[0]["content"][0]["text"])
+        self.assertEqual(result[0]["content"][1]["text"], "Look at this")
+        # Last user message: left untouched
+        self.assertEqual(result[2]["content"], "Follow-up question")
+
+    def test_strip_media_from_history_tool_result_with_image(self):
+        from simple_api_router.proxy import _strip_media_from_history
+        messages = [
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "x"}},
+                    {"type": "text", "text": "caption"},
+                ]},
+            ]},
+            {"role": "user", "content": "plain follow-up"},
+        ]
+        result = _strip_media_from_history(messages)
+        tr_content = result[0]["content"][0]["content"]
+        self.assertEqual(tr_content[0]["type"], "text")
+        self.assertIn("omitted", tr_content[0]["text"])
+        self.assertEqual(tr_content[1]["text"], "caption")
+        # Last user message untouched
+        self.assertEqual(result[1]["content"], "plain follow-up")
+
 
 # ---------------------------------------------------------------------------
 # cc-switch-ported tests: transform / sanitize / cache_control
