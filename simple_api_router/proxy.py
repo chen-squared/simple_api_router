@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import secrets
 import time
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
@@ -19,6 +20,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import EndpointConfig, ProviderConfig, RouterConfig
+from . import debug_log as _dlog
 from .converter import (
     anthropic_to_openai_request,
     anthropic_to_responses_request,
@@ -154,15 +156,26 @@ async def _stream_converted(
     resp: httpx.Response,
     make_stream: Callable,
     url: str,
+    debug_id: Optional[str] = None,
 ) -> AsyncIterator[bytes]:
     """Yield converted chunks; emit SSE error event on mid-stream network failure."""
+    raw_chunks: List[bytes] = []
+
+    async def _raw() -> AsyncIterator[bytes]:
+        async for chunk in resp.aiter_bytes():
+            if debug_id:
+                raw_chunks.append(chunk)
+            yield chunk
+
     try:
-        async for chunk in make_stream(resp.aiter_bytes()):
+        async for chunk in make_stream(_raw()):
             yield chunk
     except _UPSTREAM_ERRORS as exc:
         logger.warning("Upstream error mid-stream for %s: %s", url, exc)
         yield _upstream_error_sse(exc)
     finally:
+        if debug_id:
+            _dlog.log(debug_id, "3_upstream_raw", b"".join(raw_chunks))
         await resp.aclose()
 
 
@@ -174,6 +187,7 @@ async def _stream_converted_with_retry(
     body: Dict[str, Any],
     make_stream: Callable,
     max_retries: int,
+    debug_id: Optional[str] = None,
 ) -> AsyncIterator[bytes]:
     """Streaming pipeline with two-phase retry:
 
@@ -232,7 +246,7 @@ async def _stream_converted_with_retry(
         committed = False
         early_error = False
 
-        async for chunk in _stream_converted(resp, make_stream, url):
+        async for chunk in _stream_converted(resp, make_stream, url, debug_id=debug_id):
             if committed:
                 yield chunk
                 continue
@@ -529,14 +543,22 @@ async def route_request(
         clean_model, resolved_provider_name, backend_model, is_stream,
     )
 
+    # Debug logging: assign a short request ID and record the incoming body.
+    if _dlog.enabled():
+        debug_id = secrets.token_hex(4)
+        request.state.debug_id = debug_id
+        _dlog.log(debug_id, "1_incoming_request", body)
+    else:
+        debug_id = None
+
     for attempt in range(max_retries + 1):
         upstream_start = time.time()
         if api_format == "anthropic":
-            result = await _proxy_anthropic(request, body, backend_model, provider, endpoint, client, max_retries)
+            result = await _proxy_anthropic(request, body, backend_model, provider, endpoint, client, max_retries, debug_id=debug_id)
         elif api_format == "google":
-            result = await _proxy_google(request, body, model_str, backend_model, provider, endpoint, client, max_retries)
+            result = await _proxy_google(request, body, model_str, backend_model, provider, endpoint, client, max_retries, debug_id=debug_id)
         else:
-            result = await _proxy_openai(request, body, model_str, backend_model, api_format, provider, endpoint, client, max_retries)
+            result = await _proxy_openai(request, body, model_str, backend_model, api_format, provider, endpoint, client, max_retries, debug_id=debug_id)
 
         if is_stream:
             ttfb_ms = round((time.time() - upstream_start) * 1000)
@@ -578,6 +600,7 @@ async def _proxy_anthropic(
     endpoint: EndpointConfig,
     client: httpx.AsyncClient,
     max_retries: int,
+    debug_id: Optional[str] = None,
 ) -> Any:
     # Replace model with backend name; everything else passes through unchanged
     patched = {**body, "model": backend_model}
@@ -585,10 +608,17 @@ async def _proxy_anthropic(
     base_url = endpoint.resolve_base_url("anthropic", provider.base_url)
     url = f"{base_url}/v1/messages"
 
+    if debug_id:
+        _dlog.log(debug_id, "2_upstream_request", patched)
+
     if body.get("stream", False):
         resp = await _streaming_request_with_retry(client, url, headers, patched, max_retries)
+        stream: AsyncIterator[bytes] = _stream_raw(resp, url)
+        if debug_id:
+            stream = _dlog.tee_bytes_iter(stream, debug_id, "3_upstream_raw")
+            stream = _dlog.tee_bytes_iter(stream, debug_id, "4_downstream_sse")
         return StreamingResponse(
-            _stream_raw(resp, url),
+            stream,
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -603,7 +633,11 @@ async def _proxy_anthropic(
         except Exception:
             detail = resp.text
         raise HTTPException(status_code=resp.status_code, detail=detail)
-    return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    data = resp.json()
+    if debug_id:
+        _dlog.log(debug_id, "3_upstream_raw", data)
+        _dlog.log(debug_id, "4_downstream_response", data)
+    return JSONResponse(content=data, status_code=resp.status_code)
 
 
 async def _proxy_openai(
@@ -616,6 +650,7 @@ async def _proxy_openai(
     endpoint: EndpointConfig,
     client: httpx.AsyncClient,
     max_retries: int,
+    debug_id: Optional[str] = None,
 ) -> Any:
     # Precedence: model-level flag → endpoint-level flag → auto-detect from model name
     _, _req_model = parse_model(original_model)
@@ -638,14 +673,21 @@ async def _proxy_openai(
         req_body = anthropic_to_responses_request(body, backend_model)
         url = f"{base_url}/v1/responses"
 
+        if debug_id:
+            _dlog.log(debug_id, "2_upstream_request", req_body)
+
         if is_stream:
             resp = await _streaming_request_with_retry(client, url, headers, req_body, max_retries)
+            stream = _stream_converted_with_retry(
+                resp, client, url, headers, req_body,
+                lambda aiter: stream_responses_to_anthropic(aiter, original_model),
+                max_retries,
+                debug_id=debug_id,
+            )
+            if debug_id:
+                stream = _dlog.tee_bytes_iter(stream, debug_id, "4_downstream_sse")
             return StreamingResponse(
-                _stream_converted_with_retry(
-                    resp, client, url, headers, req_body,
-                    lambda aiter: stream_responses_to_anthropic(aiter, original_model),
-                    max_retries,
-                ),
+                stream,
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
@@ -660,20 +702,32 @@ async def _proxy_openai(
             except Exception:
                 detail = resp.text
             raise HTTPException(status_code=resp.status_code, detail=detail)
-        return JSONResponse(content=responses_to_anthropic_response(resp.json(), original_model))
+        raw = resp.json()
+        converted = responses_to_anthropic_response(raw, original_model)
+        if debug_id:
+            _dlog.log(debug_id, "3_upstream_raw", raw)
+            _dlog.log(debug_id, "4_downstream_response", converted)
+        return JSONResponse(content=converted)
 
     # openai_chat (default)
     oai_body = anthropic_to_openai_request(body, backend_model, use_reasoning_content=use_reasoning)
     url = f"{base_url}/v1/chat/completions"
 
+    if debug_id:
+        _dlog.log(debug_id, "2_upstream_request", oai_body)
+
     if is_stream:
         resp = await _streaming_request_with_retry(client, url, headers, oai_body, max_retries)
+        stream = _stream_converted_with_retry(
+            resp, client, url, headers, oai_body,
+            lambda aiter: stream_openai_to_anthropic(aiter, original_model),
+            max_retries,
+            debug_id=debug_id,
+        )
+        if debug_id:
+            stream = _dlog.tee_bytes_iter(stream, debug_id, "4_downstream_sse")
         return StreamingResponse(
-            _stream_converted_with_retry(
-                resp, client, url, headers, oai_body,
-                lambda aiter: stream_openai_to_anthropic(aiter, original_model),
-                max_retries,
-            ),
+            stream,
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -688,7 +742,12 @@ async def _proxy_openai(
         except Exception:
             detail = resp.text
         raise HTTPException(status_code=resp.status_code, detail=detail)
-    return JSONResponse(content=openai_to_anthropic_response(resp.json(), original_model))
+    raw = resp.json()
+    converted = openai_to_anthropic_response(raw, original_model)
+    if debug_id:
+        _dlog.log(debug_id, "3_upstream_raw", raw)
+        _dlog.log(debug_id, "4_downstream_response", converted)
+    return JSONResponse(content=converted)
 
 
 # ---------------------------------------------------------------------------
@@ -704,6 +763,7 @@ async def _proxy_google(
     endpoint: EndpointConfig,
     client: httpx.AsyncClient,
     max_retries: int,
+    debug_id: Optional[str] = None,
 ) -> Any:
     from .converter_google import anthropic_to_google_request, google_to_anthropic_response, stream_google_to_anthropic
 
@@ -713,15 +773,22 @@ async def _proxy_google(
 
     google_body = anthropic_to_google_request(body, backend_model)
 
+    if debug_id:
+        _dlog.log(debug_id, "2_upstream_request", google_body)
+
     if is_stream:
         url = f"{base_url}/v1/models/{backend_model}:streamGenerateContent?alt=sse"
         resp = await _streaming_request_with_retry(client, url, headers, google_body, max_retries)
+        stream = _stream_converted_with_retry(
+            resp, client, url, headers, google_body,
+            lambda aiter: stream_google_to_anthropic(aiter, original_model),
+            max_retries,
+            debug_id=debug_id,
+        )
+        if debug_id:
+            stream = _dlog.tee_bytes_iter(stream, debug_id, "4_downstream_sse")
         return StreamingResponse(
-            _stream_converted_with_retry(
-                resp, client, url, headers, google_body,
-                lambda aiter: stream_google_to_anthropic(aiter, original_model),
-                max_retries,
-            ),
+            stream,
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -737,7 +804,12 @@ async def _proxy_google(
         except Exception:
             detail = resp.text
         raise HTTPException(status_code=resp.status_code, detail=detail)
-    return JSONResponse(content=google_to_anthropic_response(resp.json(), original_model))
+    raw = resp.json()
+    converted = google_to_anthropic_response(raw, original_model)
+    if debug_id:
+        _dlog.log(debug_id, "3_upstream_raw", raw)
+        _dlog.log(debug_id, "4_downstream_response", converted)
+    return JSONResponse(content=converted)
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,11 @@ server:
   # route it here instead. Value is "provider/model" (same format as the client model field).
   # Individual models can override this with their own multimodal_fallback field.
   # multimodal_fallback: "google/gemini-2.5-flash"
+  #
+  # Debug logging: log all 4 request/response stages to a file.
+  # Each request gets a short ID; grep by it to see the full round-trip:
+  #   grep "req=ab12cd34" /tmp/router_debug.log
+  # debug_log: "/tmp/router_debug.log"
 
 providers:
   # ── Anthropic ─────────────────────────────────────────────────────────────

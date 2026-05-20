@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from watchfiles import awatch
 
 from .config import RouterConfig, load_config
+from .debug_log import configure as configure_debug_log
 from .logger import setup_logging as setup_logger
 from .proxy import route_request, count_tokens_request
 from .usage_logger import log_usage, setup_usage_logging
@@ -143,6 +144,9 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     )
     if config.server.log_file:
         setup_usage_logging(config.server.log_file)
+    if config.server.debug_log:
+        configure_debug_log(config.server.debug_log)
+        logger.info("Debug logging enabled → %s", config.server.debug_log)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

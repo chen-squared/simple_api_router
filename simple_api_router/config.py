@@ -28,6 +28,9 @@ class ServerConfig(BaseModel):
     # Global fallback model for text-only models that receive image/video content.
     # Value is "provider/model" (same format as the client `model` field).
     multimodal_fallback: Optional[str] = None
+    # Path to debug log file.  When set, all 4 request/response stages are
+    # appended to this file for every request.  None = disabled.
+    debug_log: Optional[str] = None
 
 
 class ModelEntry(BaseModel):
