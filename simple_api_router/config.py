@@ -50,6 +50,10 @@ class ModelEntry(BaseModel):
     # Overrides the endpoint-level deepseek_reasoning when set.
     # None = fall through to endpoint setting, then auto-detect from model name.
     deepseek_reasoning: Optional[bool] = None
+    # Cap for reasoning_effort sent to this model.  None = fall through to endpoint setting.
+    # Valid values: "none", "low", "medium", "high", "xhigh".
+    # Example: kimi models only support up to "high"; deepseek supports "xhigh".
+    max_reasoning_effort: Optional[str] = None
 
 
 class EndpointConfig(BaseModel):
@@ -59,6 +63,9 @@ class EndpointConfig(BaseModel):
     model_map: Dict[str, str] = Field(default_factory=dict)
     # Enable DeepSeek reasoning_content passthrough. None = auto-detect from model name.
     deepseek_reasoning: Optional[bool] = None
+    # Default cap for reasoning_effort on this endpoint.  None = no cap ("xhigh" default).
+    # Per-model max_reasoning_effort takes precedence when set.
+    max_reasoning_effort: Optional[str] = None
 
     def model_names(self) -> List[str]:
         """Return the list of model names (works for both str and ModelEntry items)."""
@@ -78,6 +85,14 @@ class EndpointConfig(BaseModel):
         if url.endswith("/v1"):
             url = url[:-3]
         return url
+
+    def resolve_max_reasoning_effort(self, model_name: str) -> str:
+        """Return the effective max_reasoning_effort for a model.
+
+        Lookup order: ModelEntry.max_reasoning_effort → EndpointConfig.max_reasoning_effort → "xhigh".
+        """
+        entry = self.get_model_entry(model_name)
+        return entry.max_reasoning_effort or self.max_reasoning_effort or "xhigh"
 
     def resolve_model(self, model: str) -> str:
         return self.model_map.get(model, model)

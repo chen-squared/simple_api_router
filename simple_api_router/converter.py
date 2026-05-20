@@ -70,15 +70,22 @@ def _reasoning_effort_from_budget(budget_tokens: int) -> str:
     return "xhigh"
 
 
-def _normalize_effort(effort: str, backend_model: str) -> str:
-    """Normalize Anthropic effort level to backend-appropriate reasoning_effort value.
+_EFFORT_ORDER = ("none", "low", "medium", "high", "xhigh")
+
+
+def _normalize_effort(effort: str, max_effort: str = "xhigh") -> str:
+    """Map Anthropic 'max' → 'xhigh', then cap to max_effort.
 
     Anthropic uses "max" as the highest level; both OpenAI and DeepSeek use "xhigh".
-    DeepSeek additionally accepts "max" directly (maps it to "xhigh" internally),
-    but using "xhigh" is cleaner and works for all backends.
+    Providers that only support low/medium/high can set max_effort="high".
     """
     if effort == "max":
-        return "xhigh"
+        effort = "xhigh"
+    try:
+        if _EFFORT_ORDER.index(effort) > _EFFORT_ORDER.index(max_effort):
+            return max_effort
+    except ValueError:
+        pass  # unknown value; pass through and let the provider reject it
     return effort
 
 
@@ -95,6 +102,7 @@ def anthropic_to_openai_request(
     body: Dict[str, Any],
     backend_model: str,
     use_reasoning_content: bool = False,
+    max_reasoning_effort: str = "xhigh",
 ) -> Dict[str, Any]:
     """Convert an Anthropic /v1/messages request body to OpenAI chat completions format."""
     body = strip_private_params(body)
@@ -164,11 +172,11 @@ def anthropic_to_openai_request(
     if thinking:
         if thinking.get("type") == "adaptive":
             # Respect explicit effort; default is "high" per Anthropic docs
-            oai["reasoning_effort"] = _normalize_effort(explicit_effort or "high", backend_model)
+            oai["reasoning_effort"] = _normalize_effort(explicit_effort or "high", max_reasoning_effort)
         else:
             budget = thinking.get("budget_tokens", 8192)
             oai["reasoning_effort"] = _normalize_effort(
-                explicit_effort or _reasoning_effort_from_budget(budget), backend_model
+                explicit_effort or _reasoning_effort_from_budget(budget), max_reasoning_effort
             )
 
     # --- tools (skip Anthropic server tools like web_search, computer_use, etc.) ---
@@ -185,19 +193,17 @@ def anthropic_to_openai_request(
 
 
 def _user_blocks_to_openai(blocks: List[Dict]) -> List[Dict[str, Any]]:
-    """Convert user content blocks. tool_result blocks become separate tool messages."""
+    """Convert user content blocks. tool_result blocks become separate tool messages.
+
+    cache_control is Anthropic-specific and stripped from all content items.
+    """
     openai_content: List[Any] = []
     tool_messages: List[Dict[str, Any]] = []
-    has_cache_control = False
 
     for block in blocks:
         btype = block.get("type")
         if btype == "text":
-            item: Dict[str, Any] = {"type": "text", "text": block.get("text", "")}
-            if cc := block.get("cache_control"):
-                item["cache_control"] = cc
-                has_cache_control = True
-            openai_content.append(item)
+            openai_content.append({"type": "text", "text": block.get("text", "")})
         elif btype == "image":
             openai_content.append(_image_block_to_openai(block))
         elif btype == "tool_result":
@@ -213,8 +219,8 @@ def _user_blocks_to_openai(blocks: List[Dict]) -> List[Dict[str, Any]]:
     # come AFTER all the tool messages, not before.
     result: List[Dict[str, Any]] = list(tool_messages)
     if openai_content:
-        # Keep array form when cache_control is present or when there are mixed content types
-        if not has_cache_control and len(openai_content) == 1 and openai_content[0].get("type") == "text":
+        # Use a plain string for a single text block (most compatible); array for mixed content.
+        if len(openai_content) == 1 and openai_content[0].get("type") == "text":
             result.append({"role": "user", "content": openai_content[0]["text"]})
         else:
             result.append({"role": "user", "content": openai_content})
@@ -298,7 +304,8 @@ def _tool_result_content(block: Dict) -> str:
 
 
 def _anthropic_tool_to_openai(tool: Dict) -> Dict[str, Any]:
-    item: Dict[str, Any] = {
+    # cache_control is Anthropic-specific; strip it from the OpenAI tool definition.
+    return {
         "type": "function",
         "function": {
             "name": tool.get("name", ""),
@@ -306,9 +313,6 @@ def _anthropic_tool_to_openai(tool: Dict) -> Dict[str, Any]:
             "parameters": clean_schema(tool.get("input_schema", {})),
         },
     }
-    if cc := tool.get("cache_control"):
-        item["cache_control"] = cc
-    return item
 
 
 def _convert_tool_choice(tc: Dict) -> Any:
@@ -902,7 +906,11 @@ def _messages_to_responses_input(messages: List[Dict]) -> List[Dict[str, Any]]:
     return result
 
 
-def anthropic_to_responses_request(body: Dict[str, Any], backend_model: str) -> Dict[str, Any]:
+def anthropic_to_responses_request(
+    body: Dict[str, Any],
+    backend_model: str,
+    max_reasoning_effort: str = "xhigh",
+) -> Dict[str, Any]:
     """Convert an Anthropic /v1/messages body to OpenAI Responses API format."""
     body = strip_private_params(body)
     result: Dict[str, Any] = {"model": backend_model}
@@ -945,11 +953,11 @@ def anthropic_to_responses_request(body: Dict[str, Any], backend_model: str) -> 
     explicit_effort = body.get("effort") or output_config.get("effort")
     if thinking:
         if thinking.get("type") == "adaptive":
-            effort = _normalize_effort(explicit_effort or "high", backend_model)
+            effort = _normalize_effort(explicit_effort or "high", max_reasoning_effort)
         else:
             effort = _normalize_effort(
                 explicit_effort or _reasoning_effort_from_budget(thinking.get("budget_tokens", 8192)),
-                backend_model,
+                max_reasoning_effort,
             )
         result["reasoning"] = {"effort": effort, "summary": "auto"}
 

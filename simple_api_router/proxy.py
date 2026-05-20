@@ -666,13 +666,14 @@ async def _proxy_openai(
             else is_deepseek_model(backend_model)
         )
     )
+    max_effort = endpoint.resolve_max_reasoning_effort(_req_model)
 
     base_url = endpoint.resolve_base_url(api_format, provider.base_url)
     headers = _build_openai_headers(provider.api_key)
     is_stream = body.get("stream", False)
 
     if api_format == "openai_responses":
-        req_body = anthropic_to_responses_request(body, backend_model)
+        req_body = anthropic_to_responses_request(body, backend_model, max_reasoning_effort=max_effort)
         url = f"{base_url}/v1/responses"
 
         if debug_id:
@@ -712,7 +713,11 @@ async def _proxy_openai(
         return JSONResponse(content=converted)
 
     # openai_chat (default)
-    oai_body = anthropic_to_openai_request(body, backend_model, use_reasoning_content=use_reasoning)
+    oai_body = anthropic_to_openai_request(
+        body, backend_model,
+        use_reasoning_content=use_reasoning,
+        max_reasoning_effort=max_effort,
+    )
     url = f"{base_url}/v1/chat/completions"
 
     if debug_id:

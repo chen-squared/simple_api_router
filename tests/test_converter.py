@@ -706,6 +706,32 @@ class TestAnthropicToOpenAIExtended(unittest.TestCase):
             anthropic_to_openai_request(body, "o3").get("reasoning_effort"), "xhigh"
         )
 
+    def test_max_reasoning_effort_cap(self):
+        """max_reasoning_effort caps the effort sent to the provider."""
+        body = {
+            "model": "x",
+            "max_tokens": 1024,
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "max"},
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        # Provider only supports up to "high" (e.g. Kimi on opencode)
+        self.assertEqual(
+            anthropic_to_openai_request(body, "kimi-k2", max_reasoning_effort="high").get("reasoning_effort"),
+            "high",
+        )
+        # Provider supports "xhigh" (e.g. DeepSeek) — max maps to xhigh
+        self.assertEqual(
+            anthropic_to_openai_request(body, "deepseek-v3", max_reasoning_effort="xhigh").get("reasoning_effort"),
+            "xhigh",
+        )
+        # "medium" effort is below any cap — passes through unchanged
+        body2 = dict(body, output_config={"effort": "medium"})
+        self.assertEqual(
+            anthropic_to_openai_request(body2, "kimi-k2", max_reasoning_effort="high").get("reasoning_effort"),
+            "medium",
+        )
+
     def test_thinking_block_not_emitted_as_reasoning_content_by_default(self):
         """thinking blocks in assistant history must NOT produce reasoning_content in OpenAI format."""
         body = {
@@ -1121,8 +1147,8 @@ class TestCCSwitchTransform(unittest.TestCase):
         self.assertEqual(sys_msg.get("content"), "sys")
         self.assertNotIn("cache_control", sys_msg)
 
-    def test_cache_control_forces_array_format_in_user_block(self):
-        """User text block with cache_control should appear as an array item (not a plain string)."""
+    def test_cache_control_stripped_from_user_block(self):
+        """cache_control is Anthropic-specific and must be stripped from OpenAI user content."""
         body = {
             "model": "x",
             "max_tokens": 100,
@@ -1137,13 +1163,12 @@ class TestCCSwitchTransform(unittest.TestCase):
         }
         result = anthropic_to_openai_request(body, "gpt-4o")
         user_content = result["messages"][0]["content"]
-        # Must be an array (not a plain string) so cache_control can be attached
-        self.assertIsInstance(user_content, list)
-        self.assertEqual(user_content[0].get("cache_control"), {"type": "ephemeral"})
-        self.assertEqual(user_content[0]["text"], "hello")
+        # Single text block → plain string (not an array)
+        self.assertIsInstance(user_content, str)
+        self.assertEqual(user_content, "hello")
 
-    def test_cache_control_preserved_in_tool(self):
-        """cache_control on a tool definition is passed through to the OpenAI tool object."""
+    def test_cache_control_stripped_from_tool(self):
+        """cache_control on a tool definition must be stripped for OpenAI format."""
         body = {
             "model": "x",
             "max_tokens": 100,
@@ -1159,7 +1184,7 @@ class TestCCSwitchTransform(unittest.TestCase):
         }
         result = anthropic_to_openai_request(body, "gpt-4o")
         tool = result["tools"][0]
-        self.assertEqual(tool.get("cache_control"), {"type": "ephemeral"})
+        self.assertNotIn("cache_control", tool)
 
 
 # ---------------------------------------------------------------------------
