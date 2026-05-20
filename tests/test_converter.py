@@ -373,7 +373,51 @@ class TestStreamConversion(unittest.TestCase):
         msg_delta = next(d for k, d in events if k == "data" and d.get("type") == "message_delta")
         self.assertEqual(msg_delta["delta"]["stop_reason"], "tool_use")
 
-    def test_stream_ends_with_message_stop(self):
+    def test_sequential_multi_tool_blocks_non_overlapping(self):
+        """When a provider streams multiple tool calls sequentially (all of tool[0]'s
+        args before tool[1]'s id/name), each content_block must be closed before the
+        next is opened — Anthropic protocol forbids overlapping blocks.
+        """
+        # Simulates DeepSeek-style sequential tool streaming: idx=0 complete, then idx=1
+        chunks = [
+            # tool 0: id + name
+            b'data: {"id":"r1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_A","type":"function","function":{"name":"Bash","arguments":""}}]},"finish_reason":null}]}\n\n',
+            # tool 0: arguments
+            b'data: {"id":"r1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"command\\":\\"ls\\"}"}}]},"finish_reason":null}]}\n\n',
+            # tool 1: id + name  (tool 0 is now complete)
+            b'data: {"id":"r1","choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_B","type":"function","function":{"name":"Read","arguments":""}}]},"finish_reason":null}]}\n\n',
+            # tool 1: arguments
+            b'data: {"id":"r1","choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\\"file_path\\":\\"/f\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n',
+            b'data: [DONE]\n\n',
+        ]
+        events = self._run(self._collect(chunks))
+        data_events = [d for k, d in events if k == "data"]
+
+        # Build ordered list of (event_type, index) for block lifecycle events
+        lifecycle = []
+        for d in data_events:
+            t = d.get("type")
+            if t in ("content_block_start", "content_block_stop"):
+                lifecycle.append((t, d.get("index")))
+
+        # Verify no two blocks are open at the same time.
+        open_blocks = set()
+        for evt, idx in lifecycle:
+            if evt == "content_block_start":
+                self.assertFalse(open_blocks,
+                    f"Block {idx} opened while blocks {open_blocks} were still open (overlapping)")
+                open_blocks.add(idx)
+            else:
+                open_blocks.discard(idx)
+
+        # Exactly 2 tool_use blocks
+        starts = [d for d in data_events if d.get("type") == "content_block_start"
+                  and d.get("content_block", {}).get("type") == "tool_use"]
+        self.assertEqual(len(starts), 2)
+        self.assertEqual(starts[0]["content_block"]["name"], "Bash")
+        self.assertEqual(starts[1]["content_block"]["name"], "Read")
+
+
         chunks = [
             b'data: {"id":"c3","choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}\n\n',
             b'data: [DONE]\n\n',
@@ -708,8 +752,52 @@ class TestAnthropicToOpenAIExtended(unittest.TestCase):
         self.assertIn("Result: 42", tool_msg["content"])
         self.assertIn("Extra info", tool_msg["content"])
 
+    def test_user_message_with_tool_results_and_text_ordering(self):
+        """OpenAI requires tool messages to immediately follow the assistant that
+        issued tool_calls.  When a user message contains both tool_result blocks
+        and a text block (user typed while tools ran), the tool messages must
+        come BEFORE the user text message in the OpenAI output.
+        """
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "call_A", "name": "Bash", "input": {"command": "ls"}},
+                        {"type": "tool_use", "id": "call_B", "name": "Read", "input": {"file_path": "/f"}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "call_A", "content": "file1"},
+                        {"type": "tool_result", "tool_use_id": "call_B", "content": "contents"},
+                        {"type": "text", "text": "ok, continue"},
+                    ],
+                },
+            ],
+        }
+        result = anthropic_to_openai_request(body, "gpt-4o")
+        msgs = result["messages"]
+        # Find the indices of tool messages and user text message
+        tool_indices = [i for i, m in enumerate(msgs) if m.get("role") == "tool"]
+        user_text_indices = [i for i, m in enumerate(msgs) if m.get("role") == "user" and m.get("content") == "ok, continue"]
+        self.assertEqual(len(tool_indices), 2, "Expected 2 tool messages")
+        self.assertEqual(len(user_text_indices), 1, "Expected 1 user text message")
+        # Tool messages must come before the user text
+        self.assertLess(max(tool_indices), user_text_indices[0],
+                        "tool messages must precede the user text message")
+        # The two tool messages must be consecutive right after the assistant
+        asst_indices = [i for i, m in enumerate(msgs) if m.get("role") == "assistant"]
+        asst_idx = asst_indices[-1]
+        self.assertEqual(tool_indices[0], asst_idx + 1)
+        self.assertEqual(tool_indices[1], asst_idx + 2)
+        self.assertEqual(user_text_indices[0], asst_idx + 3)
 
-class TestOpenAIToAnthropicExtended(unittest.TestCase):
+
+
     def test_reasoning_content_becomes_thinking_block(self):
         oai = {
             "id": "x",

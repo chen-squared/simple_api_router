@@ -197,14 +197,16 @@ def _user_blocks_to_openai(blocks: List[Dict]) -> List[Dict[str, Any]]:
             })
         # document blocks: skip (OpenAI doesn't support PDF natively)
 
-    result: List[Dict[str, Any]] = []
+    # OpenAI requires tool messages to immediately follow the assistant that
+    # issued the tool_calls.  Any user text in the same Anthropic message must
+    # come AFTER all the tool messages, not before.
+    result: List[Dict[str, Any]] = list(tool_messages)
     if openai_content:
         # Keep array form when cache_control is present or when there are mixed content types
         if not has_cache_control and len(openai_content) == 1 and openai_content[0].get("type") == "text":
             result.append({"role": "user", "content": openai_content[0]["text"]})
         else:
             result.append({"role": "user", "content": openai_content})
-    result.extend(tool_messages)
     return result
 
 
@@ -640,6 +642,16 @@ async def stream_openai_to_anthropic(
                             "type": "content_block_stop", "index": text_block_index,
                         })
                         text_block_open = False
+                    # Close any tool blocks that were opened for earlier oai_indices.
+                    # Most providers (including DeepSeek) stream tool calls sequentially:
+                    # all arguments for tool[N] arrive before tool[N+1]'s id/name,
+                    # so when we see a new tool starting, the previous one is complete.
+                    # Closing here keeps Anthropic content blocks non-overlapping.
+                    for prev_ant_idx in sorted(open_tool_indices):
+                        yield _sse_bytes("content_block_stop", {
+                            "type": "content_block_stop", "index": prev_ant_idx,
+                        })
+                    open_tool_indices.clear()
                     state["anthropic_index"] = next_block_index
                     next_block_index += 1
                     state["started"] = True
@@ -725,6 +737,12 @@ async def stream_openai_to_anthropic(
                         continue
                     if not state["id"] and not state["name"] and not state["pending_args"]:
                         continue
+                    # Close any previously-open tool blocks before starting this one.
+                    for prev_ant_idx in sorted(open_tool_indices):
+                        yield _sse_bytes("content_block_stop", {
+                            "type": "content_block_stop", "index": prev_ant_idx,
+                        })
+                    open_tool_indices.clear()
                     state["anthropic_index"] = next_block_index
                     next_block_index += 1
                     fallback_id = state["id"] or f"tool_call_{state['anthropic_index']}"
