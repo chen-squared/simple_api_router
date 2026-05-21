@@ -110,6 +110,14 @@ class ProviderConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate(self) -> "ProviderConfig":
+        # Normalize endpoint format keys: allow hyphens as aliases for underscores
+        # e.g. "openai-chat" → "openai_chat"  to tolerate common config typos.
+        normalized: Dict[str, "EndpointConfig"] = {}
+        for fmt, ep in self.endpoints.items():
+            norm = fmt.replace("-", "_")
+            normalized[norm] = ep
+        self.endpoints = normalized
+
         for fmt in self.endpoints:
             if fmt not in VALID_FORMATS:
                 raise ValueError(f"Invalid endpoint format '{fmt}'. Valid: {sorted(VALID_FORMATS)}")
