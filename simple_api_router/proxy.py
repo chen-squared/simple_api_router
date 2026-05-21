@@ -538,13 +538,16 @@ async def _describe_images_in_body(
                 cache_ttl = 0.0
                 vision_block = block  # best-effort
 
-        # --- Call vision model ---
+        # --- Call vision model (streaming: read_timeout is per-chunk, not total) ---
         try:
-            resp = await client.post(
+            stream_timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=5.0)
+            async with client.stream(
+                "POST",
                 describe_url,
                 json={
                     "model": fallback_model,
                     "max_tokens": 1024,
+                    "stream": True,
                     "messages": [{
                         "role": "user",
                         "content": [
@@ -557,39 +560,64 @@ async def _describe_images_in_body(
                     }],
                 },
                 headers={"content-type": "application/json"},
-                timeout=httpx.Timeout(60.0),
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                description = "\n".join(
-                    b["text"] for b in data.get("content", []) if b.get("type") == "text"
-                )
-                if cache_key:
-                    cache.set(cache_key, description, cache_ttl)
-                return {"type": "text", "text": f"[Image: {description}]"}
+                timeout=stream_timeout,
+            ) as resp:
+                if resp.status_code == 200:
+                    text_parts: list[str] = []
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        payload = line[6:].strip()
+                        if payload in ("", "[DONE]"):
+                            continue
+                        try:
+                            event = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+                        if event.get("type") == "content_block_delta":
+                            delta = event.get("delta", {})
+                            if delta.get("type") == "text_delta":
+                                text_parts.append(delta.get("text", ""))
+                    description = "".join(text_parts)
+                    if description and cache_key:
+                        cache.set(cache_key, description, cache_ttl)
+                    if description:
+                        return {"type": "text", "text": f"[Image: {description}]"}
         except Exception as exc:
             logger.warning("Failed to describe image block: %s", exc)
         return {"type": "text", "text": "[Image: (description unavailable)]"}
 
     async def process_blocks(blocks: list) -> list:
-        result = []
-        for block in blocks:
+        # Collect tasks so image descriptions run concurrently.
+        tasks: list = []
+        indices: list = []  # indices of blocks that need async work
+        result: list = list(blocks)  # start with a copy
+
+        for i, block in enumerate(blocks):
             if not isinstance(block, dict):
-                result.append(block)
                 continue
             btype = block.get("type")
             if btype in ("image", "video"):
-                result.append(await describe_block(block))
+                tasks.append(describe_block(block))
+                indices.append((i, "replace"))
             elif btype == "document" and (block.get("source") or {}).get("type") != "text":
-                result.append({"type": "text", "text": "[Document: binary content omitted]"})
+                result[i] = {"type": "text", "text": "[Document: binary content omitted]"}
             elif btype == "tool_result":
                 nested = block.get("content", "")
                 if isinstance(nested, list):
-                    block = dict(block)
-                    block["content"] = await process_blocks(nested)
-                result.append(block)
-            else:
-                result.append(block)
+                    tasks.append(process_blocks(nested))
+                    indices.append((i, "tool_result"))
+
+        if tasks:
+            resolved = await asyncio.gather(*tasks)
+            for (i, kind), value in zip(indices, resolved):
+                if kind == "replace":
+                    result[i] = value
+                else:  # tool_result nested blocks
+                    b = dict(result[i])
+                    b["content"] = value
+                    result[i] = b
+
         return result
 
     body = copy.deepcopy(body)
