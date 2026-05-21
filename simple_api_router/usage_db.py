@@ -160,7 +160,7 @@ class UsageDB:
     def query_recent(self, limit: int = 100, offset: int = 0) -> List[dict]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM usage ORDER BY id DESC LIMIT ? OFFSET ?",
+                "SELECT * FROM usage ORDER BY ts_epoch DESC, id DESC LIMIT ? OFFSET ?",
                 (max(0, int(limit)), max(0, int(offset))),
             ).fetchall()
         return [self._full_row_to_dict(row) for row in rows]

@@ -348,7 +348,9 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     @app.get("/stats/data")
     async def stats_data(request: Request) -> JSONResponse:
         days = _parse_stats_days(request.query_params.get("days"))
-        since_epoch = time.time() - days * 86400
+        from datetime import datetime as _dt, timedelta as _td
+        _today_midnight = _dt.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        since_epoch = (_today_midnight - _td(days=days - 1)).timestamp()
         until_epoch = time.time()
         db = get_usage_db()
         config = request.app.state.config
@@ -404,7 +406,9 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         view = request.query_params.get("view", "summary")  # "summary" | "daily"
         page_size = 25
 
-        since_epoch = time.time() - days * 86400
+        from datetime import datetime as _dt, timedelta as _td
+        _today_midnight = _dt.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        since_epoch = (_today_midnight - _td(days=days - 1)).timestamp()
         until_epoch = time.time()
         db = get_usage_db()
         config = request.app.state.config
@@ -491,8 +495,9 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
                     f'&emsp;<span class="muted">{dt["requests"]} req'
                     f'&ensp;in {_fmt_stat_tokens(dt["input_tokens"])}'
                     f'&ensp;out {_fmt_stat_tokens(dt["output_tokens"])}'
-                    f'&ensp;{_fmt_stat_cost(day_cny, "¥") if day_cny else _fmt_stat_cost(day_usd, "$")}'
-                    f'</span></td></tr>'
+                    + (f'&ensp;{_fmt_stat_cost(day_cny, "¥")}' if day_cny is not None else '')
+                    + (f'&ensp;{_fmt_stat_cost(day_usd, "$")}' if day_usd is not None else '')
+                    + f'</span></td></tr>'
                 )
                 for model, agg in sorted(by_day_agg[day].items(), key=lambda x: -x[1]["requests"]):
                     cost_cny = round(agg["cost_cny"], 4) if agg.get("_has_cost_cny") else None
@@ -543,9 +548,11 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
                 return ""
             prev_href = _url(p=page - 1) if page > 1 else ""
             next_href = _url(p=page + 1) if page < total_pages else ""
-            prev_btn = f'<a class="page-btn" href="{prev_href}">← Prev</a>' if prev_href else '<span class="page-btn disabled">← Prev</span>'
-            next_btn = f'<a class="page-btn" href="{next_href}">Next →</a>' if next_href else '<span class="page-btn disabled">Next →</span>'
-            return f'<div class="pagination">{prev_btn}<span class="page-info">Page {page} / {total_pages} ({total_recent} total)</span>{next_btn}</div>'
+            first_btn = f'<a class="page-btn" href="{_url(p=1)}">«</a>' if page > 1 else '<span class="page-btn disabled">«</span>'
+            prev_btn = f'<a class="page-btn" href="{prev_href}">‹ Prev</a>' if prev_href else '<span class="page-btn disabled">‹ Prev</span>'
+            next_btn = f'<a class="page-btn" href="{next_href}">Next ›</a>' if next_href else '<span class="page-btn disabled">Next ›</span>'
+            last_btn = f'<a class="page-btn" href="{_url(p=total_pages)}">»</a>' if page < total_pages else '<span class="page-btn disabled">»</span>'
+            return f'<div class="pagination">{first_btn}{prev_btn}<span class="page-info">Page {page} / {total_pages} ({total_recent} total)</span>{next_btn}{last_btn}</div>'
 
         main_section = ""
         if view == "daily":
