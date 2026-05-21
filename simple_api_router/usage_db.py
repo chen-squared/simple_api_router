@@ -5,12 +5,15 @@ query time from the current config so that pricing changes apply retroactively.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+_log = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS usage (
@@ -193,6 +196,7 @@ class UsageDB:
         try:
             return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
         except ValueError:
+            _log.warning("Failed to parse timestamp, falling back to current time: %r", ts[:200])
             return time.time()
 
     @staticmethod

@@ -7,13 +7,15 @@ import unittest
 from typing import AsyncIterator
 
 from simple_api_router.converter import (
-    anthropic_to_openai_request,
     clean_schema,
     is_o_series,
-    openai_to_anthropic_response,
     sanitize_system_text,
-    stream_openai_to_anthropic,
     strip_private_params,
+)
+from simple_api_router.converter_openai import (
+    anthropic_to_openai_request,
+    openai_to_anthropic_response,
+    stream_openai_to_anthropic,
 )
 
 
@@ -1715,7 +1717,7 @@ class TestDeepSeekReasoning(unittest.TestCase):
 # Responses API — request conversion
 # ---------------------------------------------------------------------------
 
-from simple_api_router.converter import anthropic_to_responses_request  # noqa: E402
+from simple_api_router.converter_responses import anthropic_to_responses_request  # noqa: E402
 
 
 class TestResponsesAPIRequest(unittest.TestCase):
@@ -1970,7 +1972,7 @@ class TestResponsesAPIRequest(unittest.TestCase):
 # Responses API — non-streaming response conversion
 # ---------------------------------------------------------------------------
 
-from simple_api_router.converter import responses_to_anthropic_response  # noqa: E402
+from simple_api_router.converter_responses import responses_to_anthropic_response  # noqa: E402
 
 
 class TestResponsesAPIResponse(unittest.TestCase):
@@ -2063,7 +2065,7 @@ class TestResponsesAPIResponse(unittest.TestCase):
 # Responses API — streaming conversion
 # ---------------------------------------------------------------------------
 
-from simple_api_router.converter import stream_responses_to_anthropic  # noqa: E402
+from simple_api_router.converter_responses import stream_responses_to_anthropic  # noqa: E402
 
 
 def _run_async(coro):
@@ -3574,6 +3576,41 @@ class TestGoogleConverter(unittest.TestCase):
         last = result["contents"][-1]
         self.assertEqual(last["role"], "user")
         self.assertEqual(last["parts"][0]["text"], "Never mind")
+
+    def test_stream_incremental_text_shorter_than_accumulated_is_skipped(self):
+        """If Gemini sends text shorter than what's accumulated and it doesn't
+        start with the accumulated prefix, it's a retransmission — skip it."""
+        # Simulated: chunk 1 = "ABC", chunk 2 = "AB" (shorter retransmission), chunk 3 = "ABCD"
+        chunks = [
+            b'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"ABC"}]}}]}\n\n',
+            b'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"AB"}]}}]}\n\n',
+            b'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"ABCD"}]}}]}\n\n',
+        ]
+        events = self._run(self._collect_stream(chunks))
+        data_events = [d for k, d in events if k == "data"]
+        text_deltas = [d for d in data_events
+                       if d["type"] == "content_block_delta"
+                       and d.get("delta", {}).get("type") == "text_delta"]
+        combined = "".join(d["delta"]["text"] for d in text_deltas)
+        # "AB" retransmission should be silently skipped; only "ABC" + "D" emitted
+        self.assertEqual(combined, "ABCD")
+
+    def test_stream_cumulative_text_len_guard_blocks_partial_retransmission(self):
+        """When accumulated="ABC" and new="AB" (shorter), the length guard must
+        detect it as a retransmission and produce an empty delta."""
+        chunks = [
+            b'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"ABC"}]}}]}\n\n',
+            # Retransmission: "AB" is shorter, can't be cumulative
+            b'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"AB"}]}}]}\n\n',
+            b'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"ABCDEF"}]}}]}\n\n',
+        ]
+        events = self._run(self._collect_stream(chunks))
+        data_events = [d for k, d in events if k == "data"]
+        text_deltas = [d for d in data_events
+                       if d["type"] == "content_block_delta"
+                       and d.get("delta", {}).get("type") == "text_delta"]
+        combined = "".join(d["delta"]["text"] for d in text_deltas)
+        self.assertEqual(combined, "ABCDEF")
 
 
 if __name__ == "__main__":

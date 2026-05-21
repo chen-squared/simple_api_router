@@ -24,14 +24,18 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .config import EndpointConfig, ProviderConfig, RouterConfig
 from . import debug_log as _dlog
 from .converter import (
-    anthropic_to_openai_request,
-    anthropic_to_responses_request,
     is_deepseek_model,
+)
+from .converter_openai import (
+    anthropic_to_openai_request,
     openai_to_anthropic_response,
-    responses_to_anthropic_response,
     stream_openai_to_anthropic,
-    stream_responses_to_anthropic,
     _sse_bytes,
+)
+from .converter_responses import (
+    anthropic_to_responses_request,
+    responses_to_anthropic_response,
+    stream_responses_to_anthropic,
 )
 from .logger import get_logger
 

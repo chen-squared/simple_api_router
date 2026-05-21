@@ -20,7 +20,7 @@ _FORMAT_DEFAULT_URLS: Dict[str, str] = {
 
 
 class ServerConfig(BaseModel):
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 8080
     log_level: str = "INFO"
     log_file: Optional[str] = "router.log"

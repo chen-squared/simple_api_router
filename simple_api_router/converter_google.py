@@ -521,9 +521,11 @@ async def stream_google_to_anthropic(
                             "content_block": {"type": "thinking", "thinking": "", "signature": ""},
                         })
                         thinking_block_open = True
-                    if new_thinking.startswith(accumulated_thinking):
+                    if len(new_thinking) >= len(accumulated_thinking) and new_thinking.startswith(accumulated_thinking):
                         delta = new_thinking[len(accumulated_thinking):]
                         accumulated_thinking = new_thinking
+                    elif len(new_thinking) <= len(accumulated_thinking) and accumulated_thinking.startswith(new_thinking):
+                        delta = ""  # retransmission; skip
                     else:
                         delta = new_thinking
                         accumulated_thinking += new_thinking
@@ -546,9 +548,11 @@ async def stream_google_to_anthropic(
                     # Gemini may send cumulative text (each chunk = full text so far)
                     # or incremental text (each chunk = new text only).  Handle both:
                     # if new_text starts with what we have so far it is cumulative.
-                    if new_text.startswith(accumulated_text):
+                    if len(new_text) >= len(accumulated_text) and new_text.startswith(accumulated_text):
                         delta = new_text[len(accumulated_text):]
                         accumulated_text = new_text
+                    elif len(new_text) <= len(accumulated_text) and accumulated_text.startswith(new_text):
+                        delta = ""  # retransmission; skip
                     else:
                         delta = new_text
                         accumulated_text += new_text
