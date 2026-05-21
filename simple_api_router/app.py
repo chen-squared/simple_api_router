@@ -60,6 +60,8 @@ def _sum_usage_rows(total_agg: dict) -> dict:
         "requests": total_agg["requests"],
         "input_tokens": total_agg["input_tokens"],
         "output_tokens": total_agg["output_tokens"],
+        "cache_read_tokens": total_agg.get("cache_read_tokens", 0),
+        "cache_write_tokens": total_agg.get("cache_write_tokens", 0),
         "cost_cny": total_agg["cost_cny"] if total_agg.get("_has_cost_cny") else None,
         "cost_usd": total_agg["cost_usd"] if total_agg.get("_has_cost_usd") else None,
     }
@@ -656,6 +658,8 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     <div class="card"><div class="label">Requests</div><div class="value">{summary['requests']}</div></div>
     <div class="card"><div class="label">Input Tokens</div><div class="value">{_fmt_stat_tokens(summary['input_tokens'])}</div></div>
     <div class="card"><div class="label">Output Tokens</div><div class="value">{_fmt_stat_tokens(summary['output_tokens'])}</div></div>
+    <div class="card"><div class="label">Cache Read</div><div class="value">{_fmt_stat_tokens(summary['cache_read_tokens'])}</div></div>
+    <div class="card"><div class="label">Cache Write</div><div class="value">{_fmt_stat_tokens(summary['cache_write_tokens'])}</div></div>
     <div class="card"><div class="label">¥ Cost</div><div class="value">{_fmt_stat_cost(summary['cost_cny'], '¥')}</div></div>
     <div class="card"><div class="label">$ Cost</div><div class="value">{_fmt_stat_cost(summary['cost_usd'], '$')}</div></div>
   </section>
