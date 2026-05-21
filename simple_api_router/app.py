@@ -395,8 +395,15 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     # GET /stats
     # ------------------------------------------------------------------
     @app.get("/stats")
-    async def stats(request: Request) -> HTMLResponse:
+    async def stats(request: Request) -> HTMLResponse:  # noqa: C901
         days = _parse_stats_days(request.query_params.get("days"))
+        try:
+            page = max(1, int(request.query_params.get("page", "1") or "1"))
+        except ValueError:
+            page = 1
+        view = request.query_params.get("view", "summary")  # "summary" | "daily"
+        page_size = 25
+
         since_epoch = time.time() - days * 86400
         until_epoch = time.time()
         db = get_usage_db()
@@ -404,13 +411,28 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         records = db.query_raw(since_epoch, until_epoch) if db is not None else []
         by_model_agg = _aggregate_by_model(records, config)
         by_day_agg = _aggregate_by_day_model(records, config)
-        recent = db.query_recent(50) if db is not None else []
+
+        total_recent = db.count_all() if db is not None else 0
+        recent_offset = (page - 1) * page_size
+        recent = db.query_recent(page_size, recent_offset) if db is not None else []
+        total_pages = max(1, (total_recent + page_size - 1) // page_size)
+
         total = _total_agg(by_model_agg)
         summary = _sum_usage_rows(total)
 
+        def _url(*, d=None, v=None, p=None) -> str:
+            nd = d if d is not None else days
+            nv = v if v is not None else view
+            np = p if p is not None else page
+            return f"/stats?days={nd}&view={nv}&page={np}"
+
         def period_link(label: str, value: int) -> str:
-            cls = "tab active" if value == days else "tab"
-            return f'<a class="{cls}" href="/stats?days={value}">{label}</a>'
+            cls = "tab active" if value == days and view == "summary" else "tab"
+            return f'<a class="{cls}" href="{_url(d=value, v="summary", p=1)}">{label}</a>'
+
+        def daily_link(label: str, target_view: str) -> str:
+            cls = "tab active" if view == target_view else "tab"
+            return f'<a class="{cls}" href="{_url(v=target_view, p=1)}">{label}</a>'
 
         def by_model_rows() -> str:
             if not by_model_agg:
@@ -455,9 +477,43 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
                 )
             return "".join(cells)
 
+        def daily_detail_rows() -> str:
+            if not by_day_agg:
+                return '<tr><td colspan="8" class="empty">No usage data</td></tr>'
+            cells = []
+            for day in sorted(by_day_agg.keys(), reverse=True):
+                dt = _total_agg(by_day_agg[day])
+                day_cny = round(dt["cost_cny"], 4) if dt.get("_has_cost_cny") else None
+                day_usd = round(dt["cost_usd"], 4) if dt.get("_has_cost_usd") else None
+                cells.append(
+                    f'<tr class="day-hdr">'
+                    f'<td colspan="8"><strong>{html.escape(day)}</strong>'
+                    f'&emsp;<span class="muted">{dt["requests"]} req'
+                    f'&ensp;in {_fmt_stat_tokens(dt["input_tokens"])}'
+                    f'&ensp;out {_fmt_stat_tokens(dt["output_tokens"])}'
+                    f'&ensp;{_fmt_stat_cost(day_cny, "¥") if day_cny else _fmt_stat_cost(day_usd, "$")}'
+                    f'</span></td></tr>'
+                )
+                for model, agg in sorted(by_day_agg[day].items(), key=lambda x: -x[1]["requests"]):
+                    cost_cny = round(agg["cost_cny"], 4) if agg.get("_has_cost_cny") else None
+                    cost_usd = round(agg["cost_usd"], 4) if agg.get("_has_cost_usd") else None
+                    cells.append(
+                        "<tr>"
+                        f"<td>&ensp;{html.escape(model)}</td>"
+                        f"<td>{agg['requests']}</td>"
+                        f"<td>{_fmt_stat_tokens(agg['input_tokens'])}</td>"
+                        f"<td>{_fmt_stat_tokens(agg['output_tokens'])}</td>"
+                        f"<td>{_fmt_stat_tokens(agg['cache_write_tokens'])}</td>"
+                        f"<td>{_fmt_stat_tokens(agg['cache_read_tokens'])}</td>"
+                        f"<td>{_fmt_stat_cost(cost_cny, '¥')}</td>"
+                        f"<td>{_fmt_stat_cost(cost_usd, '$')}</td>"
+                        "</tr>"
+                    )
+            return "".join(cells)
+
         def recent_rows() -> str:
             if not recent:
-                return '<tr><td colspan="8" class="empty">No usage data</td></tr>'
+                return '<tr><td colspan="10" class="empty">No usage data</td></tr>'
             cells = []
             for row in recent:
                 result = _record_cost_currency(row, config)
@@ -472,28 +528,79 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
                     f"<td>{html.escape(row.get('model', ''))}</td>"
                     f"<td>{_fmt_stat_tokens(row.get('input_tokens', 0))}</td>"
                     f"<td>{_fmt_stat_tokens(row.get('output_tokens', 0))}</td>"
+                    f"<td>{_fmt_stat_tokens(row.get('cache_write_tokens', 0))}</td>"
+                    f"<td>{_fmt_stat_tokens(row.get('cache_read_tokens', 0))}</td>"
                     f"<td>{cost_str}</td>"
-                    f"<td>{'yes' if row.get('streaming') else 'no'}</td>"
+                    f"<td>{'✓' if row.get('streaming') else '—'}</td>"
                     f"<td>{row.get('status', 0)}</td>"
                     f"<td>{row.get('duration_ms', 0)}</td>"
                     "</tr>"
                 )
             return "".join(cells)
 
-        page = f"""<!doctype html>
-<html lang=\"en\">
+        def pagination() -> str:
+            if total_pages <= 1:
+                return ""
+            prev_href = _url(p=page - 1) if page > 1 else ""
+            next_href = _url(p=page + 1) if page < total_pages else ""
+            prev_btn = f'<a class="page-btn" href="{prev_href}">← Prev</a>' if prev_href else '<span class="page-btn disabled">← Prev</span>'
+            next_btn = f'<a class="page-btn" href="{next_href}">Next →</a>' if next_href else '<span class="page-btn disabled">Next →</span>'
+            return f'<div class="pagination">{prev_btn}<span class="page-info">Page {page} / {total_pages} ({total_recent} total)</span>{next_btn}</div>'
+
+        main_section = ""
+        if view == "daily":
+            main_section = f"""
+  <section class="panel">
+    <h2>By Day — Model Breakdown</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Day / Model</th><th>Req</th><th>Input</th><th>Output</th><th>Cache↑</th><th>Cache↓</th><th>¥ Cost</th><th>$ Cost</th></tr></thead>
+        <tbody>{daily_detail_rows()}</tbody>
+      </table>
+    </div>
+  </section>"""
+        else:
+            main_section = f"""
+  <section class="panel">
+    <h2>By Model</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Model</th><th>Req</th><th>Input</th><th>Output</th><th>Cache↑</th><th>Cache↓</th><th>¥ Cost</th><th>$ Cost</th></tr></thead>
+        <tbody>{by_model_rows()}</tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>By Day</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Day</th><th>Req</th><th>Input</th><th>Output</th><th>Cache↑</th><th>Cache↓</th><th>¥ Cost</th><th>$ Cost</th></tr></thead>
+        <tbody>{by_day_rows()}</tbody>
+      </table>
+    </div>
+  </section>"""
+
+        page_html = f"""<!doctype html>
+<html lang="en">
 <head>
-  <meta charset=\"utf-8\">
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Router Stats</title>
   <style>
     :root {{ color-scheme: dark light; }}
     body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; background: #111827; color: #e5e7eb; }}
     a {{ color: inherit; text-decoration: none; }}
     .top {{ display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }}
-    .tabs {{ display: flex; gap: 8px; flex-wrap: wrap; }}
-    .tab {{ border: 1px solid #374151; border-radius: 999px; padding: 6px 10px; color: #cbd5e1; }}
+    .ctrl-row {{ display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }}
+    .tab-group {{ display: flex; gap: 6px; align-items: center; }}
+    .tab {{ border: 1px solid #374151; border-radius: 999px; padding: 5px 10px; color: #cbd5e1; font-size: 13px; }}
     .tab.active {{ background: #2563eb; border-color: #2563eb; color: #fff; }}
+    .tab-sep {{ color: #4b5563; padding: 0 4px; }}
+    .days-form {{ display: inline-flex; gap: 6px; align-items: center; }}
+    .days-form input {{ width: 54px; padding: 4px 6px; border: 1px solid #374151; border-radius: 6px; background: #1f2937; color: #e5e7eb; font-size: 13px; }}
+    .days-form button {{ padding: 4px 10px; border: 1px solid #374151; border-radius: 6px; background: #1f2937; color: #cbd5e1; cursor: pointer; font-size: 13px; }}
+    .days-form button:hover {{ border-color: #2563eb; }}
     .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 18px 0 24px; }}
     .card, .panel {{ background: #111827; border: 1px solid #374151; border-radius: 12px; }}
     .card {{ padding: 14px; }}
@@ -502,64 +609,64 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     .panel {{ margin-top: 18px; overflow: hidden; }}
     .panel h2 {{ margin: 0; padding: 14px 16px; font-size: 15px; border-bottom: 1px solid #374151; }}
     .table-wrap {{ overflow-x: auto; }}
-    table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
-    th, td {{ padding: 10px 12px; border-bottom: 1px solid #1f2937; text-align: left; white-space: nowrap; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+    th, td {{ padding: 8px 12px; border-bottom: 1px solid #1f2937; text-align: left; white-space: nowrap; }}
     th {{ color: #94a3b8; font-weight: 600; }}
     tr:last-child td {{ border-bottom: 0; }}
+    tr.day-hdr td {{ background: #1a2236; color: #93c5fd; padding: 10px 12px 6px; }}
     .empty {{ color: #94a3b8; text-align: center; }}
     .muted {{ color: #94a3b8; font-size: 13px; }}
+    .pagination {{ display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid #1f2937; }}
+    .page-btn {{ border: 1px solid #374151; border-radius: 6px; padding: 5px 10px; font-size: 13px; color: #cbd5e1; }}
+    .page-btn:hover {{ border-color: #2563eb; }}
+    .page-btn.disabled {{ color: #4b5563; border-color: #1f2937; cursor: default; pointer-events: none; }}
+    .page-info {{ font-size: 13px; color: #94a3b8; }}
   </style>
 </head>
 <body>
-  <div class=\"top\">
+  <div class="top">
     <div>
-      <h1 style=\"margin:0 0 6px 0;font-size:28px;\">Usage Stats</h1>
-      <div class=\"muted\">Last {days} day{'s' if days != 1 else ''} · <a href=\"/stats/data?days={days}\">JSON data</a></div>
+      <h1 style="margin:0 0 6px 0;font-size:28px;">Usage Stats</h1>
+      <div class="muted">Last {days} day{'s' if days != 1 else ''} · <a href="/stats/data?days={days}">JSON data</a></div>
     </div>
-    <div class=\"tabs\">{period_link('Today', 1)}{period_link('7 days', 7)}{period_link('30 days', 30)}</div>
+  </div>
+  <div class="ctrl-row">
+    <div class="tab-group">
+      {period_link('Today', 1)}{period_link('7 days', 7)}{period_link('30 days', 30)}
+      <form class="days-form" method="GET" action="/stats">
+        <input type="hidden" name="view" value="{view}">
+        <input type="number" name="days" value="{days}" min="1" max="365" placeholder="days">
+        <button type="submit">Go</button>
+      </form>
+    </div>
+    <div class="tab-group">
+      <span class="tab-sep">View:</span>
+      {daily_link('Summary', 'summary')}{daily_link('Daily', 'daily')}
+    </div>
   </div>
 
-  <section class=\"summary\">
-    <div class=\"card\"><div class=\"label\">Requests</div><div class=\"value\">{summary['requests']}</div></div>
-    <div class=\"card\"><div class=\"label\">Input Tokens</div><div class=\"value\">{_fmt_stat_tokens(summary['input_tokens'])}</div></div>
-    <div class=\"card\"><div class=\"label\">Output Tokens</div><div class=\"value\">{_fmt_stat_tokens(summary['output_tokens'])}</div></div>
-    <div class=\"card\"><div class=\"label\">¥ Cost</div><div class=\"value\">{_fmt_stat_cost(summary['cost_cny'], '¥')}</div></div>
-    <div class=\"card\"><div class=\"label\">$ Cost</div><div class=\"value\">{_fmt_stat_cost(summary['cost_usd'], '$')}</div></div>
+  <section class="summary">
+    <div class="card"><div class="label">Requests</div><div class="value">{summary['requests']}</div></div>
+    <div class="card"><div class="label">Input Tokens</div><div class="value">{_fmt_stat_tokens(summary['input_tokens'])}</div></div>
+    <div class="card"><div class="label">Output Tokens</div><div class="value">{_fmt_stat_tokens(summary['output_tokens'])}</div></div>
+    <div class="card"><div class="label">¥ Cost</div><div class="value">{_fmt_stat_cost(summary['cost_cny'], '¥')}</div></div>
+    <div class="card"><div class="label">$ Cost</div><div class="value">{_fmt_stat_cost(summary['cost_usd'], '$')}</div></div>
   </section>
-
-  <section class=\"panel\">
-    <h2>By Model</h2>
-    <div class=\"table-wrap\">
-      <table>
-        <thead><tr><th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache↑</th><th>Cache↓</th><th>¥ Cost</th><th>$ Cost</th></tr></thead>
-        <tbody>{by_model_rows()}</tbody>
-      </table>
-    </div>
-  </section>
-
-  <section class=\"panel\">
-    <h2>By Day</h2>
-    <div class=\"table-wrap\">
-      <table>
-        <thead><tr><th>Day</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache↑</th><th>Cache↓</th><th>¥ Cost</th><th>$ Cost</th></tr></thead>
-        <tbody>{by_day_rows()}</tbody>
-      </table>
-    </div>
-  </section>
-
-  <section class=\"panel\">
+{main_section}
+  <section class="panel">
     <h2>Recent Requests</h2>
-    <div class=\"table-wrap\">
+    <div class="table-wrap">
       <table>
-        <thead><tr><th>ts</th><th>model</th><th>in</th><th>out</th><th>¥/$ cost</th><th>streaming</th><th>status</th><th>ms</th></tr></thead>
+        <thead><tr><th>Time</th><th>Model</th><th>In</th><th>Out</th><th>Cache↑</th><th>Cache↓</th><th>Cost</th><th>Stream</th><th>Status</th><th>ms</th></tr></thead>
         <tbody>{recent_rows()}</tbody>
       </table>
     </div>
+    {pagination()}
   </section>
 </body>
 </html>
 """
-        return HTMLResponse(page)
+        return HTMLResponse(page_html)
 
     # ------------------------------------------------------------------
     # Vision MCP — mount LAST so FastAPI routes take priority.

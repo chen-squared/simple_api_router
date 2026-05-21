@@ -157,13 +157,17 @@ class UsageDB:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def query_recent(self, limit: int = 100) -> List[dict]:
+    def query_recent(self, limit: int = 100, offset: int = 0) -> List[dict]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM usage ORDER BY id DESC LIMIT ?",
-                (max(0, int(limit)),),
+                "SELECT * FROM usage ORDER BY id DESC LIMIT ? OFFSET ?",
+                (max(0, int(limit)), max(0, int(offset))),
             ).fetchall()
         return [self._full_row_to_dict(row) for row in rows]
+
+    def count_all(self) -> int:
+        with self._lock:
+            return self._conn.execute("SELECT COUNT(*) FROM usage").fetchone()[0]
 
     def _normalize_record(self, record: dict) -> Dict[str, Any]:
         ts = str(record.get("ts") or datetime.now().astimezone().isoformat(timespec="seconds"))
