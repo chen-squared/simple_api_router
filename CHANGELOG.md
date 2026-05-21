@@ -11,7 +11,7 @@
   - Image blocks → `inlineData` (base64) or `fileData` (URL)
   - `finishReason` mapping (STOP → `end_turn`, MAX_TOKENS → `max_tokens`, SAFETY → `end_turn`)
   - Full SSE streaming — text deltas, tool use blocks, usage in `message_delta`
-- **Usage logging** — every request logged to `router.usage.jsonl` (daily-rotated, 90-day history)
+- **Usage logging** — every request logged to `router_usage.db` (SQLite)
 - **`simple-api-router usage`** subcommand — per-provider/model table with token counts and cost; supports `--last N`, `--period`, `--daily`, `--model`, `--provider`, `--format json`
 - **`simple-api-router models`** subcommand — lists configured providers, endpoints, models with multimodal/text-only label and per-currency pricing
 - **Multi-currency pricing** — `PricingEntry.currency` field (`"CNY"` default, `"USD"` supported); usage table shows `¥ Cost` and `$ Cost` columns separately so mixed-currency configs are reported accurately
@@ -44,6 +44,6 @@
   - Cache control preservation
   - Streaming SSE with all Anthropic event types
 - `model_map` per provider for external→backend name remapping
-- `GET /v1/models`, `GET /health`, `GET /stats` endpoints
+- `GET /v1/models`, `GET /health`, `GET /stats`, `GET /stats/data` endpoints
 - YAML config with `${ENV_VAR}` expansion
 - 64 tests including ported cc-switch-cli test suite

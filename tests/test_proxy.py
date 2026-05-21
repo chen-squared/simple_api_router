@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from simple_api_router.config import (
@@ -514,39 +515,32 @@ if __name__ == "__main__":
 
 
 # ===========================================================================
-# Usage logger
+# Usage database
 # ===========================================================================
 
-class TestUsageLogger(unittest.TestCase):
+class TestUsageDB(unittest.TestCase):
     def test_log_usage_noop_when_not_configured(self):
-        """log_usage must be a no-op when setup_usage_logging was never called."""
-        import simple_api_router.usage_logger as ul
-        original = ul._usage_logger
-        ul._usage_logger = None
+        """log_usage must be a no-op when setup_usage_db was never called."""
+        import simple_api_router.usage_db as udb
+        original = udb._db_instance
+        udb._db_instance = None
         try:
-            ul.log_usage({"ts": "2026-01-01T00:00:00Z", "model": "x"})
+            udb.log_usage({"ts": "2026-01-01T00:00:00Z", "model": "x"})
         finally:
-            ul._usage_logger = original
+            udb._db_instance = original
 
-    def test_setup_creates_logger(self):
-        import tempfile, os
-        import simple_api_router.usage_logger as ul
-        with tempfile.NamedTemporaryFile(suffix=".log", delete=False) as f:
-            log_path = f.name
-        try:
-            ul.setup_usage_logging(log_path)
-            self.assertIsNotNone(ul._usage_logger)
-            self.assertIsNotNone(ul.get_usage_log_path())
-            self.assertIn("router.usage.jsonl", ul.get_usage_log_path())
-        finally:
-            ul._usage_logger = None
-            ul._usage_log_path = None
-            os.unlink(log_path)
-            jsonl = log_path.replace(".log", "") + "/../router.usage.jsonl"
+    def test_setup_usage_db_creates_instance(self):
+        import tempfile
+        import simple_api_router.usage_db as udb
+
+        original = udb._db_instance
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test_usage.db"
             try:
-                os.unlink(ul.get_usage_log_path() or "")
-            except Exception:
-                pass
+                udb.setup_usage_db(db_path)
+                self.assertIsNotNone(udb._db_instance)
+            finally:
+                udb._db_instance = original
 
 
 # ===========================================================================

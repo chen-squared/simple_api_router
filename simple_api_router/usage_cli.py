@@ -1,4 +1,4 @@
-"""Usage statistics command — reads router.usage.jsonl and prints reports.
+"""Usage statistics command — reads the SQLite usage database and prints reports.
 
 Tiered pricing note
 -------------------
@@ -38,61 +38,30 @@ def _find_config(explicit: Optional[str]) -> Optional[str]:
         return None
 
 
-def _resolve_usage_path(config_file: str) -> Path:
-    """Derive the usage JSONL path from the config's log_file setting."""
-    from simple_api_router.config import load_config
+def _get_usage_db_path() -> Path:
+    """Return the SQLite usage database path."""
+    from simple_api_router.service import LOG_DIR
 
-    cfg_path = Path(config_file).expanduser().resolve()
-    config = load_config(cfg_path, skip_env_check=True)
-    log_file = config.server.log_file or "router.log"
-    log_path = Path(log_file)
-    if not log_path.is_absolute():
-        log_path = cfg_path.parent / log_file
-    return log_path.parent / "router.usage.jsonl"
+    return LOG_DIR / "router_usage.db"
 
 
 # ---------------------------------------------------------------------------
 # Loading records
 # ---------------------------------------------------------------------------
 
-def _load_records(usage_path: Path, since: date, until: date) -> List[dict]:
-    """Load records from the current JSONL file and its rotated siblings."""
-    records: List[dict] = []
-    candidates: List[Path] = []
+def _load_records(db_path: Path, since: date, until: date) -> List[dict]:
+    """Load records from SQLite for the requested date range."""
+    import datetime as _dt
 
-    if usage_path.exists():
-        candidates.append(usage_path)
+    from .usage_db import UsageDB
 
-    if usage_path.parent.exists():
-        for p in sorted(usage_path.parent.glob(f"{usage_path.name}.*")):
-            # Rotated files are named <base>.<YYYY-MM-DD>; skip clearly out-of-range ones.
-            suffix = p.name[len(usage_path.name) + 1:]
-            try:
-                file_date = date.fromisoformat(suffix)
-                if file_date < since or file_date >= until:
-                    continue
-            except ValueError:
-                pass  # unknown suffix — include anyway
-            candidates.append(p)
-
-    for path in candidates:
-        try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                    ts_str = rec.get("ts", "")
-                    rec_date = datetime.fromisoformat(ts_str.rstrip("Z")).date()
-                    if since <= rec_date < until:
-                        records.append(rec)
-                except (json.JSONDecodeError, ValueError, KeyError):
-                    pass
-        except OSError:
-            pass
-
-    return records
+    since_epoch = _dt.datetime.combine(since, _dt.time.min).timestamp()
+    until_epoch = _dt.datetime.combine(until, _dt.time.min).timestamp()
+    db = UsageDB(db_path)
+    try:
+        return db.query_raw(since_epoch, until_epoch)
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -385,8 +354,56 @@ def _json_daily(by_day: Dict[str, Dict[str, dict]], period: dict) -> dict:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _import_jsonl(jsonl_path: Path, db_path: Path) -> None:
+    """Import records from a legacy JSONL file into the SQLite usage database."""
+    from .usage_db import UsageDB
+
+    if not jsonl_path.exists():
+        print(f"Error: {jsonl_path} not found.", file=sys.stderr)
+        sys.exit(1)
+
+    db = UsageDB(db_path)
+    try:
+        imported = 0
+        skipped = 0
+        with open(jsonl_path) as fh:
+            for lineno, line in enumerate(fh, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    print(f"  Line {lineno}: skipping malformed JSON — {exc}", file=sys.stderr)
+                    skipped += 1
+                    continue
+                try:
+                    db.log(rec)
+                    imported += 1
+                except Exception as exc:
+                    print(f"  Line {lineno}: skipping — {exc}", file=sys.stderr)
+                    skipped += 1
+    finally:
+        db.close()
+
+    print(f"Imported {imported} record(s) into {db_path}.")
+    if skipped:
+        print(f"Skipped {skipped} malformed line(s).")
+
+
 def usage_command(args) -> None:
     """Execute the ``usage`` subcommand."""
+
+    # ── JSONL import mode ──────────────────────────────────────────────────
+    import_path: Optional[str] = getattr(args, "import_jsonl", None)
+    if import_path:
+        try:
+            db_path = _get_usage_db_path()
+        except Exception as exc:
+            print(f"Error resolving usage database: {exc}", file=sys.stderr)
+            sys.exit(1)
+        _import_jsonl(Path(import_path), db_path)
+        return
 
     # ── load config ────────────────────────────────────────────────────────
     config_file = _find_config(getattr(args, "config", None))
@@ -400,11 +417,11 @@ def usage_command(args) -> None:
         print(f"Error loading config: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    # ── resolve usage log path ─────────────────────────────────────────────
+    # ── resolve usage database path ────────────────────────────────────────
     try:
-        usage_path = _resolve_usage_path(config_file)
+        db_path = _get_usage_db_path()
     except Exception as exc:
-        print(f"Error resolving usage log: {exc}", file=sys.stderr)
+        print(f"Error resolving usage database: {exc}", file=sys.stderr)
         sys.exit(1)
 
     # ── date range ─────────────────────────────────────────────────────────
@@ -424,7 +441,8 @@ def usage_command(args) -> None:
     period_dict = {"from": since.isoformat(), "to": today.isoformat(), "days": last_n}
 
     # ── load & filter records ──────────────────────────────────────────────
-    records = _load_records(usage_path, since, until)
+    db_preexisting = db_path.exists()
+    records = _load_records(db_path, since, until)
 
     model_filter: Optional[str] = getattr(args, "model", None)
     provider_filter: Optional[str] = getattr(args, "provider", None)
@@ -435,13 +453,19 @@ def usage_command(args) -> None:
 
     if not records:
         print(f"No usage records found for {period_str}.")
-        if not usage_path.exists():
-            print(f"  (Usage log not found: {usage_path})")
+        if not db_preexisting:
+            print(f"  (Usage database not found yet: {db_path})")
         return
 
     # ── output ─────────────────────────────────────────────────────────────
     fmt: str = getattr(args, "format", "table")
     daily: bool = getattr(args, "daily", False)
+    show_logs: bool = getattr(args, "logs", False)
+
+    if show_logs:
+        for rec in records:
+            print(json.dumps(rec))
+        return
 
     if daily:
         by_day = _aggregate_by_day_model(records, config)

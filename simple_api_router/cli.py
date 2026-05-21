@@ -193,6 +193,14 @@ def main() -> None:
         help="Filter by provider name",
     )
     usage_p.add_argument(
+        "--logs", action="store_true",
+        help="Print raw records as JSON lines (like the old JSONL file)",
+    )
+    usage_p.add_argument(
+        "--import-jsonl", metavar="PATH",
+        help="Import records from a legacy JSONL file into the usage database",
+    )
+    usage_p.add_argument(
         "--format", choices=["table", "json"], default="table",
         help="Output format (default: table)",
     )

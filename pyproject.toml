@@ -39,9 +39,13 @@ dev = [
     "pytest-asyncio>=0.23",
     "requests>=2.31",
 ]
+mcp = [
+    "mcp>=1.0.0",
+]
 
 [project.scripts]
 simple-api-router = "simple_api_router.cli:main"
+simple-api-router-vision = "simple_api_router.mcp_vision:main"
 
 [project.urls]
 Homepage = "https://github.com/chen-squared/simple_api_router"

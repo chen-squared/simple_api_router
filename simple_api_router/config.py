@@ -31,6 +31,9 @@ class ServerConfig(BaseModel):
     # Path to debug log file.  When set, all 4 request/response stages are
     # appended to this file for every request.  None = disabled.
     debug_log: Optional[str] = None
+    # Vision MCP server.  When set, an MCP server with an ``understand_image``
+    # tool is mounted at /mcp on the same port.  Value is "provider/model".
+    vision_model: Optional[str] = None
 
 
 class ModelEntry(BaseModel):

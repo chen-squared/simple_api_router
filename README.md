@@ -19,8 +19,9 @@ Designed for use with tools like [Claude Code](https://claude.ai/code) that spea
 - **Google Gemini backend** — full bidirectional Anthropic ↔ Gemini `generateContent` conversion:
   - System prompt, tools, tool choice, images, streaming
 - **DeepSeek reasoning passthrough** — `reasoning_content` preserved; auto-enabled for `deepseek-*` models
-- **Multimodal fallback routing** — text-only models automatically re-route image/video requests to a configurable multimodal model
-- **Usage logging** — every request logged to `router.usage.jsonl`; view with `simple-api-router usage`
+- **Multimodal fallback** — when a text-only model receives image content, images are auto-described via a configurable vision model and replaced with text; the original model then handles the request normally
+- **Vision MCP server** — optional `understand_image` MCP tool, mounted on the same port; lets text-only models describe screenshots and images on demand
+- **Usage logging** — every request logged to `router_usage.db` (SQLite); view with `simple-api-router usage` or `/stats`
 - **Hot reload** — provider/model/key changes apply within a second, no restart needed
 - **`model_map`** — remap external model names to backend names per endpoint
 - **1M context suffix** — Claude Code's `[1m]` suffix stripped before forwarding
@@ -139,6 +140,8 @@ Then pick any configured model:
 | `log_file` | `"router.log"` | Log file path (relative = next to config); `null` = stdout only |
 | `max_retries` | `3` | Retry attempts on upstream 429/5xx/network errors |
 | `multimodal_fallback` | `null` | Global fallback model for text-only → multimodal re-routing (`"provider/model"`) |
+| `vision_model` | `null` | Enable Vision MCP server at `/mcp` on the same port (`"provider/model"`). Requires restart to mount/unmount; model name hot-reloads. |
+| `debug_log` | `null` | Path to debug log file; all 4 request/response stages logged per request |
 
 ### `providers`
 
@@ -178,7 +181,7 @@ A single provider can have multiple endpoint formats, each with its own model li
 
 #### `text_only` and multimodal fallback
 
-Mark text-only models so the router re-routes image/video requests instead of forwarding them and getting an error:
+Mark text-only models so the router auto-describes images instead of forwarding them and getting an error. When a text-only model receives a request with image content, the router calls the fallback model to describe each image, replaces the image blocks with `[Image: <description>]` text, and then forwards the (now text-only) request to the original model.
 
 ```yaml
 server:
@@ -291,12 +294,13 @@ openai  [openai_chat]
 
 ### `simple-api-router usage`
 
-Show API usage statistics from the usage log.
+Show API usage statistics from the SQLite usage database.
 
 ```
 simple-api-router usage [--last N] [--period day|week|month]
                         [--daily] [--model PATTERN] [--provider NAME]
-                        [--format table|json] [--config PATH]
+                        [--format table|json] [--logs]
+                        [--import-jsonl PATH] [--config PATH]
 ```
 
 | Flag | Default | Description |
@@ -307,8 +311,10 @@ simple-api-router usage [--last N] [--period day|week|month]
 | `--model PATTERN` | — | Filter by model name (substring) |
 | `--provider NAME` | — | Filter by provider name |
 | `--format` | `table` | `table` or `json` |
+| `--logs` | off | Print each raw record as a JSON line (like the old JSONL file) |
+| `--import-jsonl PATH` | — | Import records from a legacy JSONL file into the usage database |
 
-The `¥ Cost` and `$ Cost` columns show costs in CNY and USD respectively; a `-` means no pricing is configured for that model.
+The `¥ Cost` and `$ Cost` columns show costs in CNY and USD respectively; a `-` means no pricing is configured for that model. Cost is computed at query time from the current config — pricing changes apply retroactively.
 
 ### Service management commands
 
@@ -347,7 +353,82 @@ Returns all configured models in Anthropic-compatible format.
 
 ### `GET /stats`
 
-Returns per-provider model lists and base URLs.
+Returns a minimal HTML usage dashboard with period tabs, model/day aggregates, and recent requests.
+
+### `GET /stats/data`
+
+Returns the same usage data as JSON for programmatic access.
+
+---
+
+## Vision MCP Server
+
+When `server.vision_model` is set, the router mounts an [MCP](https://modelcontextprotocol.io/) server at `/mcp` on the **same port** (Streamable HTTP transport). This exposes an `understand_image` tool that lets any MCP-capable client (e.g. Claude Code) ask questions about images without routing the whole conversation through a multimodal model.
+
+Requests from `understand_image` go through the router's own `/v1/messages` endpoint, so they appear in usage logs and are subject to the same routing rules.
+
+### Setup
+
+**1. Add `vision_model` to `config.yaml`:**
+
+```yaml
+server:
+  port: 8080
+  vision_model: "opencode/qwen-vl-plus"   # any vision-capable model in your config
+```
+
+Restart the router once to mount the endpoint. After that, changing `vision_model` in config hot-reloads without restart.
+
+**2. Add to Claude Code (`~/.claude/settings.json`):**
+
+```json
+{
+  "mcpServers": {
+    "vision": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp"
+    }
+  }
+}
+```
+
+### Tool signature
+
+```
+understand_image(
+    path?        — absolute or relative path to a local image file
+    url?         — HTTPS URL of an image
+    base64_data? — raw base64-encoded bytes (no data: prefix)
+    media_type?  — MIME type for base64 input (default: "image/jpeg")
+    question?    — what to ask (default: "Please describe this image in detail.")
+)
+```
+
+Provide exactly one of `path`, `url`, or `base64_data`.
+
+### Standalone mode
+
+If you want the MCP server on a separate port (or without the main router):
+
+```bash
+python -m simple_api_router.mcp_vision \
+    --model opencode/qwen-vl-plus \
+    --router-url http://localhost:8080 \
+    --port 8081
+```
+
+Claude Code config for standalone mode:
+
+```json
+{
+  "mcpServers": {
+    "vision": {
+      "type": "http",
+      "url": "http://localhost:8081/mcp"
+    }
+  }
+}
+```
 
 ---
 
@@ -462,7 +543,8 @@ simple_api_router/
   proxy.py            — Request routing, provider resolution, dispatch
   converter.py        — Anthropic ↔ OpenAI conversion (request/response/streaming)
   converter_google.py — Anthropic ↔ Google Gemini conversion (request/response/streaming)
-  usage_logger.py     — Per-request JSONL usage logging (router.usage.jsonl)
+  mcp_vision.py       — Vision MCP server (understand_image tool, mounted at /mcp)
+  usage_db.py         — Per-request SQLite usage logging and query helpers
   usage_cli.py        — `usage` subcommand: load/aggregate/display usage stats
   service.py          — Service management (launchd / systemd install/start/stop/…)
   logger.py           — Logging setup

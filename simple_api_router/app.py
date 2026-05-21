@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import time
 from contextlib import asynccontextmanager
@@ -11,18 +12,57 @@ from typing import Any, AsyncIterator, Dict, Optional
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from watchfiles import awatch
 
 from .config import RouterConfig, load_config
 from .debug_log import configure as configure_debug_log
 from .logger import setup_logging as setup_logger
-from .proxy import route_request, count_tokens_request
-from .usage_logger import log_usage, setup_usage_logging
+from .proxy import count_tokens_request, route_request
+from .service import LOG_DIR
+from .usage_cli import (
+    _aggregate_by_day_model,
+    _aggregate_by_model,
+    _record_cost_currency,
+    _total_agg,
+)
+from .usage_db import get_usage_db, log_usage, setup_usage_db
 
 
 def _now_local() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _parse_stats_days(raw: Optional[str]) -> int:
+    try:
+        days = int(raw or "7")
+    except ValueError:
+        days = 7
+    return max(1, min(days, 90))
+
+
+def _fmt_stat_tokens(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
+def _fmt_stat_cost(value: Optional[float], symbol: str) -> str:
+    if value in (None, 0):
+        return "-"
+    return f"{symbol}{value:.4f}"
+
+
+def _sum_usage_rows(total_agg: dict) -> dict:
+    return {
+        "requests": total_agg["requests"],
+        "input_tokens": total_agg["input_tokens"],
+        "output_tokens": total_agg["output_tokens"],
+        "cost_cny": total_agg["cost_cny"] if total_agg.get("_has_cost_cny") else None,
+        "cost_usd": total_agg["cost_usd"] if total_agg.get("_has_cost_usd") else None,
+    }
 
 
 async def _sse_with_usage(
@@ -142,11 +182,29 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         log_level=config.server.log_level,
         log_file=config.server.log_file,
     )
-    if config.server.log_file:
-        setup_usage_logging(config.server.log_file)
+    setup_usage_db(LOG_DIR / "router_usage.db")
     if config.server.debug_log:
         configure_debug_log(config.server.debug_log)
         logger.info("Debug logging enabled → %s", config.server.debug_log)
+
+    # Create vision MCP instance early (before lifespan) so its session
+    # manager can be started inside the FastAPI lifespan context.
+    # Use a list as a mutable reference so the lambda picks up hot-reloaded
+    # config values from app.state.config (set in lifespan, updated by watcher).
+    _vision_mcp = None
+    _app_ref: list = []  # populated below after app is created
+    if config.server.vision_model:
+        from .mcp_vision import create_vision_mcp
+        _vision_mcp = create_vision_mcp(
+            router_url=f"http://127.0.0.1:{config.server.port}",
+            vision_model=lambda: (
+                _app_ref[0].state.config.server.vision_model
+                if _app_ref else config.server.vision_model
+            ),
+        )
+        # Call streamable_http_app() now to initialise the session_manager.
+        _vision_mcp_asgi = _vision_mcp.streamable_http_app()
+        logger.info("Vision MCP ready at /mcp  (model: %s)", config.server.vision_model)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -167,7 +225,11 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
             )
             logger.info("Watching config file for changes: %s", config_path)
 
-        yield
+        if _vision_mcp is not None:
+            async with _vision_mcp.session_manager.run():
+                yield
+        else:
+            yield
 
         if watch_task is not None:
             watch_task.cancel()
@@ -183,8 +245,6 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         lifespan=lifespan,
     )
 
-    # ------------------------------------------------------------------
-    # POST /v1/messages/count_tokens  — token counting (used by Claude Code)
     # ------------------------------------------------------------------
     @app.post("/v1/messages/count_tokens")
     async def count_tokens(request: Request) -> Any:
@@ -283,20 +343,230 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         })
 
     # ------------------------------------------------------------------
+    # GET /stats/data
+    # ------------------------------------------------------------------
+    @app.get("/stats/data")
+    async def stats_data(request: Request) -> JSONResponse:
+        days = _parse_stats_days(request.query_params.get("days"))
+        since_epoch = time.time() - days * 86400
+        until_epoch = time.time()
+        db = get_usage_db()
+        config = request.app.state.config
+        records = db.query_raw(since_epoch, until_epoch) if db is not None else []
+        by_model_agg = _aggregate_by_model(records, config)
+        by_day_agg = _aggregate_by_day_model(records, config)
+        recent = db.query_recent(50) if db is not None else []
+
+        def _agg_row(model: str, agg: dict) -> dict:
+            return {
+                "model": model,
+                "provider": agg.get("provider", model.split("/")[0] if "/" in model else None),
+                "requests": agg["requests"],
+                "input_tokens": agg["input_tokens"],
+                "output_tokens": agg["output_tokens"],
+                "cache_read_tokens": agg["cache_read_tokens"],
+                "cache_write_tokens": agg["cache_write_tokens"],
+                "cost_cny": round(agg["cost_cny"], 6) if agg.get("_has_cost_cny") else None,
+                "cost_usd": round(agg["cost_usd"], 6) if agg.get("_has_cost_usd") else None,
+            }
+
+        by_model = [_agg_row(m, a) for m, a in sorted(by_model_agg.items(), key=lambda x: -x[1]["requests"])]
+        by_day = []
+        for day in sorted(by_day_agg.keys(), reverse=True):
+            dt = _total_agg(by_day_agg[day])
+            by_day.append({
+                "day": day,
+                "requests": dt["requests"],
+                "input_tokens": dt["input_tokens"],
+                "output_tokens": dt["output_tokens"],
+                "cache_read_tokens": dt["cache_read_tokens"],
+                "cache_write_tokens": dt["cache_write_tokens"],
+                "cost_cny": round(dt["cost_cny"], 6) if dt.get("_has_cost_cny") else None,
+                "cost_usd": round(dt["cost_usd"], 6) if dt.get("_has_cost_usd") else None,
+            })
+        return JSONResponse({
+            "period_days": days,
+            "by_model": by_model,
+            "by_day": by_day,
+            "recent": recent,
+        })
+
+    # ------------------------------------------------------------------
     # GET /stats
     # ------------------------------------------------------------------
     @app.get("/stats")
-    async def stats(request: Request) -> JSONResponse:
-        cfg: RouterConfig = request.app.state.config
-        provider_info = {}
-        for name, prov in cfg.providers.items():
-            endpoints_info = {}
-            for fmt, ep in prov.endpoints.items():
-                endpoints_info[fmt] = {
-                    "base_url": ep.resolve_base_url(fmt),
-                    "models": ep.model_names(),
-                }
-            provider_info[name] = {"endpoints": endpoints_info}
-        return JSONResponse({"providers": provider_info})
+    async def stats(request: Request) -> HTMLResponse:
+        days = _parse_stats_days(request.query_params.get("days"))
+        since_epoch = time.time() - days * 86400
+        until_epoch = time.time()
+        db = get_usage_db()
+        config = request.app.state.config
+        records = db.query_raw(since_epoch, until_epoch) if db is not None else []
+        by_model_agg = _aggregate_by_model(records, config)
+        by_day_agg = _aggregate_by_day_model(records, config)
+        recent = db.query_recent(50) if db is not None else []
+        total = _total_agg(by_model_agg)
+        summary = _sum_usage_rows(total)
+
+        def period_link(label: str, value: int) -> str:
+            cls = "tab active" if value == days else "tab"
+            return f'<a class="{cls}" href="/stats?days={value}">{label}</a>'
+
+        def by_model_rows() -> str:
+            if not by_model_agg:
+                return '<tr><td colspan="8" class="empty">No usage data</td></tr>'
+            cells = []
+            for model, agg in sorted(by_model_agg.items(), key=lambda x: -x[1]["requests"]):
+                cost_cny = round(agg["cost_cny"], 4) if agg.get("_has_cost_cny") else None
+                cost_usd = round(agg["cost_usd"], 4) if agg.get("_has_cost_usd") else None
+                cells.append(
+                    "<tr>"
+                    f"<td>{html.escape(model)}</td>"
+                    f"<td>{agg['requests']}</td>"
+                    f"<td>{_fmt_stat_tokens(agg['input_tokens'])}</td>"
+                    f"<td>{_fmt_stat_tokens(agg['output_tokens'])}</td>"
+                    f"<td>{_fmt_stat_tokens(agg['cache_write_tokens'])}</td>"
+                    f"<td>{_fmt_stat_tokens(agg['cache_read_tokens'])}</td>"
+                    f"<td>{_fmt_stat_cost(cost_cny, '¥')}</td>"
+                    f"<td>{_fmt_stat_cost(cost_usd, '$')}</td>"
+                    "</tr>"
+                )
+            return "".join(cells)
+
+        def by_day_rows() -> str:
+            if not by_day_agg:
+                return '<tr><td colspan="8" class="empty">No usage data</td></tr>'
+            cells = []
+            for day in sorted(by_day_agg.keys(), reverse=True):
+                dt = _total_agg(by_day_agg[day])
+                cost_cny = round(dt["cost_cny"], 4) if dt.get("_has_cost_cny") else None
+                cost_usd = round(dt["cost_usd"], 4) if dt.get("_has_cost_usd") else None
+                cells.append(
+                    "<tr>"
+                    f"<td>{html.escape(day)}</td>"
+                    f"<td>{dt['requests']}</td>"
+                    f"<td>{_fmt_stat_tokens(dt['input_tokens'])}</td>"
+                    f"<td>{_fmt_stat_tokens(dt['output_tokens'])}</td>"
+                    f"<td>{_fmt_stat_tokens(dt['cache_write_tokens'])}</td>"
+                    f"<td>{_fmt_stat_tokens(dt['cache_read_tokens'])}</td>"
+                    f"<td>{_fmt_stat_cost(cost_cny, '¥')}</td>"
+                    f"<td>{_fmt_stat_cost(cost_usd, '$')}</td>"
+                    "</tr>"
+                )
+            return "".join(cells)
+
+        def recent_rows() -> str:
+            if not recent:
+                return '<tr><td colspan="8" class="empty">No usage data</td></tr>'
+            cells = []
+            for row in recent:
+                result = _record_cost_currency(row, config)
+                if result:
+                    cost, currency = result
+                    cost_str = f"¥{cost:.4f}" if currency.upper() != "USD" else f"${cost:.4f}"
+                else:
+                    cost_str = "-"
+                cells.append(
+                    "<tr>"
+                    f"<td>{html.escape(row.get('ts', ''))}</td>"
+                    f"<td>{html.escape(row.get('model', ''))}</td>"
+                    f"<td>{_fmt_stat_tokens(row.get('input_tokens', 0))}</td>"
+                    f"<td>{_fmt_stat_tokens(row.get('output_tokens', 0))}</td>"
+                    f"<td>{cost_str}</td>"
+                    f"<td>{'yes' if row.get('streaming') else 'no'}</td>"
+                    f"<td>{row.get('status', 0)}</td>"
+                    f"<td>{row.get('duration_ms', 0)}</td>"
+                    "</tr>"
+                )
+            return "".join(cells)
+
+        page = f"""<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\">
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+  <title>Router Stats</title>
+  <style>
+    :root {{ color-scheme: dark light; }}
+    body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; background: #111827; color: #e5e7eb; }}
+    a {{ color: inherit; text-decoration: none; }}
+    .top {{ display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }}
+    .tabs {{ display: flex; gap: 8px; flex-wrap: wrap; }}
+    .tab {{ border: 1px solid #374151; border-radius: 999px; padding: 6px 10px; color: #cbd5e1; }}
+    .tab.active {{ background: #2563eb; border-color: #2563eb; color: #fff; }}
+    .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 18px 0 24px; }}
+    .card, .panel {{ background: #111827; border: 1px solid #374151; border-radius: 12px; }}
+    .card {{ padding: 14px; }}
+    .label {{ font-size: 12px; color: #94a3b8; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .04em; }}
+    .value {{ font-size: 22px; font-weight: 600; }}
+    .panel {{ margin-top: 18px; overflow: hidden; }}
+    .panel h2 {{ margin: 0; padding: 14px 16px; font-size: 15px; border-bottom: 1px solid #374151; }}
+    .table-wrap {{ overflow-x: auto; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
+    th, td {{ padding: 10px 12px; border-bottom: 1px solid #1f2937; text-align: left; white-space: nowrap; }}
+    th {{ color: #94a3b8; font-weight: 600; }}
+    tr:last-child td {{ border-bottom: 0; }}
+    .empty {{ color: #94a3b8; text-align: center; }}
+    .muted {{ color: #94a3b8; font-size: 13px; }}
+  </style>
+</head>
+<body>
+  <div class=\"top\">
+    <div>
+      <h1 style=\"margin:0 0 6px 0;font-size:28px;\">Usage Stats</h1>
+      <div class=\"muted\">Last {days} day{'s' if days != 1 else ''} · <a href=\"/stats/data?days={days}\">JSON data</a></div>
+    </div>
+    <div class=\"tabs\">{period_link('Today', 1)}{period_link('7 days', 7)}{period_link('30 days', 30)}</div>
+  </div>
+
+  <section class=\"summary\">
+    <div class=\"card\"><div class=\"label\">Requests</div><div class=\"value\">{summary['requests']}</div></div>
+    <div class=\"card\"><div class=\"label\">Input Tokens</div><div class=\"value\">{_fmt_stat_tokens(summary['input_tokens'])}</div></div>
+    <div class=\"card\"><div class=\"label\">Output Tokens</div><div class=\"value\">{_fmt_stat_tokens(summary['output_tokens'])}</div></div>
+    <div class=\"card\"><div class=\"label\">¥ Cost</div><div class=\"value\">{_fmt_stat_cost(summary['cost_cny'], '¥')}</div></div>
+    <div class=\"card\"><div class=\"label\">$ Cost</div><div class=\"value\">{_fmt_stat_cost(summary['cost_usd'], '$')}</div></div>
+  </section>
+
+  <section class=\"panel\">
+    <h2>By Model</h2>
+    <div class=\"table-wrap\">
+      <table>
+        <thead><tr><th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache↑</th><th>Cache↓</th><th>¥ Cost</th><th>$ Cost</th></tr></thead>
+        <tbody>{by_model_rows()}</tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class=\"panel\">
+    <h2>By Day</h2>
+    <div class=\"table-wrap\">
+      <table>
+        <thead><tr><th>Day</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache↑</th><th>Cache↓</th><th>¥ Cost</th><th>$ Cost</th></tr></thead>
+        <tbody>{by_day_rows()}</tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class=\"panel\">
+    <h2>Recent Requests</h2>
+    <div class=\"table-wrap\">
+      <table>
+        <thead><tr><th>ts</th><th>model</th><th>in</th><th>out</th><th>¥/$ cost</th><th>streaming</th><th>status</th><th>ms</th></tr></thead>
+        <tbody>{recent_rows()}</tbody>
+      </table>
+    </div>
+  </section>
+</body>
+</html>
+"""
+        return HTMLResponse(page)
+
+    # ------------------------------------------------------------------
+    # Vision MCP — mount LAST so FastAPI routes take priority.
+    # session_manager is started in lifespan above.
+    # ------------------------------------------------------------------
+    if _vision_mcp is not None:
+        _app_ref.append(app)          # let the lambda above read live config
+        app.mount("/", _vision_mcp_asgi)
 
     return app

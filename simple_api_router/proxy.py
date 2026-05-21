@@ -9,6 +9,8 @@ Handles:
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 import json
 import re
 import secrets
@@ -407,6 +409,197 @@ def _request_has_media(body: Dict[str, Any]) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Image description cache  (lazy init — DB path comes from service.LOG_DIR)
+# ---------------------------------------------------------------------------
+
+_image_desc_cache: Optional["ImageDescriptionCache"] = None  # type: ignore[name-defined]
+
+
+def _get_image_cache() -> "ImageDescriptionCache":  # type: ignore[name-defined]
+    global _image_desc_cache
+    if _image_desc_cache is None:
+        from .image_cache import ImageDescriptionCache
+        from .service import LOG_DIR
+        _image_desc_cache = ImageDescriptionCache(LOG_DIR / "image_cache.db")
+    return _image_desc_cache
+
+
+async def _image_block_to_base64(
+    block: dict,
+    client: httpx.AsyncClient,
+) -> Optional[tuple]:
+    """Normalise an image/video block to ``(bytes, media_type)``.
+
+    - ``base64`` source: decode in-place, no network request needed.
+    - ``url`` source: fetch the URL once so we can (a) compute a content MD5
+      for caching, (b) forward bytes to the vision model without a second
+      fetch (also works for intranet URLs that the upstream provider can't
+      reach).
+    - ``file`` source: read bytes from disk.
+
+    Returns ``None`` on any failure; callers fall back to passing the
+    original block.
+    """
+    import base64 as _b64
+
+    source = block.get("source", {})
+    src_type = source.get("type")
+
+    if src_type == "base64":
+        try:
+            raw = _b64.b64decode(source.get("data", ""))
+            return raw, source.get("media_type", "image/png")
+        except Exception:
+            return None
+
+    if src_type == "url":
+        url = source.get("url", "")
+        try:
+            resp = await client.get(url, timeout=httpx.Timeout(30.0), follow_redirects=True)
+            if resp.status_code == 200:
+                mt = resp.headers.get("content-type", "image/png").split(";")[0].strip()
+                return resp.content, mt
+        except Exception as exc:
+            logger.warning("Failed to fetch image URL %s: %s", url, exc)
+        return None
+
+    if src_type == "file":
+        path = source.get("path", "")
+        try:
+            raw = open(path, "rb").read()
+            return raw, source.get("media_type", "image/png")
+        except Exception as exc:
+            logger.warning("Failed to read image file %s: %s", path, exc)
+        return None
+
+    return None
+
+
+async def _describe_images_in_body(
+    body: Dict[str, Any],
+    fallback_model: str,
+    router_port: int,
+    client: httpx.AsyncClient,
+) -> Dict[str, Any]:
+    """Replace every image/video block in *body* with a text description.
+
+    Uses *fallback_model* (the configured ``multimodal_fallback``) to describe
+    each image.  Descriptions are cached to disk:
+    - URL images:          key = URL,         TTL = 1 hour
+    - base64 / file images: key = content MD5, TTL = 30 days
+    """
+    import base64 as _b64
+    from .image_cache import URL_TTL, CONTENT_TTL
+
+    describe_url = f"http://127.0.0.1:{router_port}/v1/messages"
+    cache = _get_image_cache()
+
+    async def describe_block(block: dict) -> dict:
+        source = block.get("source", {})
+        src_type = source.get("type")
+
+        # --- Determine cache key and vision block ---
+        if src_type == "url":
+            # URL: cache by URL (TTL 1h); forward original URL block to model
+            cache_key = f"url:{source.get('url', '')}"
+            cache_ttl = URL_TTL
+            cached = cache.get(cache_key)
+            if cached is not None:
+                logger.debug("Image cache hit (url): %s", cache_key[4:60])
+                return {"type": "text", "text": f"[Image: {cached}]"}
+            vision_block = block  # let the vision model fetch the URL itself
+
+        else:
+            # base64 / file: fetch bytes → MD5 key (TTL 30d)
+            fetched = await _image_block_to_base64(block, client)
+            if fetched is not None:
+                image_bytes, media_type = fetched
+                cache_key = hashlib.md5(image_bytes).hexdigest()
+                cache_ttl = CONTENT_TTL
+                cached = cache.get(cache_key)
+                if cached is not None:
+                    logger.debug("Image cache hit (md5): %s", cache_key[:16])
+                    return {"type": "text", "text": f"[Image: {cached}]"}
+                vision_block = {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": _b64.b64encode(image_bytes).decode(),
+                    },
+                }
+            else:
+                cache_key = None
+                cache_ttl = 0.0
+                vision_block = block  # best-effort
+
+        # --- Call vision model ---
+        try:
+            resp = await client.post(
+                describe_url,
+                json={
+                    "model": fallback_model,
+                    "max_tokens": 1024,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            vision_block,
+                            {"type": "text", "text": (
+                                "Describe this image in detail. "
+                                "Include all visible text, UI elements, layout, and content."
+                            )},
+                        ],
+                    }],
+                },
+                headers={"content-type": "application/json"},
+                timeout=httpx.Timeout(60.0),
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                description = "\n".join(
+                    b["text"] for b in data.get("content", []) if b.get("type") == "text"
+                )
+                if cache_key:
+                    cache.set(cache_key, description, cache_ttl)
+                return {"type": "text", "text": f"[Image: {description}]"}
+        except Exception as exc:
+            logger.warning("Failed to describe image block: %s", exc)
+        return {"type": "text", "text": "[Image: (description unavailable)]"}
+
+    async def process_blocks(blocks: list) -> list:
+        result = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                result.append(block)
+                continue
+            btype = block.get("type")
+            if btype in ("image", "video"):
+                result.append(await describe_block(block))
+            elif btype == "document" and (block.get("source") or {}).get("type") != "text":
+                result.append({"type": "text", "text": "[Document: binary content omitted]"})
+            elif btype == "tool_result":
+                nested = block.get("content", "")
+                if isinstance(nested, list):
+                    block = dict(block)
+                    block["content"] = await process_blocks(nested)
+                result.append(block)
+            else:
+                result.append(block)
+        return result
+
+    body = copy.deepcopy(body)
+    new_messages = []
+    for msg in body.get("messages", []):
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            msg = dict(msg)
+            msg["content"] = await process_blocks(content)
+        new_messages.append(msg)
+    body["messages"] = new_messages
+    return body
+
+
 def resolve_provider(
     provider_name: Optional[str],
     model: str,
@@ -502,28 +695,24 @@ async def route_request(
     provider, endpoint, api_format, backend_model = resolve_provider(provider_name, model, config)
     max_retries = config.server.max_retries
 
-    # Multimodal fallback: if the resolved model is text-only and the request contains
-    # image or video blocks, re-route to a multimodal model instead of forwarding and
-    # letting the upstream return a (confusing) format error.
+    # Multimodal handling: if the resolved model is text-only and the request
+    # contains image/video/PDF content, auto-describe using multimodal_fallback.
+    # vision_model is reserved for the MCP server only.
     if _request_has_media(body):
         entry = endpoint.get_model_entry(model)
         if entry.text_only:
             fallback = entry.multimodal_fallback or config.server.multimodal_fallback
             if fallback:
                 logger.info(
-                    "text_only model '%s' received media content; routing to multimodal fallback: %s",
+                    "text_only model '%s' received media; auto-describing via '%s'",
                     model, fallback,
                 )
-                fb_provider_name, fb_model = parse_model(fallback)
-                provider, endpoint, api_format, backend_model = resolve_provider(
-                    fb_provider_name, fb_model, config
+                body = await _describe_images_in_body(
+                    body, fallback, config.server.port, client
                 )
-                # Update provider_name/model so usage_meta and effort resolution use the fallback model.
-                provider_name, model = fb_provider_name, fb_model
-                model_str = f"{provider_name}/{model}" if provider_name else model
             else:
                 logger.warning(
-                    "text_only model '%s' received media content but no multimodal_fallback "
+                    "text_only model '%s' received media but no multimodal_fallback "
                     "is configured — forwarding anyway",
                     model,
                 )

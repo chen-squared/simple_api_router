@@ -5,3 +5,4 @@ pyyaml>=6.0.1
 pydantic>=2.7.0
 python-dotenv>=1.0.1
 watchfiles>=0.21.0
+mcp>=1.0.0
