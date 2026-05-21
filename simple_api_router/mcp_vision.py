@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import mimetypes
 import sys
 from pathlib import Path
@@ -59,6 +60,7 @@ def create_vision_mcp(
             "visual content. Provide a local file path, an HTTPS URL, or raw "
             "base64 image data."
         ),
+        stateless_http=True,  # each POST is independent; fully concurrent
     )
 
     messages_url = router_url.rstrip("/") + "/v1/messages"
@@ -106,13 +108,14 @@ def create_vision_mcp(
         else:
             return "Error: provide one of path, url, or base64_data."
 
-        # ── Call router ──────────────────────────────────────────────────
+        # ── Call router (streaming to avoid read-timeout on slow models) ──
         current_model = get_model()
         if not current_model:
             return "Error: vision_model is not configured."
         body = {
             "model": current_model,
             "max_tokens": max_tokens,
+            "stream": True,  # streaming resets read-timeout per chunk
             "messages": [
                 {
                     "role": "user",
@@ -121,19 +124,35 @@ def create_vision_mcp(
             ],
         }
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
-                resp = await client.post(
+            # connect_timeout: time to establish the TCP connection
+            # read_timeout:    time between receiving successive chunks (NOT total)
+            #                  → slow models are fine as long as each chunk arrives
+            #                    within this window; effectively no overall timeout
+            timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=5.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream(
+                    "POST",
                     messages_url,
                     json=body,
                     headers={"content-type": "application/json"},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                blocks = data.get("content", [])
-                return (
-                    "\n".join(b["text"] for b in blocks if b.get("type") == "text")
-                    or "(no text response)"
-                )
+                ) as resp:
+                    resp.raise_for_status()
+                    text_parts: list[str] = []
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        payload = line[6:].strip()
+                        if payload in ("", "[DONE]"):
+                            continue
+                        try:
+                            event = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+                        if event.get("type") == "content_block_delta":
+                            delta = event.get("delta", {})
+                            if delta.get("type") == "text_delta":
+                                text_parts.append(delta.get("text", ""))
+                    return "".join(text_parts) or "(no text response)"
         except httpx.HTTPStatusError as exc:
             return f"Router error {exc.response.status_code}: {exc.response.text[:500]}"
         except Exception as exc:
