@@ -252,9 +252,28 @@ async def _stream_converted_with_retry(
         committed = False
         early_error = False
         # Track currently-open content block for graceful mid-stream termination.
-        open_block_index: Optional[int] = None
-        open_block_type: Optional[str] = None  # "text" | "thinking" | …
-        last_seen_index: int = -1
+        # Use a dict so the inner helper can mutate state without nonlocal.
+        _bs: Dict[str, Any] = {"index": None, "type": None, "last_seen": -1}
+
+        def _track_block(chunk: bytes) -> None:
+            """Update _bs from a single SSE chunk."""
+            try:
+                for line in chunk.decode(errors="replace").split("\n"):
+                    if line.startswith("data: "):
+                        evt = json.loads(line[6:])
+                        etype = evt.get("type", "")
+                        if etype == "content_block_start":
+                            _bs["index"] = evt.get("index", 0)
+                            _bs["type"] = evt.get("content_block", {}).get("type")
+                            _bs["last_seen"] = _bs["index"]
+                        elif etype == "content_block_stop":
+                            if _bs["index"] is not None:
+                                _bs["last_seen"] = _bs["index"]
+                            _bs["index"] = None
+                            _bs["type"] = None
+                        break
+            except Exception:
+                pass
 
         async for chunk in _stream_converted(resp, make_stream, url, debug_id=debug_id):
             if committed:
@@ -265,32 +284,15 @@ async def _stream_converted_with_retry(
                     logger.warning(
                         "Mid-stream failure from %s (committed, open block: %s #%s) "
                         "— sending graceful termination",
-                        url, open_block_type, open_block_index,
+                        url, _bs["type"], _bs["index"],
                     )
                     for term_chunk in _graceful_stream_termination(
-                        open_block_index, open_block_type, last_seen_index
+                        _bs["index"], _bs["type"], _bs["last_seen"]
                     ):
                         yield term_chunk
                     return
                 yield chunk
-                # Update block state tracking after delivering the chunk.
-                try:
-                    for line in chunk.decode(errors="replace").split("\n"):
-                        if line.startswith("data: "):
-                            evt = json.loads(line[6:])
-                            etype = evt.get("type", "")
-                            if etype == "content_block_start":
-                                open_block_index = evt.get("index", 0)
-                                open_block_type = evt.get("content_block", {}).get("type")
-                                last_seen_index = open_block_index
-                            elif etype == "content_block_stop":
-                                if open_block_index is not None:
-                                    last_seen_index = open_block_index
-                                open_block_index = None
-                                open_block_type = None
-                            break
-                except Exception:
-                    pass
+                _track_block(chunk)
                 continue
             buffer.append(chunk)
             # A chunk from the converter is always a single SSE event.
@@ -302,6 +304,7 @@ async def _stream_converted_with_retry(
                 committed = True
                 for c in buffer:
                     yield c
+                    _track_block(c)   # track buffered chunks too (includes content_block_start)
                 buffer.clear()
 
         if not early_error:

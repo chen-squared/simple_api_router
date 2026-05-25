@@ -1,6 +1,8 @@
 """Tests for proxy routing helpers — multimodal detection and fallback logic."""
 from __future__ import annotations
 
+import asyncio
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -12,7 +14,15 @@ from simple_api_router.config import (
     RouterConfig,
     ServerConfig,
 )
-from simple_api_router.proxy import _blocks_have_media, _request_has_media, parse_model, resolve_provider
+from simple_api_router.proxy import (
+    _blocks_have_media,
+    _graceful_stream_termination,
+    _request_has_media,
+    _stream_converted_with_retry,
+    _upstream_error_sse,
+    parse_model,
+    resolve_provider,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -764,3 +774,328 @@ class TestPricingConfig(unittest.TestCase):
         cost = _record_cost(self._rec("p/m", 50_000, 0, cr=10_000), config)
         expected = 50_000 / 1e6 * 1.0
         self.assertAlmostEqual(cost, expected)
+
+
+# ---------------------------------------------------------------------------
+# _graceful_stream_termination
+# ---------------------------------------------------------------------------
+
+def _parse_events(chunks: list[bytes]) -> list[dict]:
+    """Parse a list of SSE byte chunks into a list of dicts with 'event' and 'data'."""
+    result = []
+    for chunk in chunks:
+        text = chunk.decode()
+        event_type = None
+        data = None
+        for line in text.split("\n"):
+            if line.startswith("event: "):
+                event_type = line[7:].strip()
+            elif line.startswith("data: "):
+                data = json.loads(line[6:].strip())
+        if event_type and data is not None:
+            result.append({"event": event_type, "data": data})
+    return result
+
+
+class TestGracefulStreamTermination(unittest.TestCase):
+    """Unit tests for _graceful_stream_termination()."""
+
+    def _run(self, open_block_index, open_block_type, last_seen_index=0):
+        chunks = _graceful_stream_termination(open_block_index, open_block_type, last_seen_index)
+        return _parse_events(chunks)
+
+    def _types(self, events):
+        return [e["data"]["type"] for e in events]
+
+    # ── Case 1: open text block ───────────────────────────────────────────
+
+    def test_open_text_block_appends_notice_then_closes(self):
+        events = self._run(open_block_index=1, open_block_type="text")
+        types = self._types(events)
+        self.assertEqual(types, [
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+        ])
+
+    def test_open_text_block_notice_text_contains_retry_message(self):
+        events = self._run(open_block_index=1, open_block_type="text")
+        delta_event = events[0]["data"]
+        self.assertEqual(delta_event["index"], 1)
+        self.assertIn("please retry", delta_event["delta"]["text"].lower())
+
+    def test_open_text_block_stop_has_correct_index(self):
+        events = self._run(open_block_index=2, open_block_type="text")
+        stop = events[1]["data"]
+        self.assertEqual(stop["type"], "content_block_stop")
+        self.assertEqual(stop["index"], 2)
+
+    def test_open_text_block_ends_with_end_turn(self):
+        events = self._run(open_block_index=0, open_block_type="text")
+        msg_delta = events[-2]["data"]
+        self.assertEqual(msg_delta["delta"]["stop_reason"], "end_turn")
+
+    # ── Case 2: open thinking block ──────────────────────────────────────
+
+    def test_open_thinking_block_closes_then_adds_text_block(self):
+        events = self._run(open_block_index=0, open_block_type="thinking")
+        types = self._types(events)
+        self.assertEqual(types, [
+            "content_block_stop",    # close thinking
+            "content_block_start",   # new text block
+            "content_block_delta",   # notice text
+            "content_block_stop",    # close text
+            "message_delta",
+            "message_stop",
+        ])
+
+    def test_open_thinking_block_new_text_index_is_incremented(self):
+        events = self._run(open_block_index=0, open_block_type="thinking")
+        new_text_start = events[1]["data"]
+        self.assertEqual(new_text_start["index"], 1)
+        self.assertEqual(new_text_start["content_block"]["type"], "text")
+
+    def test_open_thinking_block_notice_contains_retry_message(self):
+        events = self._run(open_block_index=0, open_block_type="thinking")
+        delta = events[2]["data"]
+        self.assertIn("please retry", delta["delta"]["text"].lower())
+
+    def test_open_thinking_block_ends_with_end_turn(self):
+        events = self._run(open_block_index=0, open_block_type="thinking")
+        self.assertEqual(events[-2]["data"]["delta"]["stop_reason"], "end_turn")
+
+    # ── Case 3: no open block (failure between blocks) ───────────────────
+
+    def test_no_open_block_adds_standalone_text_block(self):
+        events = self._run(open_block_index=None, open_block_type=None, last_seen_index=1)
+        types = self._types(events)
+        self.assertEqual(types, [
+            "content_block_start",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+        ])
+
+    def test_no_open_block_index_is_last_seen_plus_one(self):
+        events = self._run(open_block_index=None, open_block_type=None, last_seen_index=3)
+        self.assertEqual(events[0]["data"]["index"], 4)
+
+    def test_no_open_block_ends_with_end_turn(self):
+        events = self._run(open_block_index=None, open_block_type=None, last_seen_index=0)
+        self.assertEqual(events[-2]["data"]["delta"]["stop_reason"], "end_turn")
+
+    # ── Always ends with message_stop ────────────────────────────────────
+
+    def test_always_ends_with_message_stop(self):
+        for args in [
+            (0, "text"),
+            (0, "thinking"),
+            (None, None),
+        ]:
+            with self.subTest(args=args):
+                events = self._run(*args)
+                self.assertEqual(events[-1]["data"]["type"], "message_stop")
+
+
+# ---------------------------------------------------------------------------
+# _stream_converted_with_retry — graceful termination integration
+# ---------------------------------------------------------------------------
+
+def _make_sse(event_type: str, data: dict) -> bytes:
+    return f"event: {event_type}\ndata: {json.dumps(data)}\n\n".encode()
+
+
+async def _collect_async(agen) -> list[bytes]:
+    result = []
+    async for item in agen:
+        result.append(item)
+    return result
+
+
+class TestStreamConvertedWithRetryGraceful(unittest.TestCase):
+    """Integration tests for the graceful mid-stream termination path."""
+
+    def _run_retry(self, chunks_per_attempt: list[list[bytes]], max_retries: int = 1) -> list[bytes]:
+        """Run _stream_converted_with_retry with fake upstream chunks."""
+        attempt_idx = [0]
+
+        async def fake_make_stream(raw_iter):
+            """Identity: pass raw SSE chunks straight through."""
+            async for chunk in raw_iter:
+                yield chunk
+
+        import httpx
+
+        async def run():
+            call_count = [0]
+            responses = []
+            for chunks in chunks_per_attempt:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+
+                async def aiter_bytes(c=chunks):
+                    for chunk in c:
+                        yield chunk
+
+                mock_resp.aiter_bytes = lambda c=chunks: aiter_bytes(c)
+                mock_resp.aclose = AsyncMock()
+                responses.append(mock_resp)
+
+            first_resp = responses[0]
+
+            mock_client = MagicMock()
+            resp_iter = iter(responses[1:])
+
+            async def fake_send(req, stream=False):
+                return next(resp_iter)
+
+            mock_client.build_request = MagicMock(return_value=MagicMock())
+            mock_client.send = fake_send
+
+            gen = _stream_converted_with_retry(
+                first_resp=first_resp,
+                client=mock_client,
+                url="http://fake/v1/messages",
+                headers={},
+                body={},
+                make_stream=fake_make_stream,
+                max_retries=max_retries,
+            )
+            return await _collect_async(gen)
+
+        return asyncio.get_event_loop().run_until_complete(run())
+
+    def _events(self, chunks: list[bytes]) -> list[dict]:
+        return _parse_events(chunks)
+
+    def _types(self, chunks: list[bytes]) -> list[str]:
+        return [e["data"]["type"] for e in self._events(chunks)]
+
+    # ── Normal path: verify it still works ───────────────────────────────
+
+    def test_normal_stream_passes_through_unchanged(self):
+        """A clean stream with no errors must reach the client intact."""
+        chunks = [
+            _make_sse("message_start", {"type": "message_start", "message": {"id": "m1", "usage": {}}}),
+            _make_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            _make_sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello"}}),
+            _make_sse("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            _make_sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}}),
+            _make_sse("message_stop", {"type": "message_stop"}),
+        ]
+        result = self._run_retry([chunks])
+        types = self._types(result)
+        # All original events must appear
+        self.assertIn("message_start", types)
+        self.assertIn("content_block_start", types)
+        self.assertIn("content_block_delta", types)
+        self.assertIn("content_block_stop", types)
+        self.assertIn("message_delta", types)
+        self.assertIn("message_stop", types)
+        # No error event injected
+        event_names = [e["event"] for e in self._events(result)]
+        self.assertNotIn("error", event_names)
+
+    def test_normal_stream_last_event_is_message_stop(self):
+        chunks = [
+            _make_sse("message_start", {"type": "message_start", "message": {"id": "m1", "usage": {}}}),
+            _make_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            _make_sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hi"}}),
+            _make_sse("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            _make_sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}}),
+            _make_sse("message_stop", {"type": "message_stop"}),
+        ]
+        result = self._run_retry([chunks])
+        self.assertEqual(self._types(result)[-1], "message_stop")
+
+    # ── Graceful termination: mid-stream error after text block opens ─────
+
+    def test_midstream_error_in_text_block_triggers_graceful_termination(self):
+        """Error arriving mid-text must close the block and end with message_stop."""
+        pre = [
+            _make_sse("message_start", {"type": "message_start", "message": {"id": "m1", "usage": {}}}),
+            _make_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            _make_sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Partial"}}),
+        ]
+        error_chunk = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"peer closed\"}}\n\n"
+        result = self._run_retry([pre + [error_chunk]])
+        types = self._types(result)
+        # Must end with message_stop
+        self.assertEqual(types[-1], "message_stop")
+        # message_delta with end_turn must be present
+        self.assertIn("message_delta", types)
+        # content_block_stop must follow to close the open text block
+        self.assertIn("content_block_stop", types)
+        # No raw error event forwarded to client
+        event_names = [e["event"] for e in self._events(result)]
+        self.assertNotIn("error", event_names)
+
+    def test_midstream_error_in_text_block_appends_notice(self):
+        """Notice text must be appended to the still-open text block."""
+        pre = [
+            _make_sse("message_start", {"type": "message_start", "message": {"id": "m1", "usage": {}}}),
+            _make_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            _make_sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Partial text"}}),
+        ]
+        error_chunk = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"dropped\"}}\n\n"
+        result = self._run_retry([pre + [error_chunk]])
+        events = self._events(result)
+        # Find the injected delta (the notice)
+        injected_deltas = [
+            e for e in events
+            if e["data"].get("type") == "content_block_delta"
+            and "retry" in e["data"].get("delta", {}).get("text", "").lower()
+        ]
+        self.assertTrue(len(injected_deltas) >= 1, "Expected a notice delta to be injected")
+
+    # ── Graceful termination: mid-stream error during thinking block ──────
+
+    def test_midstream_error_in_thinking_block_adds_new_text_block(self):
+        """Error during thinking must close thinking and open a fresh text block."""
+        pre = [
+            _make_sse("message_start", {"type": "message_start", "message": {"id": "m1", "usage": {}}}),
+            _make_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}),
+            _make_sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "I am thinking..."}}),
+        ]
+        error_chunk = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"dropped\"}}\n\n"
+        result = self._run_retry([pre + [error_chunk]])
+        events = self._events(result)
+        types = self._types(result)
+        # Must end with message_stop, no error forwarded
+        self.assertEqual(types[-1], "message_stop")
+        event_names = [e["event"] for e in events]
+        self.assertNotIn("error", event_names)
+        # A new text block (index 1) must be started
+        new_starts = [
+            e for e in events
+            if e["data"].get("type") == "content_block_start"
+            and e["data"].get("index") == 1
+            and e["data"].get("content_block", {}).get("type") == "text"
+        ]
+        self.assertTrue(len(new_starts) == 1, "Expected a new text block at index 1")
+
+    # ── Early error (not committed): still retries ────────────────────────
+
+    def test_early_error_before_content_retries(self):
+        """Error before any content_block_start/delta must trigger a retry."""
+        preamble_only = [
+            _make_sse("message_start", {"type": "message_start", "message": {"id": "m1", "usage": {}}}),
+            b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"overloaded\"}}\n\n",
+        ]
+        good = [
+            _make_sse("message_start", {"type": "message_start", "message": {"id": "m2", "usage": {}}}),
+            _make_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            _make_sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Retried OK"}}),
+            _make_sse("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            _make_sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}}),
+            _make_sse("message_stop", {"type": "message_stop"}),
+        ]
+        result = self._run_retry([preamble_only, good], max_retries=1)
+        types = self._types(result)
+        # Good response content must come through
+        deltas = [e for e in self._events(result) if e["data"].get("type") == "content_block_delta"]
+        texts = [e["data"]["delta"].get("text", "") for e in deltas]
+        self.assertIn("Retried OK", texts)
+        self.assertEqual(types[-1], "message_stop")
