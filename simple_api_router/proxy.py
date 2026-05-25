@@ -251,10 +251,46 @@ async def _stream_converted_with_retry(
         buffer: List[bytes] = []
         committed = False
         early_error = False
+        # Track currently-open content block for graceful mid-stream termination.
+        open_block_index: Optional[int] = None
+        open_block_type: Optional[str] = None  # "text" | "thinking" | …
+        last_seen_index: int = -1
 
         async for chunk in _stream_converted(resp, make_stream, url, debug_id=debug_id):
             if committed:
+                if chunk.startswith(b"event: error\n"):
+                    # Mid-stream failure AFTER content has already been sent.
+                    # Can't retry (HTTP 200 + content already out). Close gracefully
+                    # so the client sees a valid complete message, not a crash.
+                    logger.warning(
+                        "Mid-stream failure from %s (committed, open block: %s #%s) "
+                        "— sending graceful termination",
+                        url, open_block_type, open_block_index,
+                    )
+                    for term_chunk in _graceful_stream_termination(
+                        open_block_index, open_block_type, last_seen_index
+                    ):
+                        yield term_chunk
+                    return
                 yield chunk
+                # Update block state tracking after delivering the chunk.
+                try:
+                    for line in chunk.decode(errors="replace").split("\n"):
+                        if line.startswith("data: "):
+                            evt = json.loads(line[6:])
+                            etype = evt.get("type", "")
+                            if etype == "content_block_start":
+                                open_block_index = evt.get("index", 0)
+                                open_block_type = evt.get("content_block", {}).get("type")
+                                last_seen_index = open_block_index
+                            elif etype == "content_block_stop":
+                                if open_block_index is not None:
+                                    last_seen_index = open_block_index
+                                open_block_index = None
+                                open_block_type = None
+                            break
+                except Exception:
+                    pass
                 continue
             buffer.append(chunk)
             # A chunk from the converter is always a single SSE event.
@@ -353,6 +389,79 @@ def _upstream_error_json(exc: Any) -> Dict[str, Any]:
 def _upstream_error_sse(exc: Any) -> bytes:
     data = json.dumps(_upstream_error_json(exc))
     return f"event: error\ndata: {data}\n\n".encode()
+
+
+def _graceful_stream_termination(
+    open_block_index: Optional[int],
+    open_block_type: Optional[str],
+    last_seen_index: int,
+) -> List[bytes]:
+    """SSE events to cleanly finish a committed but interrupted stream.
+
+    Closes any open content block and appends a brief notice so the client
+    receives a structurally valid complete message instead of a protocol error.
+    """
+    events: List[bytes] = []
+    notice = "[Connection lost mid-response — please retry.]"
+
+    if open_block_index is not None:
+        if open_block_type == "text":
+            # Append notice to the still-open text block, then close it.
+            events.append(_sse_bytes("content_block_delta", {
+                "type": "content_block_delta",
+                "index": open_block_index,
+                "delta": {"type": "text_delta", "text": f"\n\n{notice}"},
+            }))
+            events.append(_sse_bytes("content_block_stop", {
+                "type": "content_block_stop",
+                "index": open_block_index,
+            }))
+        else:
+            # thinking or other block type — close it, then add a new text block.
+            events.append(_sse_bytes("content_block_stop", {
+                "type": "content_block_stop",
+                "index": open_block_index,
+            }))
+            next_idx = open_block_index + 1
+            events.append(_sse_bytes("content_block_start", {
+                "type": "content_block_start",
+                "index": next_idx,
+                "content_block": {"type": "text", "text": ""},
+            }))
+            events.append(_sse_bytes("content_block_delta", {
+                "type": "content_block_delta",
+                "index": next_idx,
+                "delta": {"type": "text_delta", "text": notice},
+            }))
+            events.append(_sse_bytes("content_block_stop", {
+                "type": "content_block_stop",
+                "index": next_idx,
+            }))
+    else:
+        # No block open — failure between blocks. Add a standalone notice.
+        next_idx = last_seen_index + 1
+        events.append(_sse_bytes("content_block_start", {
+            "type": "content_block_start",
+            "index": next_idx,
+            "content_block": {"type": "text", "text": ""},
+        }))
+        events.append(_sse_bytes("content_block_delta", {
+            "type": "content_block_delta",
+            "index": next_idx,
+            "delta": {"type": "text_delta", "text": notice},
+        }))
+        events.append(_sse_bytes("content_block_stop", {
+            "type": "content_block_stop",
+            "index": next_idx,
+        }))
+
+    events.append(_sse_bytes("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+        "usage": {"output_tokens": 0},
+    }))
+    events.append(_sse_bytes("message_stop", {"type": "message_stop"}))
+    return events
 
 
 # ---------------------------------------------------------------------------
