@@ -273,11 +273,11 @@ async def _stream_converted_with_retry(
                             _bs["type"] = None
                         break
             except Exception:
-                pass
+                logger.debug("_track_block parse failure", exc_info=True)
 
         async for chunk in _stream_converted(resp, make_stream, url, debug_id=debug_id):
             if committed:
-                if chunk.startswith(b"event: error\n"):
+                if _sse_event_type(chunk) == "error":
                     # Mid-stream failure AFTER content has already been sent.
                     # Can't retry (HTTP 200 + content already out). Close gracefully
                     # so the client sees a valid complete message, not a crash.
@@ -295,12 +295,11 @@ async def _stream_converted_with_retry(
                 _track_block(chunk)
                 continue
             buffer.append(chunk)
-            # A chunk from the converter is always a single SSE event.
-            if chunk.startswith(b"event: error\n"):
+            if _sse_event_type(chunk) == "error":
                 early_error = True
                 break
             # Real content has started — commit and flush the buffer.
-            if b"content_block_start" in chunk or b"content_block_delta" in chunk:
+            if _sse_event_type(chunk) in ("content_block_start", "content_block_delta"):
                 committed = True
                 for c in buffer:
                     yield c
@@ -342,6 +341,17 @@ async def _stream_converted_with_retry(
         logger.warning("All %d stream retries exhausted (early in-stream error) for %s", max_retries, url)
         for c in buffer:
             yield c
+
+
+def _sse_event_type(chunk: bytes) -> Optional[str]:
+    """Extract the SSE event type from a raw chunk, or None on parse failure."""
+    try:
+        for line in chunk.decode(errors="replace").split("\n"):
+            if line.startswith("event: "):
+                return line[7:].strip()
+    except Exception:
+        pass
+    return None
 
 
 def _buffer_event_summary(buffer: List[bytes]) -> str:
@@ -597,6 +607,7 @@ async def _describe_images_in_body(
     fallback_model: str,
     router_port: int,
     client: httpx.AsyncClient,
+    max_concurrency: int = 3,
 ) -> Dict[str, Any]:
     """Replace every image/video block in *body* with a text description.
 
@@ -608,6 +619,7 @@ async def _describe_images_in_body(
     import base64 as _b64
     from .image_cache import URL_TTL, CONTENT_TTL
 
+    sem = asyncio.Semaphore(max_concurrency)
     describe_url = f"http://127.0.0.1:{router_port}/v1/messages"
     cache = _get_image_cache()
 
@@ -721,7 +733,10 @@ async def _describe_images_in_body(
                     indices.append((i, "tool_result"))
 
         if tasks:
-            resolved = await asyncio.gather(*tasks)
+            async def _run_with_limit(coro):
+                async with sem:
+                    return await coro
+            resolved = await asyncio.gather(*(_run_with_limit(t) for t in tasks))
             for (i, kind), value in zip(indices, resolved):
                 if kind == "replace":
                     result[i] = value
@@ -852,7 +867,8 @@ async def route_request(
                     model, fallback,
                 )
                 body = await _describe_images_in_body(
-                    body, fallback, config.server.port, client
+                    body, fallback, config.server.port, client,
+                    max_concurrency=config.server.multimodal_fallback_max_concurrency,
                 )
             else:
                 logger.warning(

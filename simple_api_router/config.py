@@ -1,6 +1,7 @@
 """Configuration models and loader."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
+
+_log = logging.getLogger(__name__)
 
 VALID_FORMATS = frozenset({"anthropic", "openai_chat", "openai_responses", "google"})
 
@@ -28,6 +31,9 @@ class ServerConfig(BaseModel):
     # Global fallback model for text-only models that receive image/video content.
     # Value is "provider/model" (same format as the client `model` field).
     multimodal_fallback: Optional[str] = None
+    # Max concurrent image description calls during multimodal fallback.
+    # Prevents overwhelming the fallback provider with too many parallel requests.
+    multimodal_fallback_max_concurrency: int = 3
     # Path to debug log file.  When set, all 4 request/response stages are
     # appended to this file for every request.  None = disabled.
     debug_log: Optional[str] = None
@@ -115,6 +121,12 @@ class ProviderConfig(BaseModel):
         normalized: Dict[str, "EndpointConfig"] = {}
         for fmt, ep in self.endpoints.items():
             norm = fmt.replace("-", "_")
+            if norm in normalized:
+                _log.warning(
+                    "Duplicate endpoint format key '%s': both '%s' and the "
+                    "earlier key map to the same format; last value wins",
+                    norm, fmt,
+                )
             normalized[norm] = ep
         self.endpoints = normalized
 

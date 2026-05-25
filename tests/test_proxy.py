@@ -1099,3 +1099,52 @@ class TestStreamConvertedWithRetryGraceful(unittest.TestCase):
         texts = [e["data"]["delta"].get("text", "") for e in deltas]
         self.assertIn("Retried OK", texts)
         self.assertEqual(types[-1], "message_stop")
+
+    # ── Block tracking during buffer flush ────────────────────────────────
+
+    def test_buffer_flush_tracks_thinking_block_type(self):
+        """content_block_start in the buffer must be tracked so graceful
+        termination closes it as thinking, not as text."""
+        # message_start first (goes in buffer), then content_block_start
+        # triggers flush, then error should see _bs["type"] == "thinking"
+        chunks = [
+            _make_sse("message_start", {"type": "message_start", "message": {"id": "m1", "usage": {}}}),
+            _make_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}),
+            b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"gone\"}}\n\n",
+        ]
+        result = self._run_retry([chunks])
+        events = self._events(result)
+        types = self._types(result)
+        # The first two events are from the buffer flush (message_start +
+        # content_block_start).  Graceful termination then kicks in:
+        # first graceful event must be content_block_stop to close thinking.
+        # If _track_block had missed the buffer, we'd see the "no open block"
+        # path instead (content_block_start for a brand-new text block).
+        self.assertEqual(types[2], "content_block_stop",
+                         f"Expected thinking close at index 2, got: {types}")
+        # A new text block at index 1 must be opened for the notice
+        new_text = [
+            e for e in events
+            if e["data"].get("type") == "content_block_start"
+            and e["data"].get("index") == 1
+        ]
+        self.assertEqual(len(new_text), 1, "Expected new text block at index 1 after thinking close")
+        self.assertEqual(types[-1], "message_stop")
+
+    def test_buffer_flush_tracks_text_block_type(self):
+        """When buffer flush tracks a text block, error must append delta (not close+reopen)."""
+        chunks = [
+            _make_sse("message_start", {"type": "message_start", "message": {"id": "m1", "usage": {}}}),
+            _make_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"gone\"}}\n\n",
+        ]
+        result = self._run_retry([chunks])
+        types = self._types(result)
+        # Buffer flush yields message_start + content_block_start first.
+        # Then graceful termination: for a text block, the first graceful
+        # event is content_block_delta (notice appended to the still-open block).
+        self.assertEqual(types[2], "content_block_delta",
+                         f"Expected notice delta at index 2, got: {types}")
+        self.assertEqual(types[3], "content_block_stop",
+                         f"Expected text block stop at index 3, got: {types}")
+        self.assertEqual(types[-1], "message_stop")
