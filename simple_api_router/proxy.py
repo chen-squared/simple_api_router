@@ -94,7 +94,9 @@ def _exhaustion_status(last_err: Any) -> int:
     if not isinstance(last_err, httpx.Response):
         return 502
     status = last_err.status_code
-    return 429 if _is_soft_ratelimit(status, last_err.text) else status
+    if status == 400 and _is_soft_ratelimit(status, last_err.text):
+        return 429
+    return status
 
 # Network/transport errors that warrant a retry.
 # httpx.TimeoutException  covers: ConnectTimeout, ReadTimeout, WriteTimeout, PoolTimeout
