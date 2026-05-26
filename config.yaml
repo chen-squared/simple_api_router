@@ -4,11 +4,24 @@ server:
   log_level: "INFO"
   log_file: "router.log"
   max_retries: 3
-  # Global multimodal fallback: when a text_only model receives an image/video request,
-  # route it here instead. Value is "provider/model" (same format as the client model field).
-  # Individual models can override this with their own multimodal_fallback field.
-  # multimodal_fallback: "google/gemini-2.5-flash"
-  #
+
+  # ── Per-type fallback models ───────────────────────────────────────────────
+  # When a model doesn't natively support a media type, the router automatically
+  # describes the content using the fallback model before forwarding the request.
+  # Per-model overrides (model.image_fallback etc.) take precedence.
+  # Value is "provider/model" (same format as the client `model` field).
+  # image_fallback: "google/gemini-2.5-flash"
+  # audio_fallback: "openai/gpt-4o-audio-preview"
+  # video_fallback: "google/gemini-2.5-flash"
+
+  # ── MCP media tools ────────────────────────────────────────────────────────
+  # When any of these is set, the router mounts the corresponding tool at /mcp.
+  # Claude Code config: { "mcpServers": { "media": { "type": "sse",
+  #                        "url": "http://localhost:8080/mcp/sse" } } }
+  # image_model: "google/gemini-2.5-flash"   # enables image_understanding tool
+  # audio_model: "openai/gpt-4o-audio-preview" # enables audio_understanding tool
+  # video_model: "google/gemini-2.5-flash"   # enables video_understanding tool
+
   # Debug logging: log all 4 request/response stages to a file.
   # Each request gets a short ID; grep by it to see the full round-trip:
   #   grep "req=ab12cd34" /tmp/router_debug.log
@@ -21,31 +34,46 @@ providers:
     endpoints:
       anthropic:
         models:
-          - claude-opus-4-5
-          - claude-sonnet-4-5
+          # claude-opus-4-5 and claude-sonnet-4-5 support images natively.
+          - name: claude-opus-4-5
+            multimodality: [image]
+          - name: claude-sonnet-4-5
+            multimodality: [image]
 
   # ── OpenAI ────────────────────────────────────────────────────────────────
   openai:
     api_key: "${OPENAI_API_KEY}"
     endpoints:
       openai_chat:
-        models: [gpt-4o, gpt-4o-mini]
+        models:
+          - name: gpt-4o
+            multimodality: [image]
+          - name: gpt-4o-mini
+            multimodality: [image]
       openai_responses:
-        models: [o3, o4-mini]
+        models:
+          - o3
+          - o4-mini
 
   # ── Multi-format upstream (all formats, one key) ──────────────────────────
   # myupstream:
   #   api_key: "${MY_KEY}"
-  #   base_url: "https://myupstream.com"   # shared base_url; endpoints inherit unless overridden
+  #   base_url: "https://myupstream.com"
   #   endpoints:
   #     anthropic:
-  #       models: [claude-opus-4-5]         # uses provider base_url above
+  #       models:
+  #         - name: claude-opus-4-5
+  #           multimodality: [image]
   #     openai_chat:
-  #       models: [gpt-4o]
-  #     openai_responses:
-  #       models: [o1-preview]
+  #       models:
+  #         - name: gpt-4o
+  #           multimodality: [image, audio]
   #     google:
-  #       models: [gemini-2.5-pro]
+  #       models:
+  #         - name: gemini-2.5-pro
+  #           multimodality: [image, video]
+  #           # per-model fallback override:
+  #           # audio_fallback: "openai/gpt-4o-audio-preview"
 
   # ── Local / Self-Hosted (Ollama, vLLM, LM Studio) ────────────────────────
   # local:
@@ -53,12 +81,11 @@ providers:
   #   endpoints:
   #     openai_chat:
   #       models:
-  #         - llava                          # plain string = multimodal-capable
-  #         - name: qwen2.5-coder            # dict form = with extra attributes
-  #           text_only: true               # mark as text-only
-  #           multimodal_fallback: "local/llava"  # per-model override (optional)
-  #         - name: deepseek-r1
-  #           text_only: true               # uses global server.multimodal_fallback
+  #         - name: llava              # vision model
+  #           multimodality: [image]
+  #         - name: qwen2.5-coder      # text-only: no multimodality → fallback triggers
+  #           image_fallback: "local/llava"   # per-model override
+  #         - deepseek-r1              # plain string = no media support, uses global fallbacks
 
   # ── Model name remapping ───────────────────────────────────────────────────
   # myprovider:
@@ -76,7 +103,11 @@ providers:
   #   api_key: "${GOOGLE_API_KEY}"
   #   endpoints:
   #     google:
-  #       models: [gemini-2.5-pro, gemini-2.5-flash]
+  #       models:
+  #         - name: gemini-2.5-pro
+  #           multimodality: [image, video]
+  #         - name: gemini-2.5-flash
+  #           multimodality: [image, video]
 
 # ── Pricing (optional) ────────────────────────────────────────────────────────
 # Pricing can be set inline in each model entry (recommended — no name repetition):
@@ -87,12 +118,14 @@ providers:
 #       anthropic:
 #         models:
 #           - name: claude-opus-4-5
+#             multimodality: [image]
 #             pricing:
 #               input: 15.0
 #               output: 75.0
 #               cache_read: 1.50
 #               cache_write: 18.75
 #           - name: claude-sonnet-4-5
+#             multimodality: [image]
 #             pricing:
 #               input: 3.0
 #               output: 15.0
@@ -102,14 +135,15 @@ providers:
 #       google:
 #         models:
 #           - name: gemini-2.5-pro
+#             multimodality: [image, video]
 #             pricing:
 #               tiers:             # tiered: whole request billed at matching tier
-#                 - threshold: 0   # < 200 K input tokens
+#                 - threshold: 0
 #                   input: 1.25
 #                   output: 10.0
 #                   cache_read: 0.31
 #                   cache_write: 4.50
-#                 - threshold: 200000   # ≥ 200 K input tokens
+#                 - threshold: 200000
 #                   input: 2.50
 #                   output: 15.0
 #                   cache_read: 0.625
@@ -120,3 +154,4 @@ providers:
 #   "anthropic/claude-opus-4-5":
 #     input: 15.0
 #     output: 75.0
+

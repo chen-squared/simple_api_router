@@ -189,24 +189,33 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         configure_debug_log(config.server.debug_log)
         logger.info("Debug logging enabled → %s", config.server.debug_log)
 
-    # Create vision MCP instance early (before lifespan) so its session
+    # Create media MCP instance early (before lifespan) so its session
     # manager can be started inside the FastAPI lifespan context.
-    # Use a list as a mutable reference so the lambda picks up hot-reloaded
+    # Use a list as a mutable reference so the lambdas pick up hot-reloaded
     # config values from app.state.config (set in lifespan, updated by watcher).
-    _vision_mcp = None
+    _media_mcp = None
     _app_ref: list = []  # populated below after app is created
-    if config.server.vision_model:
-        from .mcp_vision import create_vision_mcp
-        _vision_mcp = create_vision_mcp(
+    if any([config.server.image_model, config.server.audio_model, config.server.video_model]):
+        from .mcp_media import create_media_mcp
+        _media_mcp = create_media_mcp(
             router_url=f"http://127.0.0.1:{config.server.port}",
-            vision_model=lambda: (
-                _app_ref[0].state.config.server.vision_model
-                if _app_ref else config.server.vision_model
-            ),
+            image_model=lambda: (
+                _app_ref[0].state.config.server.image_model
+                if _app_ref else config.server.image_model
+            ) if config.server.image_model else None,
+            audio_model=lambda: (
+                _app_ref[0].state.config.server.audio_model
+                if _app_ref else config.server.audio_model
+            ) if config.server.audio_model else None,
+            video_model=lambda: (
+                _app_ref[0].state.config.server.video_model
+                if _app_ref else config.server.video_model
+            ) if config.server.video_model else None,
         )
         # Call streamable_http_app() now to initialise the session_manager.
-        _vision_mcp_asgi = _vision_mcp.streamable_http_app()
-        logger.info("Vision MCP ready at /mcp  (model: %s)", config.server.vision_model)
+        _media_mcp_asgi = _media_mcp.streamable_http_app()
+        active = [t for t, m in [("image", config.server.image_model), ("audio", config.server.audio_model), ("video", config.server.video_model)] if m]
+        logger.info("Media MCP ready at /mcp  (tools: %s)", ", ".join(active))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -227,8 +236,8 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
             )
             logger.info("Watching config file for changes: %s", config_path)
 
-        if _vision_mcp is not None:
-            async with _vision_mcp.session_manager.run():
+        if _media_mcp is not None:
+            async with _media_mcp.session_manager.run():
                 yield
         else:
             yield
@@ -680,11 +689,11 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         return HTMLResponse(page_html)
 
     # ------------------------------------------------------------------
-    # Vision MCP — mount LAST so FastAPI routes take priority.
+    # Media MCP — mount LAST so FastAPI routes take priority.
     # session_manager is started in lifespan above.
     # ------------------------------------------------------------------
-    if _vision_mcp is not None:
-        _app_ref.append(app)          # let the lambda above read live config
-        app.mount("/", _vision_mcp_asgi)
+    if _media_mcp is not None:
+        _app_ref.append(app)          # let the lambdas above read live config
+        app.mount("/", _media_mcp_asgi)
 
     return app

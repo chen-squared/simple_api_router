@@ -501,38 +501,34 @@ def parse_model(model_str: str) -> Tuple[Optional[str], str]:
     return None, clean
 
 
-_MEDIA_TYPES = frozenset({"image", "video", "document"})
+_SUPPORTED_MEDIA_TYPES = frozenset({"image", "audio", "video"})
 
 
-def _blocks_have_media(blocks: list) -> bool:
-    """Return True if any content block in *blocks* is a non-text media type."""
+def _media_types_in_blocks(blocks: list) -> set:
+    """Return the set of media types (image/audio/video) present in content blocks."""
+    types: set = set()
     for block in blocks:
         if not isinstance(block, dict):
             continue
         btype = block.get("type")
-        if btype in ("image", "video"):
-            return True
-        if btype == "document":
-            # document blocks with source.type == "text" are plain-text and fine for
-            # text-only models; base64/url sources are PDFs or binary docs that are not.
-            src_type = (block.get("source") or {}).get("type")
-            if src_type != "text":
-                return True
-        # tool_result content can itself contain image/video blocks (e.g. a screenshot tool)
+        if btype in _SUPPORTED_MEDIA_TYPES:
+            types.add(btype)
+        # tool_result content can itself contain media blocks (e.g. a screenshot tool)
         if btype == "tool_result":
             nested = block.get("content", "")
-            if isinstance(nested, list) and _blocks_have_media(nested):
-                return True
-    return False
+            if isinstance(nested, list):
+                types.update(_media_types_in_blocks(nested))
+    return types
 
 
-def _request_has_media(body: Dict[str, Any]) -> bool:
-    """Return True if any message in the request contains image, video, or PDF content."""
+def _media_types_in_body(body: Dict[str, Any]) -> set:
+    """Return the set of media types present across all messages in the request."""
+    types: set = set()
     for msg in body.get("messages", []):
         content = msg.get("content", "")
-        if isinstance(content, list) and _blocks_have_media(content):
-            return True
-    return False
+        if isinstance(content, list):
+            types.update(_media_types_in_blocks(content))
+    return types
 
 
 # ---------------------------------------------------------------------------
@@ -602,22 +598,46 @@ async def _image_block_to_base64(
     return None
 
 
-async def _describe_images_in_body(
+_MEDIA_DESCRIBE_PROMPTS: Dict[str, str] = {
+    "image": (
+        "Describe this image in detail. "
+        "Include all visible text, UI elements, layout, and content."
+    ),
+    "audio": (
+        "Transcribe and describe this audio in detail. "
+        "Include all spoken words, sounds, music, and context."
+    ),
+    "video": (
+        "Describe this video in detail. "
+        "Include all visual content, any text, actions, and context."
+    ),
+}
+
+
+async def _describe_media_in_body(
     body: Dict[str, Any],
+    media_type: str,           # "image" | "audio" | "video"
     fallback_model: str,
     router_port: int,
     client: httpx.AsyncClient,
     max_concurrency: int = 3,
 ) -> Dict[str, Any]:
-    """Replace every image/video block in *body* with a text description.
+    """Replace every block of *media_type* in *body* with a text description.
 
-    Uses *fallback_model* (the configured ``multimodal_fallback``) to describe
-    each image.  Descriptions are cached to disk:
-    - URL images:          key = URL,         TTL = 1 hour
-    - base64 / file images: key = content MD5, TTL = 30 days
+    Uses *fallback_model* to generate descriptions.  Results are cached:
+    - URL sources:          key = URL,         TTL = 1 hour
+    - base64 / file sources: key = content MD5, TTL = 30 days
+
+    Binary document blocks (PDFs etc.) are always stripped to a placeholder
+    regardless of *media_type* — they have no model-specific fallback.
     """
     import base64 as _b64
     from .image_cache import URL_TTL, CONTENT_TTL
+
+    prompt = _MEDIA_DESCRIBE_PROMPTS.get(
+        media_type, f"Describe this {media_type} in detail."
+    )
+    label = media_type.capitalize()   # "Image" | "Audio" | "Video"
 
     sem = asyncio.Semaphore(max_concurrency)
     describe_url = f"http://127.0.0.1:{router_port}/v1/messages"
@@ -627,42 +647,41 @@ async def _describe_images_in_body(
         source = block.get("source", {})
         src_type = source.get("type")
 
-        # --- Determine cache key and vision block ---
+        # --- Determine cache key and the block to send to the fallback model ---
         if src_type == "url":
-            # URL: cache by URL (TTL 1h); forward original URL block to model
             cache_key = f"url:{source.get('url', '')}"
             cache_ttl = URL_TTL
             cached = cache.get(cache_key)
             if cached is not None:
-                logger.debug("Image cache hit (url): %s", cache_key[4:60])
-                return {"type": "text", "text": f"[Image: {cached}]"}
-            vision_block = block  # let the vision model fetch the URL itself
+                logger.debug("%s cache hit (url): %s", label, cache_key[4:60])
+                return {"type": "text", "text": f"[{label}: {cached}]"}
+            media_block = block  # let the fallback model fetch the URL itself
 
         else:
-            # base64 / file: fetch bytes → MD5 key (TTL 30d)
+            # base64 / file: fetch bytes → MD5 for cache key
             fetched = await _image_block_to_base64(block, client)
             if fetched is not None:
-                image_bytes, media_type = fetched
-                cache_key = hashlib.md5(image_bytes).hexdigest()
+                media_bytes, detected_mt = fetched
+                cache_key = hashlib.md5(media_bytes).hexdigest()
                 cache_ttl = CONTENT_TTL
                 cached = cache.get(cache_key)
                 if cached is not None:
-                    logger.debug("Image cache hit (md5): %s", cache_key[:16])
-                    return {"type": "text", "text": f"[Image: {cached}]"}
-                vision_block = {
-                    "type": "image",
+                    logger.debug("%s cache hit (md5): %s", label, cache_key[:16])
+                    return {"type": "text", "text": f"[{label}: {cached}]"}
+                media_block = {
+                    "type": media_type,
                     "source": {
                         "type": "base64",
-                        "media_type": media_type,
-                        "data": _b64.b64encode(image_bytes).decode(),
+                        "media_type": detected_mt,
+                        "data": _b64.b64encode(media_bytes).decode(),
                     },
                 }
             else:
                 cache_key = None
                 cache_ttl = 0.0
-                vision_block = block  # best-effort
+                media_block = block  # best-effort: forward original
 
-        # --- Call vision model (streaming: read_timeout is per-chunk, not total) ---
+        # --- Call fallback model (streaming: read_timeout resets per chunk) ---
         try:
             stream_timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=5.0)
             async with client.stream(
@@ -675,11 +694,8 @@ async def _describe_images_in_body(
                     "messages": [{
                         "role": "user",
                         "content": [
-                            vision_block,
-                            {"type": "text", "text": (
-                                "Describe this image in detail. "
-                                "Include all visible text, UI elements, layout, and content."
-                            )},
+                            media_block,
+                            {"type": "text", "text": prompt},
                         ],
                     }],
                 },
@@ -706,25 +722,35 @@ async def _describe_images_in_body(
                     if description and cache_key:
                         cache.set(cache_key, description, cache_ttl)
                     if description:
-                        return {"type": "text", "text": f"[Image: {description}]"}
+                        return {"type": "text", "text": f"[{label}: {description}]"}
+                else:
+                    body_preview = await resp.aread()
+                    logger.warning(
+                        "Fallback %s description failed: model=%s status=%d body=%s",
+                        media_type, fallback_model, resp.status_code,
+                        body_preview[:300].decode(errors="replace"),
+                    )
         except Exception as exc:
-            logger.warning("Failed to describe image block: %s", exc)
-        return {"type": "text", "text": "[Image: (description unavailable)]"}
+            logger.warning(
+                "Fallback %s description error: model=%s error=%s",
+                media_type, fallback_model, exc,
+            )
+        return {"type": "text", "text": f"[{label}: (description unavailable)]"}
 
     async def process_blocks(blocks: list) -> list:
-        # Collect tasks so image descriptions run concurrently.
         tasks: list = []
-        indices: list = []  # indices of blocks that need async work
-        result: list = list(blocks)  # start with a copy
+        indices: list = []
+        result: list = list(blocks)
 
         for i, block in enumerate(blocks):
             if not isinstance(block, dict):
                 continue
             btype = block.get("type")
-            if btype in ("image", "video"):
+            if btype == media_type:
                 tasks.append(describe_block(block))
                 indices.append((i, "replace"))
             elif btype == "document" and (block.get("source") or {}).get("type") != "text":
+                # Binary documents (PDFs etc.) — strip with placeholder regardless of type.
                 result[i] = {"type": "text", "text": "[Document: binary content omitted]"}
             elif btype == "tool_result":
                 nested = block.get("content", "")
@@ -740,7 +766,7 @@ async def _describe_images_in_body(
             for (i, kind), value in zip(indices, resolved):
                 if kind == "replace":
                     result[i] = value
-                else:  # tool_result nested blocks
+                else:
                     b = dict(result[i])
                     b["content"] = value
                     result[i] = b
@@ -854,27 +880,32 @@ async def route_request(
     provider, endpoint, api_format, backend_model = resolve_provider(provider_name, model, config)
     max_retries = config.server.max_retries
 
-    # Multimodal handling: if the resolved model is text-only and the request
-    # contains image/video/PDF content, auto-describe using multimodal_fallback.
-    # vision_model is reserved for the MCP server only.
-    if _request_has_media(body):
+    # Multimodal handling: for each media type in the request that the model
+    # doesn't natively support, auto-describe using the appropriate *_fallback.
+    media_present = _media_types_in_body(body)
+    if media_present:
         entry = endpoint.get_model_entry(model)
-        if entry.text_only:
-            fallback = entry.multimodal_fallback or config.server.multimodal_fallback
+        supported = set(entry.multimodality)
+        unsupported = media_present - supported
+        for mtype in sorted(unsupported):   # deterministic order
+            fallback = (
+                getattr(entry, f"{mtype}_fallback", None)
+                or getattr(config.server, f"{mtype}_fallback", None)
+            )
             if fallback:
                 logger.info(
-                    "text_only model '%s' received media; auto-describing via '%s'",
-                    model, fallback,
+                    "model '%s' doesn't support %s; auto-describing via '%s'",
+                    model, mtype, fallback,
                 )
-                body = await _describe_images_in_body(
-                    body, fallback, config.server.port, client,
+                body = await _describe_media_in_body(
+                    body, mtype, fallback, config.server.port, client,
                     max_concurrency=config.server.multimodal_fallback_max_concurrency,
                 )
             else:
                 logger.warning(
-                    "text_only model '%s' received media but no multimodal_fallback "
-                    "is configured — forwarding anyway",
-                    model,
+                    "model '%s' received %s content it may not support, "
+                    "and no %s_fallback is configured — forwarding as-is",
+                    model, mtype, mtype,
                 )
 
     # Stash routing metadata so app.py can log usage after the response is done.

@@ -28,30 +28,39 @@ class ServerConfig(BaseModel):
     log_level: str = "INFO"
     log_file: Optional[str] = "router.log"
     max_retries: int = 3  # max retry attempts per request on upstream errors
-    # Global fallback model for text-only models that receive image/video content.
+    # Global per-type fallback models.  When a model doesn't natively support a
+    # media type, the router auto-describes the blocks using this model.
+    # Per-model overrides (ModelEntry.*_fallback) take precedence.
     # Value is "provider/model" (same format as the client `model` field).
-    multimodal_fallback: Optional[str] = None
-    # Max concurrent image description calls during multimodal fallback.
-    # Prevents overwhelming the fallback provider with too many parallel requests.
+    image_fallback: Optional[str] = None
+    audio_fallback: Optional[str] = None
+    video_fallback: Optional[str] = None
+    # Max concurrent media description calls during fallback.
     multimodal_fallback_max_concurrency: int = 3
+    # MCP tools.  When any of these is set, the router mounts the corresponding
+    # understand_* tool at /mcp.  Each uses its own model.
+    image_model: Optional[str] = None   # enables image_understanding tool
+    audio_model: Optional[str] = None   # enables audio_understanding tool
+    video_model: Optional[str] = None   # enables video_understanding tool
     # Path to debug log file.  When set, all 4 request/response stages are
     # appended to this file for every request.  None = disabled.
     debug_log: Optional[str] = None
-    # Vision MCP server.  When set, an MCP server with an ``understand_image``
-    # tool is mounted at /mcp on the same port.  Value is "provider/model".
-    vision_model: Optional[str] = None
 
 
 class ModelEntry(BaseModel):
     """Per-model attributes.  Used when a model needs extra flags beyond its name."""
     name: str
-    # Set True to mark this model as text-only.  When a request with image/video
-    # content is routed here, the router will redirect to multimodal_fallback (or the
-    # global server.multimodal_fallback) instead of forwarding and letting the upstream
-    # return an error.
-    text_only: bool = False
-    # Override the global server.multimodal_fallback for just this model.
-    multimodal_fallback: Optional[str] = None
+    # Media types this model natively supports.  Any type NOT listed here will be
+    # auto-described via the corresponding *_fallback before forwarding.
+    # Valid values: "image", "audio", "video".
+    # Example: multimodality: [image, video]  — supports images and video but not audio.
+    # Empty list (default) = model does not support any media; all will be described.
+    multimodality: List[str] = Field(default_factory=list)
+    # Per-model fallback overrides for each media type.
+    # Overrides the global server.*_fallback when set.
+    image_fallback: Optional[str] = None
+    audio_fallback: Optional[str] = None
+    video_fallback: Optional[str] = None
     # Inline pricing for this model.  Takes precedence over the top-level
     # RouterConfig.pricing section when both are present.
     pricing: Optional["PricingEntry"] = None
