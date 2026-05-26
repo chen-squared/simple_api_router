@@ -66,6 +66,36 @@ def _is_soft_ratelimit(status: int, body: str) -> bool:
     body_lower = body.lower()
     return any(p in body_lower for p in _SOFT_RATELIMIT_PHRASES)
 
+
+def _is_retriable(status: int, body: str = "") -> bool:
+    """Return True if this upstream response warrants a retry."""
+    return status in _RETRY_STATUS or _is_soft_ratelimit(status, body)
+
+
+async def _read_error_body(resp: httpx.Response) -> Tuple[Any, str]:
+    """Read a non-2xx streaming response body; return (detail, raw_body_str).
+
+    Reads the buffered body (``aread``) and attempts JSON parsing.
+    Caller is responsible for closing ``resp`` afterwards.
+    """
+    await resp.aread()
+    try:
+        return resp.json(), resp.text
+    except Exception:
+        return resp.text, resp.text
+
+
+def _exhaustion_status(last_err: Any) -> int:
+    """HTTP status to report to the client after all retries are exhausted.
+
+    Remaps soft-ratelimit 400 → 429 so clients (e.g. Claude Code) know to retry.
+    Returns 502 for non-HTTP errors.
+    """
+    if not isinstance(last_err, httpx.Response):
+        return 502
+    status = last_err.status_code
+    return 429 if _is_soft_ratelimit(status, last_err.text) else status
+
 # Network/transport errors that warrant a retry.
 # httpx.TimeoutException  covers: ConnectTimeout, ReadTimeout, WriteTimeout, PoolTimeout
 # httpx.NetworkError      covers: ConnectError, ReadError, WriteError, CloseError
@@ -102,7 +132,7 @@ async def _post_with_retry(
             await asyncio.sleep(delay)
         try:
             resp = await client.post(url, json=body, headers=headers)
-            if resp.status_code in _RETRY_STATUS or _is_soft_ratelimit(resp.status_code, resp.text):
+            if _is_retriable(resp.status_code, resp.text):
                 last_err = resp
                 continue
             return resp, None
@@ -147,13 +177,7 @@ async def _streaming_request_with_retry(
                 last_err = resp
                 continue
             if not (200 <= resp.status_code < 300):
-                await resp.aread()
-                try:
-                    detail = resp.json()
-                    body_str = resp.text
-                except Exception:
-                    detail = resp.text
-                    body_str = detail
+                detail, body_str = await _read_error_body(resp)
                 if _is_soft_ratelimit(resp.status_code, body_str):
                     await resp.aclose()
                     last_err = resp
@@ -167,12 +191,8 @@ async def _streaming_request_with_retry(
             last_err = exc
 
     reason = f"HTTP {last_err.status_code}" if isinstance(last_err, httpx.Response) else str(last_err)
-    status = last_err.status_code if isinstance(last_err, httpx.Response) else 502
-    # Remap soft-ratelimit 400 → 429 so the client (Claude Code) knows to retry.
-    if isinstance(last_err, httpx.Response) and _is_soft_ratelimit(status, last_err.text):
-        status = 429
     logger.warning("All %d stream retries exhausted for %s: %s", max_retries, url, reason)
-    raise HTTPException(status_code=status, detail=f"Upstream error: {reason}")
+    raise HTTPException(status_code=_exhaustion_status(last_err), detail=f"Upstream error: {reason}")
 
 
 async def _stream_raw(resp: httpx.Response, url: str) -> AsyncIterator[bytes]:
@@ -263,13 +283,7 @@ async def _stream_converted_with_retry(
                 await resp.aclose()
                 continue
             if not (200 <= resp.status_code < 300):
-                await resp.aread()
-                try:
-                    detail = resp.json()
-                    body_str = resp.text
-                except Exception:
-                    detail = resp.text
-                    body_str = detail
+                detail, body_str = await _read_error_body(resp)
                 if _is_soft_ratelimit(resp.status_code, body_str) and attempt < max_retries:
                     await resp.aclose()
                     logger.warning("Soft rate-limit 400 from %s (in-stream retry %d/%d)", url, attempt + 1, max_retries)
