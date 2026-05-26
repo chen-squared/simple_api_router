@@ -48,6 +48,24 @@ logger = get_logger("proxy")
 # HTTP status codes that warrant a retry
 _RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
 
+# Body phrases that identify a transient rate-limit disguised as HTTP 400.
+_SOFT_RATELIMIT_PHRASES = (
+    "request limited",
+    "rate limit",
+    "too many requests",
+    "please try again",
+    "try again later",
+    "server busy",
+)
+
+
+def _is_soft_ratelimit(status: int, body: str) -> bool:
+    """Return True when a 400 response is actually a transient rate-limit."""
+    if status != 400:
+        return False
+    body_lower = body.lower()
+    return any(p in body_lower for p in _SOFT_RATELIMIT_PHRASES)
+
 # Network/transport errors that warrant a retry.
 # httpx.TimeoutException  covers: ConnectTimeout, ReadTimeout, WriteTimeout, PoolTimeout
 # httpx.NetworkError      covers: ConnectError, ReadError, WriteError, CloseError
@@ -84,9 +102,10 @@ async def _post_with_retry(
             await asyncio.sleep(delay)
         try:
             resp = await client.post(url, json=body, headers=headers)
-            if resp.status_code not in _RETRY_STATUS:
-                return resp, None
-            last_err = resp
+            if resp.status_code in _RETRY_STATUS or _is_soft_ratelimit(resp.status_code, resp.text):
+                last_err = resp
+                continue
+            return resp, None
         except _UPSTREAM_ERRORS as exc:
             last_err = exc
 
@@ -131,8 +150,15 @@ async def _streaming_request_with_retry(
                 await resp.aread()
                 try:
                     detail = resp.json()
+                    body_str = resp.text
                 except Exception:
                     detail = resp.text
+                    body_str = detail
+                if _is_soft_ratelimit(resp.status_code, body_str):
+                    await resp.aclose()
+                    last_err = resp
+                    logger.warning("Soft rate-limit 400 from %s, retrying (%d/%d)", url, attempt + 1, max_retries)
+                    continue
                 await resp.aclose()
                 logger.warning("Upstream %d for %s: %s", resp.status_code, url, detail)
                 raise HTTPException(status_code=resp.status_code, detail=detail)
@@ -142,6 +168,9 @@ async def _streaming_request_with_retry(
 
     reason = f"HTTP {last_err.status_code}" if isinstance(last_err, httpx.Response) else str(last_err)
     status = last_err.status_code if isinstance(last_err, httpx.Response) else 502
+    # Remap soft-ratelimit 400 → 429 so the client (Claude Code) knows to retry.
+    if isinstance(last_err, httpx.Response) and _is_soft_ratelimit(status, last_err.text):
+        status = 429
     logger.warning("All %d stream retries exhausted for %s: %s", max_retries, url, reason)
     raise HTTPException(status_code=status, detail=f"Upstream error: {reason}")
 
@@ -237,8 +266,14 @@ async def _stream_converted_with_retry(
                 await resp.aread()
                 try:
                     detail = resp.json()
+                    body_str = resp.text
                 except Exception:
                     detail = resp.text
+                    body_str = detail
+                if _is_soft_ratelimit(resp.status_code, body_str) and attempt < max_retries:
+                    await resp.aclose()
+                    logger.warning("Soft rate-limit 400 from %s (in-stream retry %d/%d)", url, attempt + 1, max_retries)
+                    continue
                 await resp.aclose()
                 logger.warning("Stream retry upstream %d for %s: %s", resp.status_code, url, detail)
                 yield _sse_bytes("error", {

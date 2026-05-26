@@ -1505,3 +1505,44 @@ class TestStreamConvertedWithRetryGraceful(unittest.TestCase):
         self.assertEqual(types[3], "content_block_stop",
                          f"Expected text block stop at index 3, got: {types}")
         self.assertEqual(types[-1], "message_stop")
+
+
+# ---------------------------------------------------------------------------
+# _is_soft_ratelimit
+# ---------------------------------------------------------------------------
+
+class TestIsSoftRatelimit(unittest.TestCase):
+    """Tests for _is_soft_ratelimit: detects rate-limit 400 by body text."""
+
+    def setUp(self):
+        from simple_api_router.proxy import _is_soft_ratelimit
+        self.fn = _is_soft_ratelimit
+
+    def test_400_request_limited(self):
+        self.assertTrue(self.fn(400, "The server request limited, please try again later."))
+
+    def test_400_rate_limit(self):
+        self.assertTrue(self.fn(400, '{"error": "rate limit exceeded"}'))
+
+    def test_400_too_many_requests(self):
+        self.assertTrue(self.fn(400, "Too many requests, slow down."))
+
+    def test_400_please_try_again(self):
+        self.assertTrue(self.fn(400, "Please try again in a moment."))
+
+    def test_400_server_busy(self):
+        self.assertTrue(self.fn(400, "Server busy, please try again later."))
+
+    def test_400_case_insensitive(self):
+        self.assertTrue(self.fn(400, "REQUEST LIMITED"))
+
+    def test_400_real_bad_request(self):
+        self.assertFalse(self.fn(400, '{"error": "invalid parameter: model not found"}'))
+
+    def test_non_400_ignored(self):
+        self.assertFalse(self.fn(200, "request limited"))
+        self.assertFalse(self.fn(429, "request limited"))
+        self.assertFalse(self.fn(500, "request limited"))
+
+    def test_empty_body(self):
+        self.assertFalse(self.fn(400, ""))
