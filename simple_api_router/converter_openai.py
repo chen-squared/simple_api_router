@@ -230,6 +230,23 @@ def _image_block_to_openai(block: Dict) -> Dict[str, Any]:
     return {"type": "image_url", "image_url": {"url": url}}
 
 
+def _normalize_audio_format(fmt: str) -> str:
+    """Normalise an audio format string to a value OpenAI's ``input_audio`` accepts.
+
+    ``mimetypes.guess_type`` returns non-standard subtypes like ``"x-wav"``,
+    ``"x-flac"``, ``"x-aiff"`` — OpenAI only accepts canonical forms.
+    """
+    # Strip the "x-" prefix commonly used for unofficial MIME subtypes.
+    if fmt.startswith("x-"):
+        fmt = fmt[2:]
+    # Well-known remappings.
+    return {
+        "mp4a-latm": "mp4",
+        "mpeg": "mp3",
+        "basic": "au",  # audio/basic = AU format
+    }.get(fmt, fmt)
+
+
 def _audio_block_to_openai(block: Dict) -> Optional[Dict[str, Any]]:
     """Convert an Anthropic audio content block to OpenAI input_audio format.
 
@@ -240,6 +257,7 @@ def _audio_block_to_openai(block: Dict) -> Optional[Dict[str, Any]]:
     if source.get("type") == "base64":
         mt = source.get("media_type", "audio/mp3")
         fmt = mt.split("/")[-1] if "/" in mt else mt
+        fmt = _normalize_audio_format(fmt)
         return {"type": "input_audio", "input_audio": {
             "data": source.get("data", ""),
             "format": fmt,
@@ -251,20 +269,17 @@ def _audio_block_to_openai(block: Dict) -> Optional[Dict[str, Any]]:
 def _video_block_to_openai(block: Dict) -> Optional[Dict[str, Any]]:
     """Convert an Anthropic video content block to an OpenAI-compatible format.
 
-    OpenAI Chat Completions doesn't have a native video content type.
-    Some providers (openrouter, opencode) accept Anthropic-format video
-    blocks as-is, so we pass the base64 data through as an image_url with
-    a data URI.  URL sources are left for the upstream to handle.
+    Uses the ``video_url`` content type (OpenRouter / OpenAI-compatible).
+    Supports both base64 data URIs and direct URLs.
     """
     source = block.get("source", {})
     if source.get("type") == "base64":
         mt = source.get("media_type", "video/mp4")
         url = f"data:{mt};base64,{source.get('data', '')}"
-        return {"type": "image_url", "image_url": {"url": url}}
-    # For URL sources, pass through as a URL — the upstream may handle it.
+        return {"type": "video_url", "video_url": {"url": url}}
     url = source.get("url", "")
     if url:
-        return {"type": "image_url", "image_url": {"url": url}}
+        return {"type": "video_url", "video_url": {"url": url}}
     return None
 
 

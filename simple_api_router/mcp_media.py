@@ -46,6 +46,30 @@ from mcp.server.fastmcp import FastMCP
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _normalize_media_type(mt: str | None) -> str | None:
+    """Return a well-known media type, mapping non-standard forms to canonical ones.
+
+    ``mimetypes.guess_type`` returns non-standard MIME subtypes on some platforms
+    (e.g. ``"audio/x-wav"`` instead of ``"audio/wav"``).  Strips the ``"x-"``
+    prefix and handles other well-known remappings.
+    """
+    if mt is None:
+        return None
+    main, sub = mt.split("/", 1) if "/" in mt else (mt, "")
+    # Strip "x-" prefix from unofficial subtypes.
+    if sub.startswith("x-"):
+        sub = sub[2:]
+    # Well-known remappings (sub already has x- prefix stripped above).
+    sub = {
+        "mp4a-latm": "mp4",
+        "mpeg": "mp3",
+        "quicktime": "mp4",
+        "msvideo": "avi",
+        "basic": "au",
+    }.get(sub, sub)
+    return f"{main}/{sub}"
+
+
 def _make_getter(value: Union[str, Callable[[], Optional[str]], None]):
     """Return a zero-arg callable that returns the current model name."""
     if callable(value):
@@ -177,8 +201,7 @@ def create_media_mcp(
                 p = Path(path).expanduser().resolve()
                 if not p.exists():
                     return f"Error: file not found: {p}"
-                detected, _ = mimetypes.guess_type(str(p))
-                mt = detected or media_type
+                mt = _normalize_media_type(mimetypes.guess_type(str(p))[0]) or media_type
                 with open(p, "rb") as fh:
                     b64 = base64.b64encode(fh.read()).decode()
                 block = {"type": "image", "source": {"type": "base64", "media_type": mt, "data": b64}}
@@ -226,8 +249,7 @@ def create_media_mcp(
                 p = Path(path).expanduser().resolve()
                 if not p.exists():
                     return f"Error: file not found: {p}"
-                detected, _ = mimetypes.guess_type(str(p))
-                mt = detected or media_type
+                mt = _normalize_media_type(mimetypes.guess_type(str(p))[0]) or media_type
                 with open(p, "rb") as fh:
                     b64 = base64.b64encode(fh.read()).decode()
                 block = {"type": "audio", "source": {"type": "base64", "media_type": mt, "data": b64}}
@@ -275,8 +297,7 @@ def create_media_mcp(
                 p = Path(path).expanduser().resolve()
                 if not p.exists():
                     return f"Error: file not found: {p}"
-                detected, _ = mimetypes.guess_type(str(p))
-                mt = detected or media_type
+                mt = _normalize_media_type(mimetypes.guess_type(str(p))[0]) or media_type
                 with open(p, "rb") as fh:
                     b64 = base64.b64encode(fh.read()).decode()
                 block = {"type": "video", "source": {"type": "base64", "media_type": mt, "data": b64}}

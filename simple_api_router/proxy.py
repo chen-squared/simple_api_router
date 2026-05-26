@@ -710,7 +710,7 @@ async def _describe_media_in_body(
                 describe_url,
                 json={
                     "model": fallback_model,
-                    "max_tokens": 1024,
+                    "max_tokens": 16384,
                     "stream": True,
                     "messages": [{
                         "role": "user",

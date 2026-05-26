@@ -85,8 +85,13 @@ def _messages_to_responses_input(messages: List[Dict]) -> List[Dict[str, Any]]:
             elif btype == "video":
                 source = block.get("source", {})
                 if source.get("type") == "base64":
-                    url = f"data:{source.get('media_type', 'video/mp4')};base64,{source.get('data', '')}"
-                    current_parts.append({"type": "input_image", "image_url": url})
+                    mt = source.get("media_type", "video/mp4")
+                    url = f"data:{mt};base64,{source.get('data', '')}"
+                    current_parts.append({"type": "input_video", "video_url": url})
+                else:
+                    url = source.get("url", "")
+                    if url:
+                        current_parts.append({"type": "input_video", "video_url": url})
             elif btype == "tool_use":
                 if current_parts:
                     result.append({"role": role, "content": current_parts})
