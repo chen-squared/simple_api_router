@@ -2,13 +2,14 @@
 
 When any of ``server.image_model``, ``server.audio_model``, or
 ``server.video_model`` is set in config.yaml, the server mounts the
-corresponding tools at ``/mcp`` (same port).  Claude Code config example::
+corresponding tools at ``/mcp`` (same port, Streamable HTTP transport).
+Claude Code config example::
 
     {
       "mcpServers": {
         "media": {
-          "type": "sse",
-          "url": "http://localhost:8080/mcp/sse"
+          "type": "http",
+          "url": "http://localhost:8080/mcp"
         }
       }
     }
@@ -18,7 +19,7 @@ The tools are registered only for the models that are configured:
 - ``audio_understanding``  → requires ``server.audio_model``
 - ``video_understanding``  → requires ``server.video_model``
 
-Standalone usage (runs its own SSE server on a separate port)::
+Standalone usage (runs its own HTTP server on a separate port)::
 
     python -m simple_api_router.mcp_media \\
         --image-model provider/model \\

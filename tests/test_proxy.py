@@ -473,6 +473,415 @@ if __name__ == "__main__":
 
 
 # ===========================================================================
+# _media_types_in_blocks (direct tests)
+# ===========================================================================
+
+class TestMediaTypesInBlocks(unittest.TestCase):
+    """Direct unit tests for _media_types_in_blocks."""
+
+    def test_empty_list(self):
+        self.assertEqual(_media_types_in_blocks([]), set())
+
+    def test_image_block_detected(self):
+        blocks = [{"type": "image", "source": {"type": "url", "url": "https://x.com/img.png"}}]
+        self.assertIn("image", _media_types_in_blocks(blocks))
+
+    def test_audio_block_detected(self):
+        blocks = [{"type": "audio", "source": {"type": "base64", "media_type": "audio/mp3", "data": "abc"}}]
+        self.assertIn("audio", _media_types_in_blocks(blocks))
+
+    def test_video_block_detected(self):
+        blocks = [{"type": "video", "source": {"type": "url", "url": "https://x.com/vid.mp4"}}]
+        self.assertIn("video", _media_types_in_blocks(blocks))
+
+    def test_all_three_types(self):
+        blocks = [
+            {"type": "image", "source": {"type": "url", "url": "https://x.com/img.png"}},
+            {"type": "audio", "source": {"type": "url", "url": "https://x.com/clip.mp3"}},
+            {"type": "video", "source": {"type": "url", "url": "https://x.com/vid.mp4"}},
+        ]
+        result = _media_types_in_blocks(blocks)
+        self.assertEqual(result, {"image", "audio", "video"})
+
+    def test_text_block_not_detected(self):
+        blocks = [{"type": "text", "text": "hello"}]
+        self.assertFalse(_media_types_in_blocks(blocks))
+
+    def test_document_block_not_detected(self):
+        blocks = [{"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "abc"}}]
+        self.assertFalse(_media_types_in_blocks(blocks))
+
+    def test_tool_use_block_not_detected(self):
+        blocks = [{"type": "tool_use", "id": "tu_1", "name": "search", "input": {}}]
+        self.assertFalse(_media_types_in_blocks(blocks))
+
+    def test_tool_result_with_nested_image(self):
+        blocks = [{"type": "tool_result", "tool_use_id": "tu_1", "content": [
+            {"type": "image", "source": {"type": "url", "url": "https://x.com/screenshot.png"}},
+        ]}]
+        self.assertIn("image", _media_types_in_blocks(blocks))
+
+    def test_tool_result_with_nested_audio(self):
+        blocks = [{"type": "tool_result", "tool_use_id": "tu_1", "content": [
+            {"type": "audio", "source": {"type": "url", "url": "https://x.com/clip.mp3"}},
+        ]}]
+        self.assertIn("audio", _media_types_in_blocks(blocks))
+
+    def test_tool_result_with_text_only_not_detected(self):
+        blocks = [{"type": "tool_result", "tool_use_id": "tu_1", "content": [
+            {"type": "text", "text": "result"},
+        ]}]
+        self.assertFalse(_media_types_in_blocks(blocks))
+
+    def test_tool_result_string_content_not_detected(self):
+        blocks = [{"type": "tool_result", "tool_use_id": "tu_1", "content": "text result"}]
+        self.assertFalse(_media_types_in_blocks(blocks))
+
+    def test_non_dict_items_ignored(self):
+        blocks = ["string item", 42, None, {"type": "image", "source": {}}]
+        result = _media_types_in_blocks(blocks)
+        self.assertIn("image", result)
+
+    def test_multiple_images_only_returns_one_image_entry(self):
+        blocks = [
+            {"type": "image", "source": {"type": "url", "url": "https://x.com/a.png"}},
+            {"type": "image", "source": {"type": "url", "url": "https://x.com/b.png"}},
+        ]
+        result = _media_types_in_blocks(blocks)
+        self.assertEqual(result, {"image"})
+
+
+# ===========================================================================
+# ServerConfig per-type fields
+# ===========================================================================
+
+class TestServerConfigMediaFields(unittest.TestCase):
+
+    def test_defaults_all_none(self):
+        s = ServerConfig()
+        self.assertIsNone(s.image_fallback)
+        self.assertIsNone(s.audio_fallback)
+        self.assertIsNone(s.video_fallback)
+        self.assertIsNone(s.image_model)
+        self.assertIsNone(s.audio_model)
+        self.assertIsNone(s.video_model)
+
+    def test_all_three_fallbacks(self):
+        s = ServerConfig(
+            image_fallback="vision/img-model",
+            audio_fallback="audio/stt-model",
+            video_fallback="vision/vid-model",
+        )
+        self.assertEqual(s.image_fallback, "vision/img-model")
+        self.assertEqual(s.audio_fallback, "audio/stt-model")
+        self.assertEqual(s.video_fallback, "vision/vid-model")
+
+    def test_all_three_mcp_models(self):
+        s = ServerConfig(
+            image_model="google/gemini-2.5-flash",
+            audio_model="openai/gpt-4o-audio-preview",
+            video_model="google/gemini-2.5-flash",
+        )
+        self.assertEqual(s.image_model, "google/gemini-2.5-flash")
+        self.assertEqual(s.audio_model, "openai/gpt-4o-audio-preview")
+        self.assertEqual(s.video_model, "google/gemini-2.5-flash")
+
+    def test_mcp_concurrency_default(self):
+        s = ServerConfig()
+        self.assertEqual(s.multimodal_fallback_max_concurrency, 3)
+
+
+# ===========================================================================
+# ModelEntry multimodality / per-type fallbacks
+# ===========================================================================
+
+class TestModelEntryMultimodality(unittest.TestCase):
+
+    def test_default_empty_multimodality(self):
+        e = ModelEntry(name="deepseek-r1")
+        self.assertEqual(e.multimodality, [])
+
+    def test_all_fallbacks_default_none(self):
+        e = ModelEntry(name="deepseek-r1")
+        self.assertIsNone(e.image_fallback)
+        self.assertIsNone(e.audio_fallback)
+        self.assertIsNone(e.video_fallback)
+
+    def test_set_all_three_fallbacks(self):
+        e = ModelEntry(
+            name="mymodel",
+            image_fallback="vision/img",
+            audio_fallback="audio/stt",
+            video_fallback="vision/vid",
+        )
+        self.assertEqual(e.image_fallback, "vision/img")
+        self.assertEqual(e.audio_fallback, "audio/stt")
+        self.assertEqual(e.video_fallback, "vision/vid")
+
+    def test_multimodality_image_only(self):
+        e = ModelEntry(name="llava", multimodality=["image"])
+        self.assertIn("image", e.multimodality)
+        self.assertNotIn("audio", e.multimodality)
+        self.assertNotIn("video", e.multimodality)
+
+    def test_multimodality_all_three(self):
+        e = ModelEntry(name="gemini-ultra", multimodality=["image", "audio", "video"])
+        self.assertEqual(set(e.multimodality), {"image", "audio", "video"})
+
+    def test_multimodality_preserved_from_endpoint(self):
+        ep = EndpointConfig(models=[
+            ModelEntry(name="gemini-flash", multimodality=["image", "video"]),
+        ])
+        entry = ep.get_model_entry("gemini-flash")
+        self.assertIn("image", entry.multimodality)
+        self.assertIn("video", entry.multimodality)
+        self.assertNotIn("audio", entry.multimodality)
+
+    def test_string_model_entry_defaults(self):
+        """Plain string models get a default ModelEntry with no media support."""
+        ep = EndpointConfig(models=["gpt-4o-mini"])
+        entry = ep.get_model_entry("gpt-4o-mini")
+        self.assertEqual(entry.multimodality, [])
+        self.assertIsNone(entry.image_fallback)
+
+
+# ===========================================================================
+# Per-type fallback resolution — mixed support scenarios
+# ===========================================================================
+
+class TestMixedMultimodalityFallback(unittest.TestCase):
+    """Test fallback triggered only for unsupported types, not supported ones."""
+
+    def _fallback_for(self, model_str, config, mtype):
+        provider_name, model = parse_model(model_str)
+        _, endpoint, _, _ = resolve_provider(provider_name, model, config)
+        entry = endpoint.get_model_entry(model)
+        if mtype in set(entry.multimodality):
+            return None
+        return (
+            getattr(entry, f"{mtype}_fallback", None)
+            or getattr(config.server, f"{mtype}_fallback", None)
+        )
+
+    def _make_config_with_model(self, model_entry, server=None):
+        ep = EndpointConfig(base_url="http://localhost:11434", models=[model_entry])
+        prov = ProviderConfig(api_key="", endpoints={"openai_chat": ep})
+        fallback_ep = EndpointConfig(base_url="https://v.com", models=["fallback"])
+        fallback_prov = ProviderConfig(api_key="k", endpoints={"openai_chat": fallback_ep})
+        return RouterConfig(
+            server=server or ServerConfig(
+                image_fallback="fb/fallback",
+                audio_fallback="fb/fallback",
+                video_fallback="fb/fallback",
+            ),
+            providers={"local": prov, "fb": fallback_prov},
+        )
+
+    def test_supports_image_no_fallback_for_image(self):
+        config = self._make_config_with_model(
+            ModelEntry(name="llava", multimodality=["image"])
+        )
+        self.assertIsNone(self._fallback_for("local/llava", config, "image"))
+
+    def test_does_not_support_audio_fallback_triggered(self):
+        config = self._make_config_with_model(
+            ModelEntry(name="llava", multimodality=["image"])
+        )
+        self.assertEqual(self._fallback_for("local/llava", config, "audio"), "fb/fallback")
+
+    def test_does_not_support_video_fallback_triggered(self):
+        config = self._make_config_with_model(
+            ModelEntry(name="llava", multimodality=["image"])
+        )
+        self.assertEqual(self._fallback_for("local/llava", config, "video"), "fb/fallback")
+
+    def test_supports_image_and_video_no_fallback_for_both(self):
+        config = self._make_config_with_model(
+            ModelEntry(name="gemini", multimodality=["image", "video"])
+        )
+        self.assertIsNone(self._fallback_for("local/gemini", config, "image"))
+        self.assertIsNone(self._fallback_for("local/gemini", config, "video"))
+
+    def test_supports_image_and_video_fallback_for_audio(self):
+        config = self._make_config_with_model(
+            ModelEntry(name="gemini", multimodality=["image", "video"])
+        )
+        self.assertEqual(self._fallback_for("local/gemini", config, "audio"), "fb/fallback")
+
+    def test_no_server_fallback_no_model_fallback_returns_none(self):
+        config = self._make_config_with_model(
+            ModelEntry(name="deepseek-r1"),
+            server=ServerConfig(),  # no fallbacks configured
+        )
+        self.assertIsNone(self._fallback_for("local/deepseek-r1", config, "image"))
+        self.assertIsNone(self._fallback_for("local/deepseek-r1", config, "audio"))
+        self.assertIsNone(self._fallback_for("local/deepseek-r1", config, "video"))
+
+    def test_model_fallback_overrides_server_per_type(self):
+        """Model-level fallbacks for specific types override server-level fallbacks."""
+        config = self._make_config_with_model(
+            ModelEntry(name="mymodel", image_fallback="local/img-specialist"),
+            server=ServerConfig(image_fallback="fb/fallback", audio_fallback="fb/fallback"),
+        )
+        # Model-level wins for image
+        self.assertEqual(self._fallback_for("local/mymodel", config, "image"), "local/img-specialist")
+        # Server fallback used for audio (no model-level audio_fallback)
+        self.assertEqual(self._fallback_for("local/mymodel", config, "audio"), "fb/fallback")
+
+    def test_media_types_in_body_with_multiple_types(self):
+        """Detection returns all types present across the whole request."""
+        body = {"messages": [
+            {"role": "user", "content": [
+                {"type": "image", "source": {"type": "url", "url": "https://x.com/img.png"}},
+                {"type": "audio", "source": {"type": "url", "url": "https://x.com/clip.mp3"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "video", "source": {"type": "url", "url": "https://x.com/vid.mp4"}},
+            ]},
+        ]}
+        types = _media_types_in_body(body)
+        self.assertEqual(types, {"image", "audio", "video"})
+
+    def test_unsupported_types_are_difference(self):
+        """Unsupported types = present - supported."""
+        body = {"messages": [{"role": "user", "content": [
+            {"type": "image", "source": {}},
+            {"type": "video", "source": {}},
+        ]}]}
+        media_present = _media_types_in_body(body)
+        model_entry = ModelEntry(name="m", multimodality=["image"])
+        supported = set(model_entry.multimodality)
+        unsupported = media_present - supported
+        self.assertEqual(unsupported, {"video"})
+
+
+# ===========================================================================
+# RouterConfig YAML parsing with multimodality
+# ===========================================================================
+
+class TestRouterConfigMultimodalityParsing(unittest.TestCase):
+    """Test that multimodality and fallback fields round-trip through model_validate."""
+
+    def _raw(self, **model_kwargs):
+        return {
+            "providers": {
+                "myprov": {
+                    "api_key": "test",
+                    "endpoints": {
+                        "openai_chat": {
+                            "models": [dict(name="mymodel", **model_kwargs)]
+                        }
+                    },
+                }
+            }
+        }
+
+    def test_multimodality_parsed(self):
+        cfg = RouterConfig.model_validate(self._raw(multimodality=["image", "video"]))
+        entry = cfg.providers["myprov"].endpoints["openai_chat"].get_model_entry("mymodel")
+        self.assertIn("image", entry.multimodality)
+        self.assertIn("video", entry.multimodality)
+
+    def test_empty_multimodality_default(self):
+        cfg = RouterConfig.model_validate(self._raw())
+        entry = cfg.providers["myprov"].endpoints["openai_chat"].get_model_entry("mymodel")
+        self.assertEqual(entry.multimodality, [])
+
+    def test_image_fallback_parsed(self):
+        cfg = RouterConfig.model_validate(self._raw(image_fallback="vision/gpt-4o"))
+        entry = cfg.providers["myprov"].endpoints["openai_chat"].get_model_entry("mymodel")
+        self.assertEqual(entry.image_fallback, "vision/gpt-4o")
+
+    def test_audio_fallback_parsed(self):
+        cfg = RouterConfig.model_validate(self._raw(audio_fallback="audio/whisper"))
+        entry = cfg.providers["myprov"].endpoints["openai_chat"].get_model_entry("mymodel")
+        self.assertEqual(entry.audio_fallback, "audio/whisper")
+
+    def test_video_fallback_parsed(self):
+        cfg = RouterConfig.model_validate(self._raw(video_fallback="vision/gemini"))
+        entry = cfg.providers["myprov"].endpoints["openai_chat"].get_model_entry("mymodel")
+        self.assertEqual(entry.video_fallback, "vision/gemini")
+
+    def test_server_per_type_fallbacks_parsed(self):
+        raw = {
+            "server": {
+                "image_fallback": "vision/gpt-4o",
+                "audio_fallback": "audio/stt",
+                "video_fallback": "vision/gemini",
+                "image_model": "google/gemini-flash",
+                "audio_model": "openai/gpt-4o-audio",
+                "video_model": "google/gemini-flash",
+            }
+        }
+        cfg = RouterConfig.model_validate(raw)
+        self.assertEqual(cfg.server.image_fallback, "vision/gpt-4o")
+        self.assertEqual(cfg.server.audio_fallback, "audio/stt")
+        self.assertEqual(cfg.server.video_fallback, "vision/gemini")
+        self.assertEqual(cfg.server.image_model, "google/gemini-flash")
+        self.assertEqual(cfg.server.audio_model, "openai/gpt-4o-audio")
+        self.assertEqual(cfg.server.video_model, "google/gemini-flash")
+
+    def test_plain_string_model_still_works(self):
+        """Plain string models (no ModelEntry) parse fine with new schema."""
+        raw = {
+            "providers": {
+                "p": {
+                    "api_key": "k",
+                    "endpoints": {"openai_chat": {"models": ["gpt-4o", "gpt-4o-mini"]}},
+                }
+            }
+        }
+        cfg = RouterConfig.model_validate(raw)
+        ep = cfg.providers["p"].endpoints["openai_chat"]
+        self.assertEqual(ep.model_names(), ["gpt-4o", "gpt-4o-mini"])
+        entry = ep.get_model_entry("gpt-4o")
+        self.assertEqual(entry.multimodality, [])
+        self.assertIsNone(entry.image_fallback)
+
+
+# ===========================================================================
+# create_media_mcp factory
+# ===========================================================================
+
+class TestCreateMediaMcp(unittest.TestCase):
+
+    def test_raises_when_all_models_none(self):
+        from simple_api_router.mcp_media import create_media_mcp
+        with self.assertRaises(ValueError):
+            create_media_mcp("http://localhost:8080")
+
+    def test_raises_with_explicit_none_models(self):
+        from simple_api_router.mcp_media import create_media_mcp
+        with self.assertRaises(ValueError):
+            create_media_mcp("http://localhost:8080", image_model=None, audio_model=None, video_model=None)
+
+    def test_creates_with_image_model_only(self):
+        from simple_api_router.mcp_media import create_media_mcp
+        from mcp.server.fastmcp import FastMCP
+        mcp = create_media_mcp("http://localhost:8080", image_model="vision/gpt-4o")
+        self.assertIsInstance(mcp, FastMCP)
+
+    def test_creates_with_all_three_models(self):
+        from simple_api_router.mcp_media import create_media_mcp
+        from mcp.server.fastmcp import FastMCP
+        mcp = create_media_mcp(
+            "http://localhost:8080",
+            image_model="google/gemini-flash",
+            audio_model="openai/gpt-4o-audio",
+            video_model="google/gemini-flash",
+        )
+        self.assertIsInstance(mcp, FastMCP)
+
+    def test_callable_model_accepted(self):
+        """create_media_mcp accepts a zero-arg callable for hot-reload support."""
+        from simple_api_router.mcp_media import create_media_mcp
+        from mcp.server.fastmcp import FastMCP
+        model_name = ["vision/gpt-4o"]
+        mcp = create_media_mcp("http://localhost:8080", image_model=lambda: model_name[0])
+        self.assertIsInstance(mcp, FastMCP)
+
+
+# ===========================================================================
 # Usage database
 # ===========================================================================
 

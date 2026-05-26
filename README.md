@@ -19,8 +19,8 @@ Designed for use with tools like [Claude Code](https://claude.ai/code) that spea
 - **Google Gemini backend** — full bidirectional Anthropic ↔ Gemini `generateContent` conversion:
   - System prompt, tools, tool choice, images, streaming
 - **DeepSeek reasoning passthrough** — `reasoning_content` preserved; auto-enabled for `deepseek-*` models
-- **Multimodal fallback** — when a text-only model receives image content, images are auto-described via a configurable vision model and replaced with text; the original model then handles the request normally
-- **Vision MCP server** — optional `understand_image` MCP tool, mounted on the same port; lets text-only models describe screenshots and images on demand
+- **Per-type media fallback** — when a model receives image/audio/video content it doesn't support, the content is auto-described by a configurable fallback model and replaced with text; the original model then handles the request normally. Configurable per media type (image/audio/video) and per model.
+- **Media MCP server** — optional `image_understanding`, `audio_understanding`, `video_understanding` MCP tools, mounted on the same port; lets models describe screenshots, audio, and video on demand
 - **Usage logging** — every request logged to `router_usage.db` (SQLite); view with `simple-api-router usage` or `/stats`
 - **Hot reload** — provider/model/key changes apply within a second, no restart needed
 - **`model_map`** — remap external model names to backend names per endpoint
@@ -56,14 +56,20 @@ providers:
     endpoints:
       anthropic:
         models:
-          - claude-opus-4-5
-          - claude-sonnet-4-5
+          - name: claude-opus-4-5
+            multimodality: [image]
+          - name: claude-sonnet-4-5
+            multimodality: [image]
 
   openai:
     api_key: "${OPENAI_API_KEY}"
     endpoints:
       openai_chat:
-        models: [gpt-4o, gpt-4o-mini]
+        models:
+          - name: gpt-4o
+            multimodality: [image]
+          - name: gpt-4o-mini
+            multimodality: [image]
       openai_responses:
         models: [o3, o4-mini]
 
@@ -139,8 +145,13 @@ Then pick any configured model:
 | `log_level` | `"INFO"` | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `log_file` | `"router.log"` | Log file path (relative = next to config); `null` = stdout only |
 | `max_retries` | `3` | Retry attempts on upstream 429/5xx/network errors |
-| `multimodal_fallback` | `null` | Global fallback model for text-only → multimodal re-routing (`"provider/model"`) |
-| `vision_model` | `null` | Enable Vision MCP server at `/mcp` on the same port (`"provider/model"`). Requires restart to mount/unmount; model name hot-reloads. |
+| `image_fallback` | `null` | Global fallback model for image description (`"provider/model"`) |
+| `audio_fallback` | `null` | Global fallback model for audio description (`"provider/model"`) |
+| `video_fallback` | `null` | Global fallback model for video description (`"provider/model"`) |
+| `multimodal_fallback_max_concurrency` | `3` | Max concurrent media description calls during fallback |
+| `image_model` | `null` | Enable `image_understanding` MCP tool at `/mcp` (`"provider/model"`) |
+| `audio_model` | `null` | Enable `audio_understanding` MCP tool at `/mcp` (`"provider/model"`) |
+| `video_model` | `null` | Enable `video_understanding` MCP tool at `/mcp` (`"provider/model"`) |
 | `debug_log` | `null` | Path to debug log file; all 4 request/response stages logged per request |
 
 ### `providers`
@@ -155,11 +166,13 @@ providers:
     endpoints:
       <format>:               # one of: anthropic, openai_chat, openai_responses, google
         base_url: "..."       # endpoint-level override (optional)
-        models:               # list of model names (plain strings or dicts)
+        models:               # list of model names (plain strings or ModelEntry dicts)
           - plain-model-name
           - name: model-name
-            text_only: true
-            multimodal_fallback: "provider/model"
+            multimodality: [image, video]      # media types natively supported
+            image_fallback: "provider/model"   # per-model override for image fallback
+            audio_fallback: "provider/model"   # per-model override for audio fallback
+            video_fallback: "provider/model"   # per-model override for video fallback
             pricing:
               input: 3.0
               output: 15.0
@@ -179,13 +192,19 @@ providers:
 
 A single provider can have multiple endpoint formats, each with its own model list.
 
-#### `text_only` and multimodal fallback
+#### `multimodality` and per-type fallback
 
-Mark text-only models so the router auto-describes images instead of forwarding them and getting an error. When a text-only model receives a request with image content, the router calls the fallback model to describe each image, replaces the image blocks with `[Image: <description>]` text, and then forwards the (now text-only) request to the original model.
+Each model declares which media types it natively supports via the `multimodality` list. When a model receives content of an unsupported type, the router automatically describes it using the appropriate fallback model before forwarding the request.
+
+- Plain string models (no `ModelEntry`) default to `multimodality: []` — no media support.
+- The fallback model generates a textual description, which replaces the original block.
+- Results are cached (URL: 1 hour; base64/file: 30 days) to avoid redundant API calls.
 
 ```yaml
 server:
-  multimodal_fallback: "google/gemini-2.5-flash"   # global default
+  image_fallback: "google/gemini-2.5-flash"   # global default for images
+  audio_fallback: "openai/gpt-4o-audio-preview"
+  video_fallback: "google/gemini-2.5-flash"
 
 providers:
   local:
@@ -193,15 +212,14 @@ providers:
       openai_chat:
         base_url: "http://localhost:11434"
         models:
-          - llava                              # plain string = multimodal capable
-          - name: deepseek-r1
-            text_only: true                   # uses server.multimodal_fallback
+          - name: llava
+            multimodality: [image]             # natively supports images
+          - name: deepseek-r1                  # uses server.image_fallback for images
           - name: qwen2.5-coder:32b
-            text_only: true
-            multimodal_fallback: "local/llava" # per-model override
+            image_fallback: "local/llava"      # per-model override — use local llava
 ```
 
-Priority: **per-model `multimodal_fallback`** > **`server.multimodal_fallback`** > forward as-is (with a warning).
+Priority: **per-model `*_fallback`** > **`server.*_fallback`** > forward as-is (with a warning).
 
 ### `pricing`
 
@@ -214,6 +232,7 @@ providers:
       anthropic:
         models:
           - name: claude-opus-4-5
+            multimodality: [image]
             pricing:
               currency: USD          # "CNY" (default) or "USD"
               input: 15.0
@@ -238,6 +257,7 @@ providers:
       google:
         models:
           - name: gemini-2.5-pro
+            multimodality: [image, video]
             pricing:
               currency: USD
               tiers:                 # tiered: whole request billed at matching tier
@@ -285,11 +305,16 @@ simple-api-router models [--config PATH]
 Output example:
 ```
 anthropic  [anthropic]
-  claude-opus-4-5                                    multimodal  ¥109.00in ¥545.00out ¥10.89cr ¥136.73cw  /MTok
-  claude-sonnet-4-5                                  multimodal  ¥21.82in ¥109.10out ¥2.18cr ¥27.27cw  /MTok
+  claude-opus-4-5                                    image       ¥109.00in ¥545.00out ¥10.89cr ¥136.73cw  /MTok
+  claude-sonnet-4-5                                  image       ¥21.82in ¥109.10out ¥2.18cr ¥27.27cw  /MTok
 
 openai  [openai_chat]
-  gpt-4o                                             multimodal
+  gpt-4o                                             image
+  gpt-4o-mini                                        image
+
+openai  [openai_responses]
+  o3
+  o4-mini
 ```
 
 ### `simple-api-router usage`
@@ -361,30 +386,32 @@ Returns the same usage data as JSON for programmatic access.
 
 ---
 
-## Vision MCP Server
+## Media MCP Server
 
-When `server.vision_model` is set, the router mounts an [MCP](https://modelcontextprotocol.io/) server at `/mcp` on the **same port** (Streamable HTTP transport). This exposes an `understand_image` tool that lets any MCP-capable client (e.g. Claude Code) ask questions about images without routing the whole conversation through a multimodal model.
+When any of `server.image_model`, `server.audio_model`, or `server.video_model` is set, the router mounts an [MCP](https://modelcontextprotocol.io/) server at `/mcp` on the **same port** (Streamable HTTP transport). This exposes per-type understanding tools that let any MCP-capable client (e.g. Claude Code) ask questions about images, audio, or video files.
 
-Requests from `understand_image` go through the router's own `/v1/messages` endpoint, so they appear in usage logs and are subject to the same routing rules.
+Requests from the MCP tools go through the router's own `/v1/messages` endpoint, so they appear in usage logs and are subject to the same routing rules.
 
 ### Setup
 
-**1. Add `vision_model` to `config.yaml`:**
+**1. Add any media model to `config.yaml`:**
 
 ```yaml
 server:
   port: 8080
-  vision_model: "opencode/qwen-vl-plus"   # any vision-capable model in your config
+  image_model: "google/gemini-2.5-flash"        # enables image_understanding
+  audio_model: "openai/gpt-4o-audio-preview"    # enables audio_understanding
+  video_model: "google/gemini-2.5-flash"        # enables video_understanding
 ```
 
-Restart the router once to mount the endpoint. After that, changing `vision_model` in config hot-reloads without restart.
+Restart the router once to mount the endpoint. After that, changing model names in config hot-reloads without restart.
 
 **2. Add to Claude Code (`~/.claude/settings.json`):**
 
 ```json
 {
   "mcpServers": {
-    "vision": {
+    "media": {
       "type": "http",
       "url": "http://localhost:8080/mcp"
     }
@@ -392,27 +419,48 @@ Restart the router once to mount the endpoint. After that, changing `vision_mode
 }
 ```
 
-### Tool signature
+### Tool signatures
+
+All three tools share the same input schema: provide **exactly one** of `path`, `url`, or `base64_data`.
 
 ```
-understand_image(
+image_understanding(
     path?        — absolute or relative path to a local image file
     url?         — HTTPS URL of an image
     base64_data? — raw base64-encoded bytes (no data: prefix)
     media_type?  — MIME type for base64 input (default: "image/jpeg")
     question?    — what to ask (default: "Please describe this image in detail.")
+    max_tokens?  — response length limit (default: 16384)
+)
+
+audio_understanding(
+    path?        — absolute or relative path to a local audio file
+    url?         — HTTPS URL of an audio file
+    base64_data? — raw base64-encoded bytes (no data: prefix)
+    media_type?  — MIME type for base64 input (default: "audio/mp3")
+    question?    — what to ask (default: "Please transcribe and describe this audio in detail.")
+    max_tokens?  — response length limit (default: 16384)
+)
+
+video_understanding(
+    path?        — absolute or relative path to a local video file
+    url?         — HTTPS URL of a video
+    base64_data? — raw base64-encoded bytes (no data: prefix)
+    media_type?  — MIME type for base64 input (default: "video/mp4")
+    question?    — what to ask (default: "Please describe this video in detail.")
+    max_tokens?  — response length limit (default: 16384)
 )
 ```
-
-Provide exactly one of `path`, `url`, or `base64_data`.
 
 ### Standalone mode
 
 If you want the MCP server on a separate port (or without the main router):
 
 ```bash
-python -m simple_api_router.mcp_vision \
-    --model opencode/qwen-vl-plus \
+python -m simple_api_router.mcp_media \
+    --image-model google/gemini-2.5-flash \
+    --audio-model openai/gpt-4o-audio-preview \
+    --video-model google/gemini-2.5-flash \
     --router-url http://localhost:8080 \
     --port 8081
 ```
@@ -422,7 +470,7 @@ Claude Code config for standalone mode:
 ```json
 {
   "mcpServers": {
-    "vision": {
+    "media": {
       "type": "http",
       "url": "http://localhost:8081/mcp"
     }
@@ -442,12 +490,20 @@ providers:
     api_key: "${ANTHROPIC_KEY_1}"
     endpoints:
       anthropic:
-        models: [claude-opus-4-5, claude-sonnet-4-5]
+        models:
+          - name: claude-opus-4-5
+            multimodality: [image]
+          - name: claude-sonnet-4-5
+            multimodality: [image]
   ant2:
     api_key: "${ANTHROPIC_KEY_2}"
     endpoints:
       anthropic:
-        models: [claude-opus-4-5, claude-sonnet-4-5]
+        models:
+          - name: claude-opus-4-5
+            multimodality: [image]
+          - name: claude-sonnet-4-5
+            multimodality: [image]
 ```
 
 Use `model: "ant1/claude-opus-4-5"` or `model: "ant2/claude-opus-4-5"`.
@@ -455,12 +511,19 @@ Use `model: "ant1/claude-opus-4-5"` or `model: "ant2/claude-opus-4-5"`.
 ### Local / Self-Hosted (Ollama, vLLM, LM Studio)
 
 ```yaml
+server:
+  image_fallback: "local/llava"   # use local llava for images when needed
+
 providers:
   local:
     endpoints:
       openai_chat:
         base_url: "http://localhost:11434"
-        models: [llama3.2, qwen2.5-coder]
+        models:
+          - name: llava
+            multimodality: [image]   # natively handles images
+          - name: qwen2.5-coder      # text-only; images auto-described via server.image_fallback
+          - deepseek-r1              # plain string = no media support
 ```
 
 The trailing `/v1` on a `base_url` is stripped automatically.
@@ -474,11 +537,17 @@ providers:
     base_url: "https://api.myupstream.com"
     endpoints:
       anthropic:
-        models: [claude-opus-4-5]
+        models:
+          - name: claude-opus-4-5
+            multimodality: [image]
       openai_chat:
-        models: [gpt-4o]
+        models:
+          - name: gpt-4o
+            multimodality: [image]
       google:
-        models: [gemini-2.5-pro]
+        models:
+          - name: gemini-2.5-pro
+            multimodality: [image, video]
 ```
 
 ### Model Name Remapping
@@ -543,7 +612,7 @@ simple_api_router/
   proxy.py            — Request routing, provider resolution, dispatch
   converter.py        — Anthropic ↔ OpenAI conversion (request/response/streaming)
   converter_google.py — Anthropic ↔ Google Gemini conversion (request/response/streaming)
-  mcp_vision.py       — Vision MCP server (understand_image tool, mounted at /mcp)
+  mcp_media.py        — Media MCP server (image/audio/video understanding tools, mounted at /mcp)
   usage_db.py         — Per-request SQLite usage logging and query helpers
   usage_cli.py        — `usage` subcommand: load/aggregate/display usage stats
   service.py          — Service management (launchd / systemd install/start/stop/…)

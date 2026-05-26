@@ -16,8 +16,8 @@ server:
 
   # ── MCP media tools ────────────────────────────────────────────────────────
   # When any of these is set, the router mounts the corresponding tool at /mcp.
-  # Claude Code config: { "mcpServers": { "media": { "type": "sse",
-  #                        "url": "http://localhost:8080/mcp/sse" } } }
+  # Claude Code config: { "mcpServers": { "media": { "type": "http",
+  #                        "url": "http://localhost:8080/mcp" } } }
   # image_model: "google/gemini-2.5-flash"   # enables image_understanding tool
   # audio_model: "openai/gpt-4o-audio-preview" # enables audio_understanding tool
   # video_model: "google/gemini-2.5-flash"   # enables video_understanding tool
