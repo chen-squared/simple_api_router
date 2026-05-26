@@ -138,6 +138,26 @@ def _content_block_to_gemini_part(
             }
         return None
 
+    if btype in ("audio", "video"):
+        source = block.get("source", {})
+        src_type = source.get("type", "")
+        default_mt = f"{btype}/mp4" if btype == "video" else f"{btype}/mp3"
+        if src_type == "base64":
+            return {
+                "inlineData": {
+                    "mimeType": source.get("media_type", default_mt),
+                    "data": source.get("data", ""),
+                }
+            }
+        if src_type == "url":
+            return {
+                "fileData": {
+                    "mimeType": source.get("media_type", default_mt),
+                    "fileUri": source.get("url", ""),
+                }
+            }
+        return None
+
     if btype == "document":
         source = block.get("source", {})
         if source.get("type") == "base64":

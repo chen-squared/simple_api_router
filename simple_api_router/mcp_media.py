@@ -305,7 +305,7 @@ def main(argv: list[str] | None = None) -> None:
     import uvicorn
 
     parser = argparse.ArgumentParser(
-        description="Media MCP server (standalone SSE mode)",
+        description="Media MCP server (standalone Streamable HTTP mode)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

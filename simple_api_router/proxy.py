@@ -655,7 +655,28 @@ async def _describe_media_in_body(
             if cached is not None:
                 logger.debug("%s cache hit (url): %s", label, cache_key[4:60])
                 return {"type": "text", "text": f"[{label}: {cached}]"}
-            media_block = block  # let the fallback model fetch the URL itself
+            # Try downloading the URL ourselves so we can (a) cache by MD5 for
+            # longer TTLs and (b) pass base64 data — the fallback model may not
+            # be able to reach the URL (redirects, firewalls, etc.).
+            fetched = await _image_block_to_base64(block, client)
+            if fetched is not None:
+                media_bytes, detected_mt = fetched
+                cache_key = hashlib.md5(media_bytes).hexdigest()
+                cache_ttl = CONTENT_TTL
+                cached = cache.get(cache_key)
+                if cached is not None:
+                    logger.debug("%s cache hit (md5 via url download): %s", label, cache_key[:16])
+                    return {"type": "text", "text": f"[{label}: {cached}]"}
+                media_block = {
+                    "type": media_type,
+                    "source": {
+                        "type": "base64",
+                        "media_type": detected_mt,
+                        "data": _b64.b64encode(media_bytes).decode(),
+                    },
+                }
+            else:
+                media_block = block  # download failed; let the fallback model try the URL
 
         else:
             # base64 / file: fetch bytes → MD5 for cache key

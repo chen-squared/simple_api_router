@@ -141,6 +141,14 @@ def _user_blocks_to_openai(blocks: List[Dict]) -> List[Dict[str, Any]]:
             openai_content.append({"type": "text", "text": block.get("text", "")})
         elif btype == "image":
             openai_content.append(_image_block_to_openai(block))
+        elif btype == "audio":
+            converted = _audio_block_to_openai(block)
+            if converted is not None:
+                openai_content.append(converted)
+        elif btype == "video":
+            converted = _video_block_to_openai(block)
+            if converted is not None:
+                openai_content.append(converted)
         elif btype == "tool_result":
             tool_messages.append({
                 "role": "tool",
@@ -220,6 +228,44 @@ def _image_block_to_openai(block: Dict) -> Dict[str, Any]:
     else:
         url = source.get("url", "")
     return {"type": "image_url", "image_url": {"url": url}}
+
+
+def _audio_block_to_openai(block: Dict) -> Optional[Dict[str, Any]]:
+    """Convert an Anthropic audio content block to OpenAI input_audio format.
+
+    Returns None if the audio source can't be represented in OpenAI format
+    (e.g. URL sources, which OpenAI doesn't support for audio).
+    """
+    source = block.get("source", {})
+    if source.get("type") == "base64":
+        mt = source.get("media_type", "audio/mp3")
+        fmt = mt.split("/")[-1] if "/" in mt else mt
+        return {"type": "input_audio", "input_audio": {
+            "data": source.get("data", ""),
+            "format": fmt,
+        }}
+    # OpenAI input_audio doesn't support URL sources
+    return None
+
+
+def _video_block_to_openai(block: Dict) -> Optional[Dict[str, Any]]:
+    """Convert an Anthropic video content block to an OpenAI-compatible format.
+
+    OpenAI Chat Completions doesn't have a native video content type.
+    Some providers (openrouter, opencode) accept Anthropic-format video
+    blocks as-is, so we pass the base64 data through as an image_url with
+    a data URI.  URL sources are left for the upstream to handle.
+    """
+    source = block.get("source", {})
+    if source.get("type") == "base64":
+        mt = source.get("media_type", "video/mp4")
+        url = f"data:{mt};base64,{source.get('data', '')}"
+        return {"type": "image_url", "image_url": {"url": url}}
+    # For URL sources, pass through as a URL — the upstream may handle it.
+    url = source.get("url", "")
+    if url:
+        return {"type": "image_url", "image_url": {"url": url}}
+    return None
 
 
 def _tool_result_content(block: Dict) -> str:
