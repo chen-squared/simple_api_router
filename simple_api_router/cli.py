@@ -64,6 +64,40 @@ def _models_command(config_path: str) -> None:
     print(f"Config: {cfg_path}")
 
 
+def _test_command(model_str: str, config_path: str) -> None:
+    """Quick-test a provider/model configuration."""
+    import asyncio
+    from simple_api_router.test_model import test_model_direct
+
+    cfg_path = Path(config_path).expanduser().resolve()
+    try:
+        cfg = load_config(cfg_path, skip_env_check=True)
+    except Exception as exc:
+        print(f"Error loading config: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Testing {model_str} ...", flush=True)
+    result = asyncio.run(test_model_direct(model_str, cfg))
+
+    if result["success"]:
+        ms = result.get("latency_ms", "?")
+        preview = result.get("response_preview", "").strip()
+        fmt = result.get("api_format", "")
+        backend = result.get("backend_model", "")
+        print(f"\033[32m✓\033[0m  {model_str}  \033[90m{ms}ms\033[0m")
+        if backend and backend != model_str.split("/", 1)[-1]:
+            print(f"   backend: {backend}  ({fmt})")
+        if preview:
+            print(f"   response: {preview}")
+    else:
+        err = result.get("error", "Unknown error")
+        ms = result.get("latency_ms")
+        suffix = f"  \033[90m{ms}ms\033[0m" if ms is not None else ""
+        print(f"\033[31m✗\033[0m  {model_str}{suffix}")
+        print(f"   error: {err}")
+        sys.exit(1)
+
+
 def _load_env_file(path: Path) -> None:
     """Source a KEY=VALUE env file into os.environ (skipping comments/blanks)."""
     if not path.exists():
@@ -170,6 +204,21 @@ def main() -> None:
     subparsers.add_parser("log",       help="Tail service logs")
     subparsers.add_parser("models",    help="List configured providers and models")
 
+    # ── test ────────────────────────────────────────────────────────────────
+    test_p = subparsers.add_parser(
+        "test",
+        help="Quick-test a model connection (e.g. test anthropic/claude-3-5-haiku-20241022)",
+    )
+    test_p.add_argument(
+        "model",
+        metavar="PROVIDER/MODEL",
+        help="Model to test (e.g. openai/gpt-4o or myprovider/mymodel)",
+    )
+    test_p.add_argument(
+        "--config", "-c", metavar="PATH", default=None,
+        help="Config file path (default: auto-detect)",
+    )
+
     # ── usage ───────────────────────────────────────────────────────────────
     usage_p = subparsers.add_parser("usage", help="Show API usage statistics")
     usage_p.add_argument(
@@ -221,6 +270,11 @@ def main() -> None:
     if cmd == "models":
         from simple_api_router.service import resolve_config
         _models_command(str(resolve_config(args.config)))
+        return
+
+    if cmd == "test":
+        from simple_api_router.service import resolve_config
+        _test_command(args.model, str(resolve_config(getattr(args, "config", None))))
         return
 
     if cmd == "usage":

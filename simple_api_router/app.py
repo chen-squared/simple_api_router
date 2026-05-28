@@ -12,7 +12,7 @@ from typing import Any, AsyncIterator, Dict, Optional
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from watchfiles import awatch
 
 from .config import RouterConfig, load_config
@@ -719,6 +719,355 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     </div>
     {pagination()}
   </section>
+</body>
+</html>
+"""
+        return HTMLResponse(page_html)
+
+    # ------------------------------------------------------------------
+    # GET /config/yaml  — return raw YAML config
+    # POST /config/yaml — save new YAML config
+    # POST /config/test — quick-test a model
+    # GET  /config      — HTML config editor page
+    # ------------------------------------------------------------------
+
+    @app.get("/config/yaml")
+    async def config_yaml_get(request: Request):
+        if config_path is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Config path unknown (server started without --config file path)"},
+            )
+        try:
+            raw = config_path.read_text()
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"error": str(exc)})
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(raw, media_type="text/plain; charset=utf-8")
+
+    @app.post("/config/yaml")
+    async def config_yaml_post(request: Request):
+        if config_path is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Config path unknown (server started without --config file path)"},
+            )
+        body_bytes = await request.body()
+        new_yaml = body_bytes.decode("utf-8")
+        # Validate before saving
+        import yaml as _yaml
+        try:
+            parsed = _yaml.safe_load(new_yaml)
+            if not isinstance(parsed, dict):
+                raise ValueError("YAML must be a mapping at the top level")
+            from .config import RouterConfig as _RC
+            _RC.model_validate(parsed)
+        except Exception as exc:
+            return JSONResponse(status_code=400, content={"error": f"Invalid config: {exc}"})
+        try:
+            config_path.write_text(new_yaml, encoding="utf-8")
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"error": f"Write error: {exc}"})
+        return JSONResponse({"ok": True, "message": "Config saved. Reload will apply automatically."})
+
+    @app.post("/config/test")
+    async def config_test(request: Request):
+        body: Dict[str, Any] = await request.json()
+        model_str: str = body.get("model", "")
+        if not model_str:
+            return JSONResponse(status_code=400, content={"error": "model is required"})
+        cfg: RouterConfig = request.app.state.config
+        client: httpx.AsyncClient = request.app.state.http_client
+        from .test_model import test_model_direct
+        result = await test_model_direct(model_str, cfg, client)
+        return JSONResponse(result)
+
+    @app.get("/config")
+    async def config_page(request: Request) -> HTMLResponse:  # noqa: C901
+        cfg: RouterConfig = request.app.state.config
+
+        def _fmt_multimodal(entry) -> str:
+            mm = getattr(entry, "multimodality", []) or []
+            if not mm:
+                return '<span class="badge badge-grey">text</span>'
+            icons = {"image": "🖼", "audio": "🎵", "video": "🎬"}
+            return " ".join(
+                f'<span class="badge badge-blue">{icons.get(m, m)}{m}</span>'
+                for m in mm
+            )
+
+        model_rows = []
+        for prov_name, prov in cfg.providers.items():
+            for fmt, ep in prov.endpoints.items():
+                for m in ep.models:
+                    from .config import ModelEntry as _ME
+                    entry = m if isinstance(m, _ME) else _ME(name=str(m))
+                    full_id = f"{prov_name}/{entry.name}"
+                    model_rows.append(
+                        f'<tr data-model="{html.escape(full_id)}">'
+                        f'<td class="prov-cell">{html.escape(prov_name)}</td>'
+                        f'<td>{html.escape(entry.name)}</td>'
+                        f'<td><code class="fmt">{html.escape(fmt)}</code></td>'
+                        f'<td>{_fmt_multimodal(entry)}</td>'
+                        f'<td class="test-cell">'
+                        f'  <button class="test-btn" onclick="testModel(this, \'{html.escape(full_id)}\')">'
+                        f"    Test"
+                        f"  </button>"
+                        f'  <span class="test-result"></span>'
+                        f"</td>"
+                        f"</tr>"
+                    )
+
+        model_table = "\n".join(model_rows) or '<tr><td colspan="5" class="empty">No models configured</td></tr>'
+        has_config_path = config_path is not None
+        config_path_str = str(config_path) if config_path else "(unknown)"
+        editor_disabled = "" if has_config_path else "disabled"
+        editor_notice = "" if has_config_path else '<p class="notice warn">Config path unknown — editor disabled.</p>'
+
+        page_html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Router Config</title>
+  <style>
+    :root {{ color-scheme: dark light; }}
+    body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; background: #111827; color: #e5e7eb; }}
+    a {{ color: #93c5fd; text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+    h1 {{ margin: 0 0 4px; font-size: 26px; }}
+    .subhead {{ color: #94a3b8; font-size: 13px; margin-bottom: 18px; }}
+    .nav {{ display: flex; gap: 12px; margin-bottom: 24px; align-items: center; }}
+    .nav a {{ border: 1px solid #374151; border-radius: 999px; padding: 5px 14px; color: #cbd5e1; font-size: 13px; }}
+    .nav a:hover {{ border-color: #2563eb; text-decoration: none; }}
+    .nav a.active {{ background: #2563eb; border-color: #2563eb; color: #fff; }}
+    .layout {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }}
+    @media (max-width: 900px) {{ .layout {{ grid-template-columns: 1fr; }} }}
+    .panel {{ background: #111827; border: 1px solid #374151; border-radius: 12px; overflow: hidden; }}
+    .panel-header {{ padding: 14px 16px; border-bottom: 1px solid #374151; display: flex; align-items: center; justify-content: space-between; }}
+    .panel-header h2 {{ margin: 0; font-size: 15px; }}
+    .table-wrap {{ overflow-x: auto; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+    th, td {{ padding: 8px 12px; border-bottom: 1px solid #1f2937; text-align: left; white-space: nowrap; }}
+    th {{ color: #94a3b8; font-weight: 600; }}
+    tr:last-child td {{ border-bottom: 0; }}
+    .prov-cell {{ color: #93c5fd; font-weight: 500; }}
+    .fmt {{ background: #1f2937; padding: 2px 6px; border-radius: 4px; font-size: 11px; color: #94a3b8; }}
+    .badge {{ display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; }}
+    .badge-grey {{ background: #1f2937; color: #94a3b8; }}
+    .badge-blue {{ background: #1e3a5f; color: #93c5fd; }}
+    .empty {{ color: #94a3b8; text-align: center; }}
+    .test-btn {{
+      padding: 3px 10px; font-size: 12px; border-radius: 6px; cursor: pointer;
+      border: 1px solid #374151; background: #1f2937; color: #cbd5e1;
+    }}
+    .test-btn:hover {{ border-color: #2563eb; color: #93c5fd; }}
+    .test-btn:disabled {{ opacity: 0.5; cursor: default; }}
+    .test-result {{ font-size: 12px; margin-left: 8px; }}
+    .test-result.ok {{ color: #4ade80; }}
+    .test-result.err {{ color: #f87171; }}
+    .test-result.loading {{ color: #94a3b8; }}
+    .editor-wrap {{ padding: 16px; display: flex; flex-direction: column; gap: 12px; }}
+    textarea#yaml-editor {{
+      width: 100%; box-sizing: border-box; height: 560px; resize: vertical;
+      font-family: 'SF Mono', 'Fira Code', Consolas, monospace; font-size: 12px;
+      background: #0d1117; color: #e6edf3; border: 1px solid #374151;
+      border-radius: 8px; padding: 12px; outline: none; tab-size: 2;
+    }}
+    textarea#yaml-editor:focus {{ border-color: #2563eb; }}
+    .btn-row {{ display: flex; gap: 10px; align-items: center; }}
+    .btn {{
+      padding: 7px 18px; font-size: 13px; border-radius: 8px; cursor: pointer;
+      border: 1px solid #374151; background: #1f2937; color: #cbd5e1;
+    }}
+    .btn-primary {{ background: #2563eb; border-color: #2563eb; color: #fff; font-weight: 500; }}
+    .btn:hover {{ opacity: 0.85; }}
+    .btn:disabled {{ opacity: 0.5; cursor: default; }}
+    .save-status {{ font-size: 13px; }}
+    .save-status.ok {{ color: #4ade80; }}
+    .save-status.err {{ color: #f87171; }}
+    .notice {{ font-size: 13px; padding: 8px 12px; border-radius: 8px; margin: 0; }}
+    .notice.warn {{ background: #422006; color: #fbbf24; border: 1px solid #78350f; }}
+    pre.preview {{ background: #1f2937; padding: 8px 12px; border-radius: 6px; font-size: 11px; color: #94a3b8; margin: 4px 0 0; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  </style>
+</head>
+<body>
+  <h1>Simple API Router</h1>
+  <p class="subhead">Config: <code>{html.escape(config_path_str)}</code></p>
+  <nav class="nav">
+    <a href="/stats">📊 Stats</a>
+    <a href="/config" class="active">⚙ Config</a>
+    <a href="/health">🩺 Health</a>
+  </nav>
+
+  <div class="layout">
+    <!-- ── Left: model list ───────────────────────────────────────── -->
+    <div class="panel">
+      <div class="panel-header">
+        <h2>Models</h2>
+        <button class="btn" onclick="testAll()" id="test-all-btn">Test All</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Provider</th><th>Model</th><th>Format</th><th>Modality</th><th>Test</th>
+            </tr>
+          </thead>
+          <tbody>
+{model_table}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── Right: YAML editor ─────────────────────────────────────── -->
+    <div class="panel">
+      <div class="panel-header">
+        <h2>Config Editor</h2>
+        <span class="save-status" id="save-status"></span>
+      </div>
+      <div class="editor-wrap">
+        {editor_notice}
+        <textarea id="yaml-editor" spellcheck="false" {editor_disabled}
+          placeholder="Loading config..."></textarea>
+        <div class="btn-row">
+          <button class="btn btn-primary" id="save-btn" onclick="saveConfig()" {editor_disabled}>
+            Save Config
+          </button>
+          <button class="btn" id="reload-btn" onclick="loadConfig()" {editor_disabled}>
+            ↺ Reload
+          </button>
+          <span style="color:#94a3b8;font-size:12px">Config reloads automatically after save.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ── load config YAML ─────────────────────────────────────────────────
+    async function loadConfig() {{
+      const ta = document.getElementById('yaml-editor');
+      const btn = document.getElementById('reload-btn');
+      if (!ta || ta.disabled) return;
+      btn.disabled = true;
+      btn.textContent = '↺ Loading…';
+      try {{
+        const r = await fetch('/config/yaml');
+        if (r.ok) {{
+          ta.value = await r.text();
+          setStatus('', '');
+        }} else {{
+          const d = await r.json().catch(() => ({{}}));
+          setStatus('err', 'Load failed: ' + (d.error || r.status));
+        }}
+      }} catch(e) {{
+        setStatus('err', 'Load failed: ' + e.message);
+      }} finally {{
+        btn.disabled = false;
+        btn.textContent = '↺ Reload';
+      }}
+    }}
+
+    // ── save config YAML ─────────────────────────────────────────────────
+    async function saveConfig() {{
+      const ta = document.getElementById('yaml-editor');
+      const btn = document.getElementById('save-btn');
+      if (!ta || ta.disabled) return;
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      setStatus('', 'Saving…');
+      try {{
+        const r = await fetch('/config/yaml', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'text/plain; charset=utf-8'}},
+          body: ta.value,
+        }});
+        const d = await r.json().catch(() => ({{}}));
+        if (r.ok) {{
+          setStatus('ok', '✓ Saved');
+        }} else {{
+          setStatus('err', '✗ ' + (d.error || r.status));
+        }}
+      }} catch(e) {{
+        setStatus('err', '✗ ' + e.message);
+      }} finally {{
+        btn.disabled = false;
+        btn.textContent = 'Save Config';
+      }}
+    }}
+
+    function setStatus(cls, msg) {{
+      const el = document.getElementById('save-status');
+      el.className = 'save-status' + (cls ? ' ' + cls : '');
+      el.textContent = msg;
+    }}
+
+    // ── test a single model ───────────────────────────────────────────────
+    async function testModel(btn, model) {{
+      const resultEl = btn.parentElement.querySelector('.test-result');
+      btn.disabled = true;
+      resultEl.className = 'test-result loading';
+      resultEl.textContent = '…testing';
+      try {{
+        const r = await fetch('/config/test', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{model}}),
+        }});
+        const d = await r.json();
+        if (d.success) {{
+          resultEl.className = 'test-result ok';
+          const ms = d.latency_ms != null ? d.latency_ms + 'ms' : '';
+          resultEl.textContent = '✓ ' + ms;
+          if (d.response_preview) {{
+            const pre = document.createElement('pre');
+            pre.className = 'preview';
+            pre.textContent = d.response_preview;
+            resultEl.appendChild(pre);
+          }}
+        }} else {{
+          resultEl.className = 'test-result err';
+          const ms = d.latency_ms != null ? ' ' + d.latency_ms + 'ms' : '';
+          resultEl.textContent = '✗' + ms + ' ' + (d.error || 'error');
+        }}
+      }} catch(e) {{
+        resultEl.className = 'test-result err';
+        resultEl.textContent = '✗ ' + e.message;
+      }} finally {{
+        btn.disabled = false;
+      }}
+    }}
+
+    // ── test all models sequentially ──────────────────────────────────────
+    async function testAll() {{
+      const allBtn = document.getElementById('test-all-btn');
+      allBtn.disabled = true;
+      const rows = document.querySelectorAll('tr[data-model]');
+      for (const row of rows) {{
+        const btn = row.querySelector('.test-btn');
+        const model = row.getAttribute('data-model');
+        if (btn && model) await testModel(btn, model);
+      }}
+      allBtn.disabled = false;
+    }}
+
+    // ── handle Tab key in textarea ────────────────────────────────────────
+    document.addEventListener('DOMContentLoaded', () => {{
+      loadConfig();
+      const ta = document.getElementById('yaml-editor');
+      if (ta && !ta.disabled) {{
+        ta.addEventListener('keydown', (e) => {{
+          if (e.key === 'Tab') {{
+            e.preventDefault();
+            const s = ta.selectionStart, end = ta.selectionEnd;
+            ta.value = ta.value.substring(0, s) + '  ' + ta.value.substring(end);
+            ta.selectionStart = ta.selectionEnd = s + 2;
+          }}
+        }});
+      }}
+    }});
+  </script>
 </body>
 </html>
 """
