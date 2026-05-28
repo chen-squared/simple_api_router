@@ -50,7 +50,7 @@ _CONFIG_PAGE_CSS = """
     .nav { display:flex; gap:10px; margin-bottom:22px; }
     .nav a { border:1px solid #374151; border-radius:999px; padding:5px 14px; color:#cbd5e1; font-size:13px; }
     .nav a.active { background:#2563eb; border-color:#2563eb; color:#fff; }
-    .layout { display:grid; grid-template-columns:1fr 1.3fr; gap:18px; }
+    .layout { display:grid; grid-template-columns:1fr 1.5fr; gap:18px; align-items:start; }
     @media(max-width:900px) { .layout { grid-template-columns:1fr; } }
     .panel { background:#111827; border:1px solid #374151; border-radius:12px; overflow:hidden; }
     .panel-hdr { padding:12px 16px; border-bottom:1px solid #374151; display:flex; align-items:center; justify-content:space-between; gap:8px; }
@@ -63,7 +63,7 @@ _CONFIG_PAGE_CSS = """
     .pc { color:#93c5fd; font-weight:500; }
     .empty { color:#94a3b8; text-align:center; }
     .fmt-badge { background:#1f2937; padding:2px 6px; border-radius:4px; font-size:11px; color:#94a3b8; }
-    .badge { display:inline-block; padding:1px 6px; border-radius:4px; font-size:11px; margin-right:2px; }
+    .badge { display:inline-block; padding:2px 6px; border-radius:4px; font-size:12px; margin-right:2px; }
     .bg { background:#1f2937; color:#94a3b8; }
     .bb { background:#1e3a5f; color:#93c5fd; }
     .test-btn { padding:3px 10px; font-size:12px; border-radius:6px; cursor:pointer; border:1px solid #374151; background:#1f2937; color:#cbd5e1; }
@@ -74,54 +74,6 @@ _CONFIG_PAGE_CSS = """
     .test-result.err { color:#f87171; }
     .test-result.spin { color:#94a3b8; }
     pre.preview { background:#1f2937; padding:4px 8px; border-radius:5px; font-size:11px; color:#94a3b8; margin:2px 0 0; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .tab-bar { display:flex; border-bottom:1px solid #374151; }
-    .tab-btn { padding:9px 18px; font-size:13px; cursor:pointer; border:none; border-bottom:2px solid transparent; background:transparent; color:#94a3b8; }
-    .tab-btn.active { color:#e5e7eb; border-bottom-color:#2563eb; }
-    .tab-pane { display:none; }
-    .tab-pane.active { display:block; }
-    .form-scroll { padding:16px; overflow-y:auto; max-height:680px; }
-    .settings-section { margin-bottom:12px; border:1px solid #374151; border-radius:8px; overflow:hidden; }
-    .settings-section > summary { list-style:none; padding:9px 14px; cursor:pointer; font-weight:600; font-size:13px; background:#1a2236; display:flex; align-items:center; gap:6px; }
-    .settings-section > summary::-webkit-details-marker { display:none; }
-    .settings-section > summary::before { content:"\25B8"; font-size:11px; transition:transform .2s; }
-    .settings-section[open] > summary::before { transform:rotate(90deg); }
-    .settings-section > div { padding:12px 14px; }
-    .field-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px 16px; }
-    @media(max-width:600px) { .field-grid { grid-template-columns:1fr; } }
-    .field-row { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
-    .field-row label { font-size:12px; color:#94a3b8; min-width:130px; flex-shrink:0; font-family:monospace; }
-    .field-row input,.field-row select { flex:1; min-width:0; padding:5px 8px; font-size:13px; background:#1f2937; border:1px solid #374151; border-radius:6px; color:#e5e7eb; }
-    .field-row input:focus,.field-row select:focus { outline:none; border-color:#2563eb; }
-    .prov-card { border:1px solid #374151; border-radius:8px; margin-bottom:10px; overflow:hidden; }
-    .prov-card > summary { list-style:none; padding:10px 14px; cursor:pointer; font-weight:700; font-size:14px; background:#1a2236; display:flex; align-items:center; gap:8px; color:#93c5fd; }
-    .prov-card > summary::-webkit-details-marker { display:none; }
-    .prov-card > summary::before { content:"\25B8"; font-size:11px; color:#94a3b8; transition:transform .2s; }
-    .prov-card[open] > summary::before { transform:rotate(90deg); }
-    .prov-body { padding:12px 14px; }
-    .key-wrap { display:flex; gap:6px; flex:1; min-width:0; }
-    .key-wrap input { flex:1; min-width:0; }
-    .show-key-btn { padding:4px 10px; font-size:12px; border-radius:6px; cursor:pointer; border:1px solid #374151; background:#1f2937; color:#cbd5e1; white-space:nowrap; flex-shrink:0; }
-    .show-key-btn:hover { border-color:#2563eb; }
-    .ep-section { margin-top:10px; border:1px solid #2d3748; border-radius:6px; overflow:hidden; }
-    .ep-header { display:flex; align-items:center; gap:10px; padding:7px 12px; background:#141f35; flex-wrap:wrap; }
-    .ep-header input { flex:1; min-width:160px; padding:4px 8px; font-size:12px; background:#1f2937; border:1px solid #374151; border-radius:5px; color:#e5e7eb; }
-    .models-list { padding:4px 10px 0; }
-    .model-row { display:flex; align-items:center; gap:6px; padding:5px 0; border-bottom:1px solid #1f2937; flex-wrap:wrap; }
-    .model-row:last-child { border-bottom:0; }
-    .model-name { width:190px; flex-shrink:0; padding:4px 7px; font-size:13px; background:#0d1117; border:1px solid #374151; border-radius:5px; color:#e5e7eb; }
-    .model-name:focus { outline:none; border-color:#2563eb; }
-    .mm-label { display:inline-flex; align-items:center; gap:3px; font-size:12px; color:#94a3b8; cursor:pointer; user-select:none; padding:2px 4px; border-radius:4px; }
-    .mm-text { color:#4b5563; cursor:default; }
-    .mm-label input { cursor:pointer; accent-color:#2563eb; }
-    .mm-text input { cursor:default; }
-    .del-btn { padding:2px 8px; font-size:12px; border-radius:5px; cursor:pointer; border:1px solid #374151; background:#1f2937; color:#f87171; margin-left:auto; }
-    .del-btn:hover { border-color:#f87171; background:#2d1b1b; }
-    .adv-btn { padding:2px 8px; font-size:14px; border-radius:5px; cursor:pointer; border:1px solid #374151; background:#1f2937; color:#94a3b8; }
-    .adv-btn:hover { border-color:#2563eb; }
-    .model-adv { width:100%; display:flex; gap:6px; padding:4px 0 6px; flex-wrap:wrap; }
-    .model-adv input { flex:1; min-width:140px; padding:3px 7px; font-size:12px; background:#0d1117; border:1px solid #374151; border-radius:5px; color:#94a3b8; }
-    .add-model-btn { margin:8px 10px; padding:4px 12px; font-size:12px; border-radius:6px; cursor:pointer; border:1px dashed #374151; background:transparent; color:#94a3b8; }
-    .add-model-btn:hover { border-color:#2563eb; color:#93c5fd; }
     .save-bar { padding:12px 16px; border-top:1px solid #374151; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
     .btn { padding:7px 18px; font-size:13px; border-radius:8px; cursor:pointer; border:1px solid #374151; background:#1f2937; color:#cbd5e1; }
     .btn:hover { border-color:#2563eb; }
@@ -131,159 +83,35 @@ _CONFIG_PAGE_CSS = """
     .save-status { font-size:13px; }
     .save-status.ok { color:#4ade80; }
     .save-status.err { color:#f87171; }
-    .yaml-wrap { padding:14px; }
-    #yaml-editor { width:100%; height:540px; resize:vertical; font-family:'SF Mono','Fira Code',Consolas,monospace; font-size:12px; background:#0d1117; color:#e6edf3; border:1px solid #374151; border-radius:8px; padding:12px; outline:none; tab-size:2; line-height:1.5; }
-    #yaml-editor:focus { border-color:#2563eb; }
+    #editor-wrap { padding:14px 14px 0; }
+    #editor { width:100%; height:580px; border:1px solid #374151; border-radius:8px; overflow:hidden; }
     .notice { font-size:13px; padding:8px 12px; border-radius:8px; margin:0 0 10px; }
     .notice.warn { background:#422006; color:#fbbf24; border:1px solid #78350f; }
 """
 _CONFIG_PAGE_JS = """
-    function switchTab(btn, name) {
-      document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      document.getElementById('tab-' + name).classList.add('active');
-      btn.classList.add('active');
-      if (name === 'yaml') loadYaml();
-    }
-    function toggleKey(btn) {
-      const inp = btn.previousElementSibling;
-      if (inp.type === 'password') { inp.type = 'text'; btn.textContent = 'Hide'; }
-      else { inp.type = 'password'; btn.textContent = 'Show'; }
-    }
-    function addModel(btn) {
-      const list = btn.previousElementSibling;
-      const row = document.createElement('div');
-      row.className = 'model-row';
-      row.innerHTML = `
-        <input type="text" class="model-name" placeholder="model name" />
-        <label class="mm-label mm-text"><input type="checkbox" checked disabled> text</label>
-        <label class="mm-label"><input type="checkbox" class="mm-check" value="image"> image</label>
-        <label class="mm-label"><input type="checkbox" class="mm-check" value="audio"> audio</label>
-        <label class="mm-label"><input type="checkbox" class="mm-check" value="video"> video</label>
-        <button class="adv-btn" onclick="toggleAdv(this)" type="button">&#8943;</button>
-        <button class="del-btn" onclick="delModel(this)" type="button">&#10005;</button>
-      `;
-      list.appendChild(row);
-      row.querySelector('.model-name').focus();
-    }
-    function delModel(btn) { btn.closest('.model-row').remove(); }
-    function toggleAdv(btn) {
-      const row = btn.closest('.model-row');
-      let adv = row.querySelector('.model-adv');
-      if (adv) { adv.remove(); return; }
-      adv = document.createElement('div');
-      adv.className = 'model-adv';
-      adv.innerHTML = `
-        <input type="text" class="model-img-fb" placeholder="image_fallback (provider/model)" />
-        <input type="text" class="model-aud-fb" placeholder="audio_fallback (provider/model)" />
-        <input type="text" class="model-vid-fb" placeholder="video_fallback (provider/model)" />
-      `;
-      row.appendChild(adv);
-    }
-    function collectSettings() {
-      const data = { server: {}, providers: {} };
-      document.querySelectorAll('[data-server]').forEach(el => {
-        const k = el.dataset.server;
-        let v = el.type === 'number' ? (el.value === '' ? null : Number(el.value)) : (el.value || null);
-        data.server[k] = v;
-      });
-      document.querySelectorAll('.prov-body[data-prov]').forEach(body => {
-        const pname = body.dataset.prov;
-        const prov = {
-          api_key: body.querySelector('.prov-apikey').value || '',
-          base_url: body.querySelector('.prov-baseurl').value || null,
-          endpoints: {}
-        };
-        body.querySelectorAll('.ep-section[data-fmt]').forEach(ep => {
-          const fmt = ep.dataset.fmt;
-          const models = [];
-          ep.querySelectorAll('.model-row').forEach(row => {
-            const name = row.querySelector('.model-name').value.trim();
-            if (!name) return;
-            const mm = [];
-            row.querySelectorAll('.mm-check:checked').forEach(cb => mm.push(cb.value));
-            const m = { name, multimodality: mm };
-            const imgFb = row.querySelector('.model-img-fb');
-            const audFb = row.querySelector('.model-aud-fb');
-            const vidFb = row.querySelector('.model-vid-fb');
-            if (imgFb?.value) m.image_fallback = imgFb.value;
-            if (audFb?.value) m.audio_fallback = audFb.value;
-            if (vidFb?.value) m.video_fallback = vidFb.value;
-            models.push(m);
-          });
-          prov.endpoints[fmt] = {
-            base_url: ep.querySelector('.ep-baseurl').value || null,
-            models
-          };
-        });
-        data.providers[pname] = prov;
-      });
-      return data;
-    }
-    async function saveSettings() {
-      const btn = document.getElementById('save-btn');
-      const status = document.getElementById('save-status');
-      btn.disabled = true; btn.textContent = 'Saving…';
-      status.className = 'save-status'; status.textContent = '';
-      try {
-        const r = await fetch('/config/data', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(collectSettings()),
-        });
-        const d = await r.json().catch(() => ({}));
-        if (r.ok) { status.className = 'save-status ok'; status.textContent = '✓ Saved'; }
-        else { status.className = 'save-status err'; status.textContent = '✗ ' + (d.error || r.status); }
-      } catch(e) {
-        status.className = 'save-status err'; status.textContent = '✗ ' + e.message;
-      } finally { btn.disabled = false; btn.textContent = 'Save Config'; }
-    }
-    async function loadYaml() {
-      const ta = document.getElementById('yaml-editor');
-      if (!ta || ta.dataset.loaded) return;
-      ta.dataset.loaded = '1';
-      try {
-        const r = await fetch('/config/yaml');
-        if (r.ok) ta.value = await r.text();
-        else ta.value = '# Error loading config';
-      } catch(e) { ta.value = '# Error: ' + e.message; }
-    }
     async function saveYaml() {
-      const ta = document.getElementById('yaml-editor');
       const btn = document.getElementById('yaml-save-btn');
       const status = document.getElementById('yaml-status');
-      btn.disabled = true; btn.textContent = 'Saving…';
+      btn.disabled = true; btn.textContent = 'Saving\u2026';
       status.className = 'save-status'; status.textContent = '';
       try {
+        const content = window._editor ? window._editor.getValue() : '';
         const r = await fetch('/config/yaml', {
           method: 'POST',
           headers: {'Content-Type': 'text/plain; charset=utf-8'},
-          body: ta.value,
+          body: content,
         });
         const d = await r.json().catch(() => ({}));
-        if (r.ok) { status.className = 'save-status ok'; status.textContent = '✓ Saved'; }
-        else { status.className = 'save-status err'; status.textContent = '✗ ' + (d.error || r.status); }
+        if (r.ok) { status.className = 'save-status ok'; status.textContent = '\u2713 Saved'; }
+        else { status.className = 'save-status err'; status.textContent = '\u2717 ' + (d.error || r.status); }
       } catch(e) {
-        status.className = 'save-status err'; status.textContent = '✗ ' + e.message;
+        status.className = 'save-status err'; status.textContent = '\u2717 ' + e.message;
       } finally { btn.disabled = false; btn.textContent = 'Save YAML'; }
     }
-    document.addEventListener('DOMContentLoaded', () => {
-      const ta = document.getElementById('yaml-editor');
-      if (ta) {
-        ta.addEventListener('keydown', e => {
-          if (e.key === 'Tab') {
-            e.preventDefault();
-            const s = ta.selectionStart;
-            ta.value = ta.value.slice(0,s) + '  ' + ta.value.slice(ta.selectionEnd);
-            ta.selectionStart = ta.selectionEnd = s + 2;
-          }
-        });
-      }
-    });
     async function testModel(btn, model) {
       const resultEl = btn.parentElement.querySelector('.test-result');
       btn.disabled = true;
-      resultEl.className = 'test-result spin'; resultEl.innerHTML = '…';
+      resultEl.className = 'test-result spin'; resultEl.innerHTML = '\u2026';
       try {
         const r = await fetch('/config/test', {
           method: 'POST',
@@ -293,7 +121,7 @@ _CONFIG_PAGE_JS = """
         const d = await r.json();
         if (d.success) {
           resultEl.className = 'test-result ok';
-          resultEl.textContent = '✓' + (d.latency_ms != null ? ' ' + d.latency_ms + 'ms' : '');
+          resultEl.textContent = '\u2713' + (d.latency_ms != null ? ' ' + d.latency_ms + 'ms' : '');
           if (d.response_preview) {
             const pre = document.createElement('pre');
             pre.className = 'preview'; pre.textContent = d.response_preview;
@@ -301,11 +129,11 @@ _CONFIG_PAGE_JS = """
           }
         } else {
           resultEl.className = 'test-result err';
-          resultEl.textContent = '✗' + (d.latency_ms != null ? ' ' + d.latency_ms + 'ms' : '') +
+          resultEl.textContent = '\u2717' + (d.latency_ms != null ? ' ' + d.latency_ms + 'ms' : '') +
             ' ' + (d.error || 'error');
         }
       } catch(e) {
-        resultEl.className = 'test-result err'; resultEl.textContent = '✗ ' + e.message;
+        resultEl.className = 'test-result err'; resultEl.textContent = '\u2717 ' + e.message;
       } finally { btn.disabled = false; }
     }
     async function testAll() {
@@ -1243,117 +1071,13 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     @app.get("/config")
     async def config_page(request: Request) -> HTMLResponse:  # noqa: C901
         cfg: RouterConfig = request.app.state.config
-        data = _config_to_data(cfg)
-        s = data["server"]
         has_config_path = config_path is not None
         config_path_str = html.escape(str(config_path) if config_path else "(unknown)")
 
-        log_level_opts = ""
-        for lvl in ("DEBUG", "INFO", "WARNING", "ERROR"):
-            sel = " selected" if s.get("log_level") == lvl else ""
-            log_level_opts += f'<option value="{lvl}"{sel}>{lvl}</option>'
-
-        def _v(key, default=""):
-            return html.escape(str(s.get(key) or default))
-
-        server_html = (
-            '<div class="field-grid">'
-            '<div class="field-row"><label>port</label>'
-            f'<input type="number" data-server="port" value="{_v("port","8080")}" style="width:90px" /></div>'
-            '<div class="field-row"><label>host</label>'
-            f'<input type="text" data-server="host" value="{_v("host")}" placeholder="127.0.0.1" /></div>'
-            '<div class="field-row"><label>log_level</label>'
-            f'<select data-server="log_level">{log_level_opts}</select></div>'
-            '<div class="field-row"><label>log_file</label>'
-            f'<input type="text" data-server="log_file" value="{_v("log_file")}" placeholder="router.log" /></div>'
-            '<div class="field-row"><label>max_retries</label>'
-            f'<input type="number" data-server="max_retries" value="{_v("max_retries","3")}" style="width:70px" /></div>'
-            '<div class="field-row"><label>fallback_max_concurrency</label>'
-            f'<input type="number" data-server="multimodal_fallback_max_concurrency"'
-            f' value="{_v("multimodal_fallback_max_concurrency","3")}" style="width:70px" /></div>'
-            '<div class="field-row"><label>image_model</label>'
-            f'<input type="text" data-server="image_model" value="{_v("image_model")}" placeholder="provider/model" /></div>'
-            '<div class="field-row"><label>audio_model</label>'
-            f'<input type="text" data-server="audio_model" value="{_v("audio_model")}" placeholder="provider/model" /></div>'
-            '<div class="field-row"><label>video_model</label>'
-            f'<input type="text" data-server="video_model" value="{_v("video_model")}" placeholder="provider/model" /></div>'
-            '<div class="field-row"><label>image_fallback</label>'
-            f'<input type="text" data-server="image_fallback" value="{_v("image_fallback")}" placeholder="provider/model" /></div>'
-            '<div class="field-row"><label>audio_fallback</label>'
-            f'<input type="text" data-server="audio_fallback" value="{_v("audio_fallback")}" placeholder="provider/model" /></div>'
-            '<div class="field-row"><label>video_fallback</label>'
-            f'<input type="text" data-server="video_fallback" value="{_v("video_fallback")}" placeholder="provider/model" /></div>'
-            '<div class="field-row"><label>debug_log</label>'
-            f'<input type="text" data-server="debug_log" value="{_v("debug_log")}" placeholder="path/to/debug.log" /></div>'
-            '</div>'
-        )
-
-        def _model_row(m):
-            mm = set(m.get("multimodality", []))
-            img = " checked" if "image" in mm else ""
-            aud = " checked" if "audio" in mm else ""
-            vid = " checked" if "video" in mm else ""
-            img_fb = html.escape(m.get("image_fallback") or "")
-            aud_fb = html.escape(m.get("audio_fallback") or "")
-            vid_fb = html.escape(m.get("video_fallback") or "")
-            adv = ""
-            if img_fb or aud_fb or vid_fb:
-                adv = (
-                    '<div class="model-adv">'
-                    f'<input type="text" class="model-img-fb" placeholder="image_fallback" value="{img_fb}" />'
-                    f'<input type="text" class="model-aud-fb" placeholder="audio_fallback" value="{aud_fb}" />'
-                    f'<input type="text" class="model-vid-fb" placeholder="video_fallback" value="{vid_fb}" />'
-                    '</div>'
-                )
-            return (
-                '<div class="model-row">'
-                f'<input type="text" class="model-name" value="{html.escape(m["name"])}" placeholder="model name" />'
-                '<label class="mm-label mm-text"><input type="checkbox" checked disabled> text</label>'
-                f'<label class="mm-label"><input type="checkbox" class="mm-check" value="image"{img}> image</label>'
-                f'<label class="mm-label"><input type="checkbox" class="mm-check" value="audio"{aud}> audio</label>'
-                f'<label class="mm-label"><input type="checkbox" class="mm-check" value="video"{vid}> video</label>'
-                '<button class="adv-btn" onclick="toggleAdv(this)" type="button">&#8943;</button>'
-                '<button class="del-btn" onclick="delModel(this)" type="button">&#10005;</button>'
-                + adv +
-                '</div>'
-            )
-
-        providers_html = ""
-        for pname, prov in data["providers"].items():
-            eps_html = ""
-            for fmt, ep in prov["endpoints"].items():
-                rows = "\n".join(_model_row(m) for m in ep["models"])
-                ep_base = html.escape(ep.get("base_url") or "")
-                eps_html += (
-                    f'<div class="ep-section" data-fmt="{html.escape(fmt)}">'
-                    f'<div class="ep-header">'
-                    f'<code class="fmt-badge">{html.escape(fmt)}</code>'
-                    f'<input type="text" class="ep-baseurl" value="{ep_base}" placeholder="Base URL (optional)" />'
-                    f'</div>'
-                    f'<div class="models-list">{rows}</div>'
-                    f'<button class="add-model-btn" onclick="addModel(this)" type="button">+ Add Model</button>'
-                    f'</div>'
-                )
-            prov_apikey = html.escape(prov.get("api_key") or "")
-            prov_baseurl = html.escape(prov.get("base_url") or "")
-            providers_html += (
-                f'<details class="prov-card" open>'
-                f'<summary class="prov-summary"><span class="prov-name">{html.escape(pname)}</span></summary>'
-                f'<div class="prov-body" data-prov="{html.escape(pname)}">'
-                f'<div class="field-row"><label>api_key</label>'
-                f'<div class="key-wrap">'
-                f'<input type="password" class="prov-apikey" value="{prov_apikey}" autocomplete="off" />'
-                f'<button class="show-key-btn" onclick="toggleKey(this)" type="button">Show</button>'
-                f'</div></div>'
-                f'<div class="field-row"><label>base_url</label>'
-                f'<input type="text" class="prov-baseurl" value="{prov_baseurl}" placeholder="optional" />'
-                f'</div>'
-                + eps_html +
-                f'</div></details>'
-            )
-
         save_disabled = "" if has_config_path else " disabled"
         save_notice = "" if has_config_path else '<p class="notice warn">Config path unknown &#8212; cannot save.</p>'
+
+        _MODALITY_EMOJI = {"text": "\u270f\ufe0f", "image": "\U0001f5bc\ufe0f", "audio": "\U0001f3b5", "video": "\U0001f3ac"}
 
         model_rows_html = []
         for pname, prov in cfg.providers.items():
@@ -1363,10 +1087,10 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
                     entry = m if isinstance(m, _ME) else _ME(name=str(m))
                     full_id = html.escape(f"{pname}/{entry.name}")
                     mm = list(entry.multimodality)
-                    badges = '<span class="badge bg">text</span>'
+                    badges = f'<span class="badge bg">{_MODALITY_EMOJI["text"]} text</span>'
                     for mt in ("image", "audio", "video"):
                         if mt in mm:
-                            badges += f'<span class="badge bb">{mt}</span>'
+                            badges += f'<span class="badge bb">{_MODALITY_EMOJI[mt]} {mt}</span>'
                     model_rows_html.append(
                         f'<tr data-model="{full_id}">'
                         f'<td class="pc">{html.escape(pname)}</td>'
@@ -1382,6 +1106,30 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
 
         _css = _CONFIG_PAGE_CSS
         _js = _CONFIG_PAGE_JS
+
+        # Monaco editor version pinned for reproducibility
+        _monaco_ver = "0.52.0"
+        _monaco_loader = f"https://cdn.jsdelivr.net/npm/monaco-editor@{_monaco_ver}/min/vs/loader.js"
+        _monaco_init = f"""
+require.config({{ paths: {{ vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@{_monaco_ver}/min/vs' }} }});
+require(['vs/editor/editor.main'], function() {{
+  window._editor = monaco.editor.create(document.getElementById('editor'), {{
+    language: 'yaml',
+    theme: 'vs-dark',
+    minimap: {{ enabled: false }},
+    scrollBeyondLastLine: false,
+    fontSize: 13,
+    lineNumbers: 'on',
+    fontFamily: "'SF Mono','Fira Code',Consolas,monospace",
+    automaticLayout: true,
+    wordWrap: 'off',
+  }});
+  fetch('/config/yaml')
+    .then(function(r) {{ return r.ok ? r.text() : r.text().then(function(t) {{ throw new Error(t); }}); }})
+    .then(function(t) {{ window._editor.setValue(t); }})
+    .catch(function(e) {{ window._editor.setValue('# Error loading config: ' + e.message); }});
+}});
+"""
         page_html = (
             '<!doctype html><html lang="en"><head>'
             '<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -1396,6 +1144,7 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
             '<a href="/health">&#129322; Health</a>'
             '</nav>'
             '<div class="layout">'
+            # Left panel: Models table
             '<div class="panel">'
             '<div class="panel-hdr"><h2>Models</h2>'
             '<button class="btn" id="test-all-btn" onclick="testAll()">Test All</button>'
@@ -1405,41 +1154,23 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
             f'<tbody>{model_table_body}</tbody>'
             '</table></div>'
             '</div>'
+            # Right panel: Monaco YAML editor
             '<div class="panel">'
-            '<div class="tab-bar">'
-            '<button class="tab-btn active" onclick="switchTab(this,\'settings\')">Settings</button>'
-            '<button class="tab-btn" onclick="switchTab(this,\'yaml\')">YAML</button>'
-            '</div>'
-            '<div id="tab-settings" class="tab-pane active">'
-            '<div class="form-scroll">'
+            '<div class="panel-hdr"><h2>YAML Config</h2></div>'
             f'{save_notice}'
-            '<details class="settings-section" open>'
-            '<summary>Server</summary>'
-            f'<div>{server_html}</div>'
-            '</details>'
-            '<details class="settings-section" open>'
-            '<summary>Providers</summary>'
-            f'<div id="providers-form">{providers_html}</div>'
-            '</details>'
-            '</div>'
-            '<div class="save-bar">'
-            f'<button class="btn btn-primary" id="save-btn" onclick="saveSettings()"{save_disabled}>Save Config</button>'
-            '<span class="save-status" id="save-status"></span>'
-            '</div>'
-            '</div>'
-            '<div id="tab-yaml" class="tab-pane">'
-            '<div class="yaml-wrap">'
-            '<textarea id="yaml-editor" spellcheck="false" placeholder="Loading&#8230;"></textarea>'
-            '</div>'
+            '<div id="editor-wrap"><div id="editor"></div></div>'
             '<div class="save-bar">'
             f'<button class="btn btn-primary" id="yaml-save-btn" onclick="saveYaml()"{save_disabled}>Save YAML</button>'
-            '<button class="btn" onclick="loadYaml()">&#8635; Reload</button>'
+            '<button class="btn" onclick="if(window._editor){'
+            "fetch('/config/yaml').then(r=>r.text()).then(t=>window._editor.setValue(t));"
+            '}">&#8635; Reload</button>'
             '<span class="save-status" id="yaml-status"></span>'
             '</div>'
             '</div>'
             '</div>'
-            '</div>'
             f'<script>{_js}</script>'
+            f'<script src="{_monaco_loader}"></script>'
+            f'<script>{_monaco_init}</script>'
             '</body></html>'
         )
         return HTMLResponse(page_html)

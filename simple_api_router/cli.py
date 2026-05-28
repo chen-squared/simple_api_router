@@ -65,9 +65,9 @@ def _models_command(config_path: str) -> None:
 
 
 def _test_command(model_str: str, config_path: str) -> None:
-    """Quick-test a provider/model configuration."""
-    import asyncio
-    from simple_api_router.test_model import test_model_direct
+    """Quick-test a provider/model by sending a request through the running router server."""
+    import time
+    import httpx
 
     cfg_path = Path(config_path).expanduser().resolve()
     try:
@@ -76,25 +76,50 @@ def _test_command(model_str: str, config_path: str) -> None:
         print(f"Error loading config: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Testing {model_str} ...", flush=True)
-    result = asyncio.run(test_model_direct(model_str, cfg))
+    host = getattr(cfg.server, "host", None) or "127.0.0.1"
+    if host in ("0.0.0.0", "::"):
+        host = "127.0.0.1"
+    port = getattr(cfg.server, "port", None) or 8080
+    base_url = f"http://{host}:{port}"
+    url = f"{base_url}/v1/messages"
 
-    if result["success"]:
-        ms = result.get("latency_ms", "?")
-        preview = result.get("response_preview", "").strip()
-        fmt = result.get("api_format", "")
-        backend = result.get("backend_model", "")
-        print(f"\033[32m✓\033[0m  {model_str}  \033[90m{ms}ms\033[0m")
-        if backend and backend != model_str.split("/", 1)[-1]:
-            print(f"   backend: {backend}  ({fmt})")
-        if preview:
-            print(f"   response: {preview}")
-    else:
-        err = result.get("error", "Unknown error")
-        ms = result.get("latency_ms")
-        suffix = f"  \033[90m{ms}ms\033[0m" if ms is not None else ""
-        print(f"\033[31m✗\033[0m  {model_str}{suffix}")
-        print(f"   error: {err}")
+    body = {
+        "model": model_str,
+        "messages": [{"role": "user", "content": "Say exactly: OK"}],
+        "max_tokens": 10,
+    }
+    print(f"Testing {model_str} via {base_url} ...", flush=True)
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            start = time.monotonic()
+            resp = client.post(url, json=body)
+            ms = round((time.monotonic() - start) * 1000)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            preview = next(
+                (b["text"][:120] for b in data.get("content", []) if b.get("type") == "text"),
+                "",
+            )
+            print(f"\033[32m✓\033[0m  {model_str}  \033[90m{ms}ms\033[0m")
+            if preview:
+                print(f"   response: {preview.strip()}")
+        else:
+            try:
+                err_detail = resp.json()
+            except Exception:
+                err_detail = resp.text[:300]
+            print(f"\033[31m✗\033[0m  {model_str}  \033[90m{ms}ms\033[0m")
+            print(f"   error: HTTP {resp.status_code}: {err_detail}")
+            sys.exit(1)
+
+    except httpx.ConnectError:
+        print(f"\033[31m✗\033[0m  Cannot connect to router at {base_url}")
+        print(f"   Start the server first: simple-api-router run --config {cfg_path}")
+        sys.exit(1)
+    except Exception as exc:
+        print(f"\033[31m✗\033[0m  {model_str}")
+        print(f"   error: {exc}")
         sys.exit(1)
 
 
