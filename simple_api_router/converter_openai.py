@@ -213,11 +213,13 @@ def _assistant_blocks_to_openai(
         msg["content"] = None  # tool-only message: null is the OpenAI standard
     if tool_calls:
         msg["tool_calls"] = tool_calls
-    if use_reasoning_content:
-        if thinking_text is not None:
-            msg["reasoning_content"] = thinking_text
-        elif tool_calls:
-            msg["reasoning_content"] = "tool call"
+    # Always preserve actual thinking content as reasoning_content so that any
+    # provider requiring it (DeepSeek, Moonshot, etc.) receives it back on
+    # subsequent turns.  The "inject placeholder" branch is DeepSeek-specific.
+    if thinking_text is not None:
+        msg["reasoning_content"] = thinking_text
+    elif use_reasoning_content and tool_calls:
+        msg["reasoning_content"] = "tool call"
     return [msg]
 
 

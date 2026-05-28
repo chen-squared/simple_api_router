@@ -23,6 +23,7 @@ from .service import LOG_DIR
 from .usage_cli import (
     _aggregate_by_day_model,
     _aggregate_by_model,
+    _group_by_provider,
     _record_cost_currency,
     _total_agg,
 )
@@ -397,9 +398,25 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
                 "cost_cny": round(dt["cost_cny"], 6) if dt.get("_has_cost_cny") else None,
                 "cost_usd": round(dt["cost_usd"], 6) if dt.get("_has_cost_usd") else None,
             })
+        by_provider_agg = _group_by_provider(by_model_agg)
+        by_provider = []
+        for prov in sorted(by_provider_agg):
+            subtotal = _total_agg(by_provider_agg[prov])
+            by_provider.append({
+                "provider": prov,
+                "requests": subtotal["requests"],
+                "input_tokens": subtotal["input_tokens"],
+                "output_tokens": subtotal["output_tokens"],
+                "cache_read_tokens": subtotal["cache_read_tokens"],
+                "cache_write_tokens": subtotal["cache_write_tokens"],
+                "cost_cny": round(subtotal["cost_cny"], 6) if subtotal.get("_has_cost_cny") else None,
+                "cost_usd": round(subtotal["cost_usd"], 6) if subtotal.get("_has_cost_usd") else None,
+                "models": [_agg_row(m, a) for m, a in sorted(by_provider_agg[prov].items(), key=lambda x: -x[1]["requests"])],
+            })
         return JSONResponse({
             "period_days": days,
             "by_model": by_model,
+            "by_provider": by_provider,
             "by_day": by_day,
             "recent": recent,
         })
@@ -453,21 +470,39 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
             if not by_model_agg:
                 return '<tr><td colspan="8" class="empty">No usage data</td></tr>'
             cells = []
-            for model, agg in sorted(by_model_agg.items(), key=lambda x: -x[1]["requests"]):
-                cost_cny = round(agg["cost_cny"], 4) if agg.get("_has_cost_cny") else None
-                cost_usd = round(agg["cost_usd"], 4) if agg.get("_has_cost_usd") else None
+            grouped = _group_by_provider(by_model_agg)
+            for prov in sorted(grouped, key=lambda p: -_total_agg(grouped[p])["requests"]):
+                sub = _total_agg(grouped[prov])
+                sub_cny = round(sub["cost_cny"], 4) if sub.get("_has_cost_cny") else None
+                sub_usd = round(sub["cost_usd"], 4) if sub.get("_has_cost_usd") else None
                 cells.append(
-                    "<tr>"
-                    f"<td>{html.escape(model)}</td>"
-                    f"<td>{agg['requests']}</td>"
-                    f"<td>{_fmt_stat_tokens(agg['input_tokens'])}</td>"
-                    f"<td>{_fmt_stat_tokens(agg['output_tokens'])}</td>"
-                    f"<td>{_fmt_stat_tokens(agg['cache_write_tokens'])}</td>"
-                    f"<td>{_fmt_stat_tokens(agg['cache_read_tokens'])}</td>"
-                    f"<td>{_fmt_stat_cost(cost_cny, '¥')}</td>"
-                    f"<td>{_fmt_stat_cost(cost_usd, '$')}</td>"
+                    '<tr class="prov-hdr">'
+                    f"<td><strong>{html.escape(prov)}</strong></td>"
+                    f"<td>{sub['requests']}</td>"
+                    f"<td>{_fmt_stat_tokens(sub['input_tokens'])}</td>"
+                    f"<td>{_fmt_stat_tokens(sub['output_tokens'])}</td>"
+                    f"<td>{_fmt_stat_tokens(sub['cache_write_tokens'])}</td>"
+                    f"<td>{_fmt_stat_tokens(sub['cache_read_tokens'])}</td>"
+                    f"<td>{_fmt_stat_cost(sub_cny, '¥')}</td>"
+                    f"<td>{_fmt_stat_cost(sub_usd, '$')}</td>"
                     "</tr>"
                 )
+                for model, agg in sorted(grouped[prov].items(), key=lambda x: -x[1]["requests"]):
+                    model_label = model.split("/", 1)[1] if "/" in model else model
+                    cost_cny = round(agg["cost_cny"], 4) if agg.get("_has_cost_cny") else None
+                    cost_usd = round(agg["cost_usd"], 4) if agg.get("_has_cost_usd") else None
+                    cells.append(
+                        "<tr>"
+                        f"<td>&ensp;{html.escape(model_label)}</td>"
+                        f"<td>{agg['requests']}</td>"
+                        f"<td>{_fmt_stat_tokens(agg['input_tokens'])}</td>"
+                        f"<td>{_fmt_stat_tokens(agg['output_tokens'])}</td>"
+                        f"<td>{_fmt_stat_tokens(agg['cache_write_tokens'])}</td>"
+                        f"<td>{_fmt_stat_tokens(agg['cache_read_tokens'])}</td>"
+                        f"<td>{_fmt_stat_cost(cost_cny, '¥')}</td>"
+                        f"<td>{_fmt_stat_cost(cost_usd, '$')}</td>"
+                        "</tr>"
+                    )
             return "".join(cells)
 
         def by_day_rows() -> str:
@@ -632,6 +667,7 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     th {{ color: #94a3b8; font-weight: 600; }}
     tr:last-child td {{ border-bottom: 0; }}
     tr.day-hdr td {{ background: #1a2236; color: #93c5fd; padding: 10px 12px 6px; }}
+    tr.prov-hdr td {{ background: #1a2236; color: #7dd3fc; padding: 8px 12px; }}
     .empty {{ color: #94a3b8; text-align: center; }}
     .muted {{ color: #94a3b8; font-size: 13px; }}
     .pagination {{ display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid #1f2937; }}

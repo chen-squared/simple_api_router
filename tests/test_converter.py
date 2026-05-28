@@ -734,8 +734,9 @@ class TestAnthropicToOpenAIExtended(unittest.TestCase):
             "medium",
         )
 
-    def test_thinking_block_not_emitted_as_reasoning_content_by_default(self):
-        """thinking blocks in assistant history must NOT produce reasoning_content in OpenAI format."""
+    def test_thinking_block_emitted_as_reasoning_content(self):
+        """thinking blocks in assistant history are always preserved as reasoning_content
+        so that providers requiring it (Moonshot, DeepSeek, etc.) receive them back."""
         body = {
             "model": "x",
             "max_tokens": 1024,
@@ -752,7 +753,7 @@ class TestAnthropicToOpenAIExtended(unittest.TestCase):
         }
         result = anthropic_to_openai_request(body, "gpt-4o")
         msg = result["messages"][0]
-        self.assertIsNone(msg.get("reasoning_content"))
+        self.assertEqual(msg.get("reasoning_content"), "I should call the tool.")
         # The tool_call should still be present
         self.assertEqual(len(msg.get("tool_calls", [])), 1)
         self.assertEqual(msg["tool_calls"][0]["function"]["name"], "get_weather")
@@ -1524,8 +1525,9 @@ class TestDeepSeekReasoning(unittest.TestCase):
         self.assertEqual(asst["reasoning_content"], "tool call")
         self.assertEqual(len(asst["tool_calls"]), 1)
 
-    def test_thinking_not_emitted_when_disabled(self):
-        """With use_reasoning_content=False (default), thinking blocks are silently dropped."""
+    def test_thinking_emitted_as_reasoning_content_by_default(self):
+        """With use_reasoning_content=False (default), thinking blocks are still preserved
+        as reasoning_content so providers requiring it receive the thinking content."""
         body = {
             "model": "gpt-4o",
             "max_tokens": 100,
@@ -1541,7 +1543,7 @@ class TestDeepSeekReasoning(unittest.TestCase):
         }
         result = anthropic_to_openai_request(body, "gpt-4o")
         asst = next(m for m in result["messages"] if m["role"] == "assistant")
-        self.assertNotIn("reasoning_content", asst)
+        self.assertEqual(asst.get("reasoning_content"), "secret")
         self.assertEqual(asst["content"], "Result")
 
     def test_thinking_and_tool_use_together(self):
