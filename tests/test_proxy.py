@@ -17,6 +17,7 @@ from simple_api_router.config import (
 from simple_api_router.proxy import (
     _media_types_in_blocks,
     _media_types_in_body,
+    _replace_media_with_placeholder,
     _graceful_stream_termination,
     _stream_converted_with_retry,
     _upstream_error_sse,
@@ -470,6 +471,126 @@ class TestMultimodalFallbackRouting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ===========================================================================
+# _replace_media_with_placeholder
+# ===========================================================================
+
+class TestReplaceMediaWithPlaceholder(unittest.TestCase):
+    """Unit tests for _replace_media_with_placeholder."""
+
+    def _body_with_image(self) -> dict:
+        return {
+            "model": "x/y",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "url", "url": "https://x.com/img.png"}},
+                    {"type": "text", "text": "what is this?"},
+                ],
+            }],
+        }
+
+    def _body_with_video(self) -> dict:
+        return {
+            "model": "x/y",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "video", "source": {"type": "url", "url": "https://x.com/vid.mp4"}},
+                    {"type": "text", "text": "describe this"},
+                ],
+            }],
+        }
+
+    def test_image_block_replaced_with_text(self):
+        body = _replace_media_with_placeholder(self._body_with_image(), "image")
+        blocks = body["messages"][0]["content"]
+        self.assertEqual(len(blocks), 2)
+        replaced = blocks[0]
+        self.assertEqual(replaced["type"], "text")
+        self.assertIn("image", replaced["text"])
+        self.assertIn("image_understanding", replaced["text"])
+
+    def test_video_block_replaced_with_text(self):
+        body = _replace_media_with_placeholder(self._body_with_video(), "video")
+        blocks = body["messages"][0]["content"]
+        replaced = blocks[0]
+        self.assertEqual(replaced["type"], "text")
+        self.assertIn("video", replaced["text"])
+        self.assertIn("video_understanding", replaced["text"])
+
+    def test_audio_block_replaced_with_text(self):
+        body = {
+            "model": "x/y",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "audio", "source": {"type": "url", "url": "https://x.com/a.mp3"}}],
+            }],
+        }
+        result = _replace_media_with_placeholder(body, "audio")
+        block = result["messages"][0]["content"][0]
+        self.assertEqual(block["type"], "text")
+        self.assertIn("audio_understanding", block["text"])
+
+    def test_text_blocks_are_preserved(self):
+        body = _replace_media_with_placeholder(self._body_with_image(), "image")
+        text_block = body["messages"][0]["content"][1]
+        self.assertEqual(text_block["type"], "text")
+        self.assertEqual(text_block["text"], "what is this?")
+
+    def test_non_matching_media_type_not_replaced(self):
+        """Replacing 'audio' when body contains only 'image' — image untouched."""
+        body = _replace_media_with_placeholder(self._body_with_image(), "audio")
+        blocks = body["messages"][0]["content"]
+        self.assertEqual(blocks[0]["type"], "image")
+
+    def test_original_body_not_mutated(self):
+        original = self._body_with_image()
+        _replace_media_with_placeholder(original, "image")
+        self.assertEqual(original["messages"][0]["content"][0]["type"], "image")
+
+    def test_multiple_messages_all_replaced(self):
+        body = {
+            "model": "x/y",
+            "messages": [
+                {"role": "user", "content": [{"type": "image", "source": {}}]},
+                {"role": "user", "content": [{"type": "image", "source": {}}, {"type": "text", "text": "hi"}]},
+            ],
+        }
+        result = _replace_media_with_placeholder(body, "image")
+        self.assertEqual(result["messages"][0]["content"][0]["type"], "text")
+        self.assertEqual(result["messages"][1]["content"][0]["type"], "text")
+
+    def test_nested_tool_result_blocks_replaced(self):
+        body = {
+            "model": "x/y",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu_1",
+                    "content": [
+                        {"type": "image", "source": {}},
+                        {"type": "text", "text": "result"},
+                    ],
+                }],
+            }],
+        }
+        result = _replace_media_with_placeholder(body, "image")
+        inner = result["messages"][0]["content"][0]["content"]
+        self.assertEqual(inner[0]["type"], "text")
+        self.assertIn("image_understanding", inner[0]["text"])
+        self.assertEqual(inner[1]["text"], "result")
+
+    def test_string_content_message_untouched(self):
+        body = {
+            "model": "x/y",
+            "messages": [{"role": "user", "content": "plain text"}],
+        }
+        result = _replace_media_with_placeholder(body, "image")
+        self.assertEqual(result["messages"][0]["content"], "plain text")
 
 
 # ===========================================================================

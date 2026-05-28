@@ -662,6 +662,62 @@ _MEDIA_DESCRIBE_PROMPTS: Dict[str, str] = {
     ),
 }
 
+_MCP_TOOL_NAMES: Dict[str, str] = {
+    "image": "image_understanding",
+    "audio": "audio_understanding",
+    "video": "video_understanding",
+}
+
+_MEDIA_PLACEHOLDER_TMPL = (
+    "[{label} not loaded — this model does not support {label_lower} input. "
+    "Use the `{tool}` MCP tool to process this {label_lower}.]"
+)
+
+
+def _replace_media_with_placeholder(
+    body: Dict[str, Any],
+    media_type: str,
+) -> Dict[str, Any]:
+    """Replace every block of *media_type* with a text placeholder.
+
+    Used when the MCP understanding tool is configured but no fallback model
+    is set — the model is instructed to call the MCP tool instead.
+    """
+    label = media_type.capitalize()
+    tool = _MCP_TOOL_NAMES.get(media_type, f"{media_type}_understanding")
+    placeholder = _MEDIA_PLACEHOLDER_TMPL.format(
+        label=label,
+        label_lower=media_type,
+        tool=tool,
+    )
+
+    def replace_in_blocks(blocks: list) -> list:
+        result = list(blocks)
+        for i, block in enumerate(result):
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == media_type:
+                result[i] = {"type": "text", "text": placeholder}
+            elif btype == "tool_result":
+                nested = block.get("content", "")
+                if isinstance(nested, list):
+                    b = dict(block)
+                    b["content"] = replace_in_blocks(nested)
+                    result[i] = b
+        return result
+
+    body = copy.deepcopy(body)
+    new_messages = []
+    for msg in body.get("messages", []):
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            msg = dict(msg)
+            msg["content"] = replace_in_blocks(content)
+        new_messages.append(msg)
+    body["messages"] = new_messages
+    return body
+
 
 async def _describe_media_in_body(
     body: Dict[str, Any],
@@ -972,11 +1028,20 @@ async def route_request(
                     max_concurrency=config.server.multimodal_fallback_max_concurrency,
                 )
             else:
-                logger.warning(
-                    "model '%s' received %s content it may not support, "
-                    "and no %s_fallback is configured — forwarding as-is",
-                    model, mtype, mtype,
-                )
+                mcp_model = getattr(config.server, f"{mtype}_model", None)
+                if mcp_model:
+                    logger.info(
+                        "model '%s' doesn't support %s and no %s_fallback is set; "
+                        "replacing with MCP tool placeholder (mcp model: '%s')",
+                        model, mtype, mtype, mcp_model,
+                    )
+                    body = _replace_media_with_placeholder(body, mtype)
+                else:
+                    logger.warning(
+                        "model '%s' received %s content it may not support, "
+                        "and no %s_fallback or %s_model is configured — forwarding as-is",
+                        model, mtype, mtype, mtype,
+                    )
 
     # Stash routing metadata so app.py can log usage after the response is done.
     # Use the clean "provider/model" form (bracket suffixes stripped) so pricing lookup works.
