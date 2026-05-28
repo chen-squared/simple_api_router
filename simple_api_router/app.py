@@ -85,17 +85,33 @@ _CONFIG_PAGE_CSS = """
     .save-status.err { color:#f87171; }
     #editor-wrap { padding:14px 14px 0; }
     #editor { width:100%; height:580px; border:1px solid #374151; border-radius:8px; overflow:hidden; }
+    #editor-fallback { width:100%; height:580px; resize:vertical;
+      font-family:'SF Mono','Fira Code',Consolas,monospace; font-size:13px;
+      background:#0d1117; color:#e6edf3; border:1px solid #374151;
+      border-radius:8px; padding:12px; outline:none; tab-size:2; line-height:1.5;
+      box-sizing:border-box; }
+    #editor-fallback:focus { border-color:#2563eb; }
     .notice { font-size:13px; padding:8px 12px; border-radius:8px; margin:0 0 10px; }
     .notice.warn { background:#422006; color:#fbbf24; border:1px solid #78350f; }
 """
 _CONFIG_PAGE_JS = """
+    function _editorContent() {
+      if (window._editor) return window._editor.getValue();
+      var fb = document.getElementById('editor-fallback');
+      return fb ? fb.value : '';
+    }
+    function _setEditorContent(text) {
+      if (window._editor) { window._editor.setValue(text); return; }
+      var fb = document.getElementById('editor-fallback');
+      if (fb) fb.value = text;
+    }
     async function saveYaml() {
       const btn = document.getElementById('yaml-save-btn');
       const status = document.getElementById('yaml-status');
       btn.disabled = true; btn.textContent = 'Saving\u2026';
       status.className = 'save-status'; status.textContent = '';
       try {
-        const content = window._editor ? window._editor.getValue() : '';
+        const content = _editorContent();
         const r = await fetch('/config/yaml', {
           method: 'POST',
           headers: {'Content-Type': 'text/plain; charset=utf-8'},
@@ -1111,24 +1127,41 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         _monaco_ver = "0.52.0"
         _monaco_loader = f"https://cdn.jsdelivr.net/npm/monaco-editor@{_monaco_ver}/min/vs/loader.js"
         _monaco_init = f"""
-require.config({{ paths: {{ vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@{_monaco_ver}/min/vs' }} }});
-require(['vs/editor/editor.main'], function() {{
-  window._editor = monaco.editor.create(document.getElementById('editor'), {{
-    language: 'yaml',
-    theme: 'vs-dark',
-    minimap: {{ enabled: false }},
-    scrollBeyondLastLine: false,
-    fontSize: 13,
-    lineNumbers: 'on',
-    fontFamily: "'SF Mono','Fira Code',Consolas,monospace",
-    automaticLayout: true,
-    wordWrap: 'off',
-  }});
+(function() {{
+  var fb = document.getElementById('editor-fallback');
+  // Preload YAML into the textarea fallback (works offline and while Monaco loads).
   fetch('/config/yaml')
-    .then(function(r) {{ return r.ok ? r.text() : r.text().then(function(t) {{ throw new Error(t); }}); }})
-    .then(function(t) {{ window._editor.setValue(t); }})
-    .catch(function(e) {{ window._editor.setValue('# Error loading config: ' + e.message); }});
-}});
+    .then(function(r) {{ return r.ok ? r.text() : Promise.reject(r.status); }})
+    .then(function(t) {{ fb.value = t; }})
+    .catch(function(e) {{ fb.value = '# Error loading config: ' + e; }});
+  // If the CDN loaded, replace the textarea with Monaco.
+  if (typeof require === 'undefined') {{
+    fb.style.display = '';
+    return;
+  }}
+  require.config({{ paths: {{ vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@{_monaco_ver}/min/vs' }} }});
+  require(['vs/editor/editor.main'], function() {{
+    var ed = document.getElementById('editor');
+    ed.style.display = '';
+    window._editor = monaco.editor.create(ed, {{
+      language: 'yaml',
+      theme: 'vs-dark',
+      minimap: {{ enabled: false }},
+      scrollBeyondLastLine: false,
+      fontSize: 13,
+      lineNumbers: 'on',
+      fontFamily: "'SF Mono','Fira Code',Consolas,monospace",
+      automaticLayout: true,
+      wordWrap: 'off',
+    }});
+    fb.style.display = 'none';
+    window._editor.setValue(fb.value);
+  }}, function(err) {{
+    // require() failed (e.g. CDN returned 404) — keep textarea.
+    fb.style.display = '';
+    console.warn('Monaco load failed, using textarea fallback', err);
+  }});
+}})();
 """
         page_html = (
             '<!doctype html><html lang="en"><head>'
@@ -1158,12 +1191,15 @@ require(['vs/editor/editor.main'], function() {{
             '<div class="panel">'
             '<div class="panel-hdr"><h2>YAML Config</h2></div>'
             f'{save_notice}'
-            '<div id="editor-wrap"><div id="editor"></div></div>'
+            '<div id="editor-wrap">'
+            '<div id="editor" style="display:none;"></div>'
+            '<textarea id="editor-fallback" spellcheck="false" placeholder="Loading..." style="display:none;"></textarea>'
+            '</div>'
             '<div class="save-bar">'
             f'<button class="btn btn-primary" id="yaml-save-btn" onclick="saveYaml()"{save_disabled}>Save YAML</button>'
-            '<button class="btn" onclick="if(window._editor){'
-            "fetch('/config/yaml').then(r=>r.text()).then(t=>window._editor.setValue(t));"
-            '}">&#8635; Reload</button>'
+            '<button class="btn" onclick="'
+            "fetch('/config/yaml').then(r=>r.text()).then(t=>_setEditorContent(t));"
+            '">&#8635; Reload</button>'
             '<span class="save-status" id="yaml-status"></span>'
             '</div>'
             '</div>'
