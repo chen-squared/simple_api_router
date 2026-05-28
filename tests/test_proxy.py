@@ -1172,8 +1172,7 @@ class TestGracefulStreamTermination(unittest.TestCase):
         self.assertEqual(types, [
             "content_block_delta",
             "content_block_stop",
-            "message_delta",
-            "message_stop",
+            "error",
         ])
 
     def test_open_text_block_notice_text_contains_retry_message(self):
@@ -1188,10 +1187,11 @@ class TestGracefulStreamTermination(unittest.TestCase):
         self.assertEqual(stop["type"], "content_block_stop")
         self.assertEqual(stop["index"], 2)
 
-    def test_open_text_block_ends_with_end_turn(self):
+    def test_open_text_block_ends_with_error(self):
         events = self._run(open_block_index=0, open_block_type="text")
-        msg_delta = events[-2]["data"]
-        self.assertEqual(msg_delta["delta"]["stop_reason"], "end_turn")
+        last = events[-1]["data"]
+        self.assertEqual(last["type"], "error")
+        self.assertEqual(last["error"]["type"], "overloaded_error")
 
     # ── Case 2: open thinking block ──────────────────────────────────────
 
@@ -1203,8 +1203,7 @@ class TestGracefulStreamTermination(unittest.TestCase):
             "content_block_start",   # new text block
             "content_block_delta",   # notice text
             "content_block_stop",    # close text
-            "message_delta",
-            "message_stop",
+            "error",
         ])
 
     def test_open_thinking_block_new_text_index_is_incremented(self):
@@ -1218,9 +1217,11 @@ class TestGracefulStreamTermination(unittest.TestCase):
         delta = events[2]["data"]
         self.assertIn("please retry", delta["delta"]["text"].lower())
 
-    def test_open_thinking_block_ends_with_end_turn(self):
+    def test_open_thinking_block_ends_with_error(self):
         events = self._run(open_block_index=0, open_block_type="thinking")
-        self.assertEqual(events[-2]["data"]["delta"]["stop_reason"], "end_turn")
+        last = events[-1]["data"]
+        self.assertEqual(last["type"], "error")
+        self.assertEqual(last["error"]["type"], "overloaded_error")
 
     # ── Case 3: no open block (failure between blocks) ───────────────────
 
@@ -1231,21 +1232,22 @@ class TestGracefulStreamTermination(unittest.TestCase):
             "content_block_start",
             "content_block_delta",
             "content_block_stop",
-            "message_delta",
-            "message_stop",
+            "error",
         ])
 
     def test_no_open_block_index_is_last_seen_plus_one(self):
         events = self._run(open_block_index=None, open_block_type=None, last_seen_index=3)
         self.assertEqual(events[0]["data"]["index"], 4)
 
-    def test_no_open_block_ends_with_end_turn(self):
+    def test_no_open_block_ends_with_error(self):
         events = self._run(open_block_index=None, open_block_type=None, last_seen_index=0)
-        self.assertEqual(events[-2]["data"]["delta"]["stop_reason"], "end_turn")
+        last = events[-1]["data"]
+        self.assertEqual(last["type"], "error")
+        self.assertEqual(last["error"]["type"], "overloaded_error")
 
-    # ── Always ends with message_stop ────────────────────────────────────
+    # ── Always ends with overloaded_error ─────────────────────────────────
 
-    def test_always_ends_with_message_stop(self):
+    def test_always_ends_with_overloaded_error(self):
         for args in [
             (0, "text"),
             (0, "thinking"),
@@ -1253,7 +1255,9 @@ class TestGracefulStreamTermination(unittest.TestCase):
         ]:
             with self.subTest(args=args):
                 events = self._run(*args)
-                self.assertEqual(events[-1]["data"]["type"], "message_stop")
+                last = events[-1]["data"]
+                self.assertEqual(last["type"], "error")
+                self.assertEqual(last["error"]["type"], "overloaded_error")
 
 
 # ---------------------------------------------------------------------------
@@ -1370,7 +1374,7 @@ class TestStreamConvertedWithRetryGraceful(unittest.TestCase):
     # ── Graceful termination: mid-stream error after text block opens ─────
 
     def test_midstream_error_in_text_block_triggers_graceful_termination(self):
-        """Error arriving mid-text must close the block and end with message_stop."""
+        """Error arriving mid-text must close the block and end with overloaded_error."""
         pre = [
             _make_sse("message_start", {"type": "message_start", "message": {"id": "m1", "usage": {}}}),
             _make_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
@@ -1379,15 +1383,12 @@ class TestStreamConvertedWithRetryGraceful(unittest.TestCase):
         error_chunk = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"peer closed\"}}\n\n"
         result = self._run_retry([pre + [error_chunk]])
         types = self._types(result)
-        # Must end with message_stop
-        self.assertEqual(types[-1], "message_stop")
-        # message_delta with end_turn must be present
-        self.assertIn("message_delta", types)
+        # Must end with an error so the client retries
+        self.assertEqual(types[-1], "error")
+        last_data = self._events(result)[-1]["data"]
+        self.assertEqual(last_data["error"]["type"], "overloaded_error")
         # content_block_stop must follow to close the open text block
         self.assertIn("content_block_stop", types)
-        # No raw error event forwarded to client
-        event_names = [e["event"] for e in self._events(result)]
-        self.assertNotIn("error", event_names)
 
     def test_midstream_error_in_text_block_appends_notice(self):
         """Notice text must be appended to the still-open text block."""
@@ -1410,7 +1411,7 @@ class TestStreamConvertedWithRetryGraceful(unittest.TestCase):
     # ── Graceful termination: mid-stream error during thinking block ──────
 
     def test_midstream_error_in_thinking_block_adds_new_text_block(self):
-        """Error during thinking must close thinking and open a fresh text block."""
+        """Error during thinking must close thinking, open a fresh text block, then error."""
         pre = [
             _make_sse("message_start", {"type": "message_start", "message": {"id": "m1", "usage": {}}}),
             _make_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}),
@@ -1420,10 +1421,9 @@ class TestStreamConvertedWithRetryGraceful(unittest.TestCase):
         result = self._run_retry([pre + [error_chunk]])
         events = self._events(result)
         types = self._types(result)
-        # Must end with message_stop, no error forwarded
-        self.assertEqual(types[-1], "message_stop")
-        event_names = [e["event"] for e in events]
-        self.assertNotIn("error", event_names)
+        # Must end with overloaded_error so the client retries
+        self.assertEqual(types[-1], "error")
+        self.assertEqual(events[-1]["data"]["error"]["type"], "overloaded_error")
         # A new text block (index 1) must be started
         new_starts = [
             e for e in events
@@ -1486,7 +1486,7 @@ class TestStreamConvertedWithRetryGraceful(unittest.TestCase):
             and e["data"].get("index") == 1
         ]
         self.assertEqual(len(new_text), 1, "Expected new text block at index 1 after thinking close")
-        self.assertEqual(types[-1], "message_stop")
+        self.assertEqual(types[-1], "error")
 
     def test_buffer_flush_tracks_text_block_type(self):
         """When buffer flush tracks a text block, error must append delta (not close+reopen)."""
@@ -1504,7 +1504,7 @@ class TestStreamConvertedWithRetryGraceful(unittest.TestCase):
                          f"Expected notice delta at index 2, got: {types}")
         self.assertEqual(types[3], "content_block_stop",
                          f"Expected text block stop at index 3, got: {types}")
-        self.assertEqual(types[-1], "message_stop")
+        self.assertEqual(types[-1], "error")
 
 
 # ---------------------------------------------------------------------------

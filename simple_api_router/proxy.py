@@ -519,12 +519,10 @@ def _graceful_stream_termination(
             "index": next_idx,
         }))
 
-    events.append(_sse_bytes("message_delta", {
-        "type": "message_delta",
-        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-        "usage": {"output_tokens": 0},
+    events.append(_sse_bytes("error", {
+        "type": "error",
+        "error": {"type": "overloaded_error", "message": "Connection lost mid-stream"},
     }))
-    events.append(_sse_bytes("message_stop", {"type": "message_stop"}))
     return events
 
 
