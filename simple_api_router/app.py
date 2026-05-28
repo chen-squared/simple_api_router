@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional
 
 import httpx
+import yaml as _yaml_module
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from watchfiles import awatch
@@ -32,6 +33,402 @@ from .usage_db import get_usage_db, log_usage, setup_usage_db
 
 def _now_local() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+# ---------------------------------------------------------------------------
+# Config data helpers (for /config GUI)
+# ---------------------------------------------------------------------------
+
+_CONFIG_PAGE_CSS = """
+    :root { color-scheme: dark light; }
+    *, *::before, *::after { box-sizing: border-box; }
+    body { font-family: system-ui,-apple-system,BlinkMacSystemFont,sans-serif; margin:24px; background:#111827; color:#e5e7eb; }
+    a { color:#93c5fd; text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    h1 { margin:0 0 4px; font-size:26px; }
+    .subhead { color:#94a3b8; font-size:13px; margin-bottom:16px; }
+    .nav { display:flex; gap:10px; margin-bottom:22px; }
+    .nav a { border:1px solid #374151; border-radius:999px; padding:5px 14px; color:#cbd5e1; font-size:13px; }
+    .nav a.active { background:#2563eb; border-color:#2563eb; color:#fff; }
+    .layout { display:grid; grid-template-columns:1fr 1.3fr; gap:18px; }
+    @media(max-width:900px) { .layout { grid-template-columns:1fr; } }
+    .panel { background:#111827; border:1px solid #374151; border-radius:12px; overflow:hidden; }
+    .panel-hdr { padding:12px 16px; border-bottom:1px solid #374151; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .panel-hdr h2 { margin:0; font-size:15px; }
+    .table-wrap { overflow-x:auto; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th,td { padding:7px 11px; border-bottom:1px solid #1f2937; text-align:left; white-space:nowrap; }
+    th { color:#94a3b8; font-weight:600; }
+    tr:last-child td { border-bottom:0; }
+    .pc { color:#93c5fd; font-weight:500; }
+    .empty { color:#94a3b8; text-align:center; }
+    .fmt-badge { background:#1f2937; padding:2px 6px; border-radius:4px; font-size:11px; color:#94a3b8; }
+    .badge { display:inline-block; padding:1px 6px; border-radius:4px; font-size:11px; margin-right:2px; }
+    .bg { background:#1f2937; color:#94a3b8; }
+    .bb { background:#1e3a5f; color:#93c5fd; }
+    .test-btn { padding:3px 10px; font-size:12px; border-radius:6px; cursor:pointer; border:1px solid #374151; background:#1f2937; color:#cbd5e1; }
+    .test-btn:hover { border-color:#2563eb; }
+    .test-btn:disabled { opacity:.5; cursor:default; }
+    .test-result { font-size:12px; margin-left:6px; }
+    .test-result.ok { color:#4ade80; }
+    .test-result.err { color:#f87171; }
+    .test-result.spin { color:#94a3b8; }
+    pre.preview { background:#1f2937; padding:4px 8px; border-radius:5px; font-size:11px; color:#94a3b8; margin:2px 0 0; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .tab-bar { display:flex; border-bottom:1px solid #374151; }
+    .tab-btn { padding:9px 18px; font-size:13px; cursor:pointer; border:none; border-bottom:2px solid transparent; background:transparent; color:#94a3b8; }
+    .tab-btn.active { color:#e5e7eb; border-bottom-color:#2563eb; }
+    .tab-pane { display:none; }
+    .tab-pane.active { display:block; }
+    .form-scroll { padding:16px; overflow-y:auto; max-height:680px; }
+    .settings-section { margin-bottom:12px; border:1px solid #374151; border-radius:8px; overflow:hidden; }
+    .settings-section > summary { list-style:none; padding:9px 14px; cursor:pointer; font-weight:600; font-size:13px; background:#1a2236; display:flex; align-items:center; gap:6px; }
+    .settings-section > summary::-webkit-details-marker { display:none; }
+    .settings-section > summary::before { content:"\25B8"; font-size:11px; transition:transform .2s; }
+    .settings-section[open] > summary::before { transform:rotate(90deg); }
+    .settings-section > div { padding:12px 14px; }
+    .field-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px 16px; }
+    @media(max-width:600px) { .field-grid { grid-template-columns:1fr; } }
+    .field-row { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+    .field-row label { font-size:12px; color:#94a3b8; min-width:130px; flex-shrink:0; font-family:monospace; }
+    .field-row input,.field-row select { flex:1; min-width:0; padding:5px 8px; font-size:13px; background:#1f2937; border:1px solid #374151; border-radius:6px; color:#e5e7eb; }
+    .field-row input:focus,.field-row select:focus { outline:none; border-color:#2563eb; }
+    .prov-card { border:1px solid #374151; border-radius:8px; margin-bottom:10px; overflow:hidden; }
+    .prov-card > summary { list-style:none; padding:10px 14px; cursor:pointer; font-weight:700; font-size:14px; background:#1a2236; display:flex; align-items:center; gap:8px; color:#93c5fd; }
+    .prov-card > summary::-webkit-details-marker { display:none; }
+    .prov-card > summary::before { content:"\25B8"; font-size:11px; color:#94a3b8; transition:transform .2s; }
+    .prov-card[open] > summary::before { transform:rotate(90deg); }
+    .prov-body { padding:12px 14px; }
+    .key-wrap { display:flex; gap:6px; flex:1; min-width:0; }
+    .key-wrap input { flex:1; min-width:0; }
+    .show-key-btn { padding:4px 10px; font-size:12px; border-radius:6px; cursor:pointer; border:1px solid #374151; background:#1f2937; color:#cbd5e1; white-space:nowrap; flex-shrink:0; }
+    .show-key-btn:hover { border-color:#2563eb; }
+    .ep-section { margin-top:10px; border:1px solid #2d3748; border-radius:6px; overflow:hidden; }
+    .ep-header { display:flex; align-items:center; gap:10px; padding:7px 12px; background:#141f35; flex-wrap:wrap; }
+    .ep-header input { flex:1; min-width:160px; padding:4px 8px; font-size:12px; background:#1f2937; border:1px solid #374151; border-radius:5px; color:#e5e7eb; }
+    .models-list { padding:4px 10px 0; }
+    .model-row { display:flex; align-items:center; gap:6px; padding:5px 0; border-bottom:1px solid #1f2937; flex-wrap:wrap; }
+    .model-row:last-child { border-bottom:0; }
+    .model-name { width:190px; flex-shrink:0; padding:4px 7px; font-size:13px; background:#0d1117; border:1px solid #374151; border-radius:5px; color:#e5e7eb; }
+    .model-name:focus { outline:none; border-color:#2563eb; }
+    .mm-label { display:inline-flex; align-items:center; gap:3px; font-size:12px; color:#94a3b8; cursor:pointer; user-select:none; padding:2px 4px; border-radius:4px; }
+    .mm-text { color:#4b5563; cursor:default; }
+    .mm-label input { cursor:pointer; accent-color:#2563eb; }
+    .mm-text input { cursor:default; }
+    .del-btn { padding:2px 8px; font-size:12px; border-radius:5px; cursor:pointer; border:1px solid #374151; background:#1f2937; color:#f87171; margin-left:auto; }
+    .del-btn:hover { border-color:#f87171; background:#2d1b1b; }
+    .adv-btn { padding:2px 8px; font-size:14px; border-radius:5px; cursor:pointer; border:1px solid #374151; background:#1f2937; color:#94a3b8; }
+    .adv-btn:hover { border-color:#2563eb; }
+    .model-adv { width:100%; display:flex; gap:6px; padding:4px 0 6px; flex-wrap:wrap; }
+    .model-adv input { flex:1; min-width:140px; padding:3px 7px; font-size:12px; background:#0d1117; border:1px solid #374151; border-radius:5px; color:#94a3b8; }
+    .add-model-btn { margin:8px 10px; padding:4px 12px; font-size:12px; border-radius:6px; cursor:pointer; border:1px dashed #374151; background:transparent; color:#94a3b8; }
+    .add-model-btn:hover { border-color:#2563eb; color:#93c5fd; }
+    .save-bar { padding:12px 16px; border-top:1px solid #374151; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+    .btn { padding:7px 18px; font-size:13px; border-radius:8px; cursor:pointer; border:1px solid #374151; background:#1f2937; color:#cbd5e1; }
+    .btn:hover { border-color:#2563eb; }
+    .btn:disabled { opacity:.5; cursor:default; }
+    .btn-primary { background:#2563eb; border-color:#2563eb; color:#fff; font-weight:500; }
+    .btn-primary:hover { background:#1d4ed8; }
+    .save-status { font-size:13px; }
+    .save-status.ok { color:#4ade80; }
+    .save-status.err { color:#f87171; }
+    .yaml-wrap { padding:14px; }
+    #yaml-editor { width:100%; height:540px; resize:vertical; font-family:'SF Mono','Fira Code',Consolas,monospace; font-size:12px; background:#0d1117; color:#e6edf3; border:1px solid #374151; border-radius:8px; padding:12px; outline:none; tab-size:2; line-height:1.5; }
+    #yaml-editor:focus { border-color:#2563eb; }
+    .notice { font-size:13px; padding:8px 12px; border-radius:8px; margin:0 0 10px; }
+    .notice.warn { background:#422006; color:#fbbf24; border:1px solid #78350f; }
+"""
+_CONFIG_PAGE_JS = """
+    function switchTab(btn, name) {
+      document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById('tab-' + name).classList.add('active');
+      btn.classList.add('active');
+      if (name === 'yaml') loadYaml();
+    }
+    function toggleKey(btn) {
+      const inp = btn.previousElementSibling;
+      if (inp.type === 'password') { inp.type = 'text'; btn.textContent = 'Hide'; }
+      else { inp.type = 'password'; btn.textContent = 'Show'; }
+    }
+    function addModel(btn) {
+      const list = btn.previousElementSibling;
+      const row = document.createElement('div');
+      row.className = 'model-row';
+      row.innerHTML = `
+        <input type="text" class="model-name" placeholder="model name" />
+        <label class="mm-label mm-text"><input type="checkbox" checked disabled> text</label>
+        <label class="mm-label"><input type="checkbox" class="mm-check" value="image"> image</label>
+        <label class="mm-label"><input type="checkbox" class="mm-check" value="audio"> audio</label>
+        <label class="mm-label"><input type="checkbox" class="mm-check" value="video"> video</label>
+        <button class="adv-btn" onclick="toggleAdv(this)" type="button">&#8943;</button>
+        <button class="del-btn" onclick="delModel(this)" type="button">&#10005;</button>
+      `;
+      list.appendChild(row);
+      row.querySelector('.model-name').focus();
+    }
+    function delModel(btn) { btn.closest('.model-row').remove(); }
+    function toggleAdv(btn) {
+      const row = btn.closest('.model-row');
+      let adv = row.querySelector('.model-adv');
+      if (adv) { adv.remove(); return; }
+      adv = document.createElement('div');
+      adv.className = 'model-adv';
+      adv.innerHTML = `
+        <input type="text" class="model-img-fb" placeholder="image_fallback (provider/model)" />
+        <input type="text" class="model-aud-fb" placeholder="audio_fallback (provider/model)" />
+        <input type="text" class="model-vid-fb" placeholder="video_fallback (provider/model)" />
+      `;
+      row.appendChild(adv);
+    }
+    function collectSettings() {
+      const data = { server: {}, providers: {} };
+      document.querySelectorAll('[data-server]').forEach(el => {
+        const k = el.dataset.server;
+        let v = el.type === 'number' ? (el.value === '' ? null : Number(el.value)) : (el.value || null);
+        data.server[k] = v;
+      });
+      document.querySelectorAll('.prov-body[data-prov]').forEach(body => {
+        const pname = body.dataset.prov;
+        const prov = {
+          api_key: body.querySelector('.prov-apikey').value || '',
+          base_url: body.querySelector('.prov-baseurl').value || null,
+          endpoints: {}
+        };
+        body.querySelectorAll('.ep-section[data-fmt]').forEach(ep => {
+          const fmt = ep.dataset.fmt;
+          const models = [];
+          ep.querySelectorAll('.model-row').forEach(row => {
+            const name = row.querySelector('.model-name').value.trim();
+            if (!name) return;
+            const mm = [];
+            row.querySelectorAll('.mm-check:checked').forEach(cb => mm.push(cb.value));
+            const m = { name, multimodality: mm };
+            const imgFb = row.querySelector('.model-img-fb');
+            const audFb = row.querySelector('.model-aud-fb');
+            const vidFb = row.querySelector('.model-vid-fb');
+            if (imgFb?.value) m.image_fallback = imgFb.value;
+            if (audFb?.value) m.audio_fallback = audFb.value;
+            if (vidFb?.value) m.video_fallback = vidFb.value;
+            models.push(m);
+          });
+          prov.endpoints[fmt] = {
+            base_url: ep.querySelector('.ep-baseurl').value || null,
+            models
+          };
+        });
+        data.providers[pname] = prov;
+      });
+      return data;
+    }
+    async function saveSettings() {
+      const btn = document.getElementById('save-btn');
+      const status = document.getElementById('save-status');
+      btn.disabled = true; btn.textContent = 'Saving…';
+      status.className = 'save-status'; status.textContent = '';
+      try {
+        const r = await fetch('/config/data', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(collectSettings()),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) { status.className = 'save-status ok'; status.textContent = '✓ Saved'; }
+        else { status.className = 'save-status err'; status.textContent = '✗ ' + (d.error || r.status); }
+      } catch(e) {
+        status.className = 'save-status err'; status.textContent = '✗ ' + e.message;
+      } finally { btn.disabled = false; btn.textContent = 'Save Config'; }
+    }
+    async function loadYaml() {
+      const ta = document.getElementById('yaml-editor');
+      if (!ta || ta.dataset.loaded) return;
+      ta.dataset.loaded = '1';
+      try {
+        const r = await fetch('/config/yaml');
+        if (r.ok) ta.value = await r.text();
+        else ta.value = '# Error loading config';
+      } catch(e) { ta.value = '# Error: ' + e.message; }
+    }
+    async function saveYaml() {
+      const ta = document.getElementById('yaml-editor');
+      const btn = document.getElementById('yaml-save-btn');
+      const status = document.getElementById('yaml-status');
+      btn.disabled = true; btn.textContent = 'Saving…';
+      status.className = 'save-status'; status.textContent = '';
+      try {
+        const r = await fetch('/config/yaml', {
+          method: 'POST',
+          headers: {'Content-Type': 'text/plain; charset=utf-8'},
+          body: ta.value,
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) { status.className = 'save-status ok'; status.textContent = '✓ Saved'; }
+        else { status.className = 'save-status err'; status.textContent = '✗ ' + (d.error || r.status); }
+      } catch(e) {
+        status.className = 'save-status err'; status.textContent = '✗ ' + e.message;
+      } finally { btn.disabled = false; btn.textContent = 'Save YAML'; }
+    }
+    document.addEventListener('DOMContentLoaded', () => {
+      const ta = document.getElementById('yaml-editor');
+      if (ta) {
+        ta.addEventListener('keydown', e => {
+          if (e.key === 'Tab') {
+            e.preventDefault();
+            const s = ta.selectionStart;
+            ta.value = ta.value.slice(0,s) + '  ' + ta.value.slice(ta.selectionEnd);
+            ta.selectionStart = ta.selectionEnd = s + 2;
+          }
+        });
+      }
+    });
+    async function testModel(btn, model) {
+      const resultEl = btn.parentElement.querySelector('.test-result');
+      btn.disabled = true;
+      resultEl.className = 'test-result spin'; resultEl.innerHTML = '…';
+      try {
+        const r = await fetch('/config/test', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({model}),
+        });
+        const d = await r.json();
+        if (d.success) {
+          resultEl.className = 'test-result ok';
+          resultEl.textContent = '✓' + (d.latency_ms != null ? ' ' + d.latency_ms + 'ms' : '');
+          if (d.response_preview) {
+            const pre = document.createElement('pre');
+            pre.className = 'preview'; pre.textContent = d.response_preview;
+            resultEl.appendChild(pre);
+          }
+        } else {
+          resultEl.className = 'test-result err';
+          resultEl.textContent = '✗' + (d.latency_ms != null ? ' ' + d.latency_ms + 'ms' : '') +
+            ' ' + (d.error || 'error');
+        }
+      } catch(e) {
+        resultEl.className = 'test-result err'; resultEl.textContent = '✗ ' + e.message;
+      } finally { btn.disabled = false; }
+    }
+    async function testAll() {
+      const btn = document.getElementById('test-all-btn');
+      btn.disabled = true;
+      for (const row of document.querySelectorAll('tr[data-model]')) {
+        const b = row.querySelector('.test-btn');
+        const m = row.dataset.model;
+        if (b && m) await testModel(b, m);
+      }
+      btn.disabled = false;
+    }
+"""
+
+def _config_to_data(cfg: RouterConfig) -> Dict[str, Any]:
+    """Serialize a RouterConfig to a plain JSON-serialisable dict for the GUI."""
+    s = cfg.server
+    server_data = {
+        "host": s.host,
+        "port": s.port,
+        "log_level": s.log_level,
+        "log_file": s.log_file,
+        "max_retries": s.max_retries,
+        "multimodal_fallback_max_concurrency": s.multimodal_fallback_max_concurrency,
+        "image_model": s.image_model,
+        "audio_model": s.audio_model,
+        "video_model": s.video_model,
+        "image_fallback": s.image_fallback,
+        "audio_fallback": s.audio_fallback,
+        "video_fallback": s.video_fallback,
+        "debug_log": s.debug_log,
+    }
+    providers_data: Dict[str, Any] = {}
+    for pname, prov in cfg.providers.items():
+        eps: Dict[str, Any] = {}
+        for fmt, ep in prov.endpoints.items():
+            models_list = []
+            for m in ep.models:
+                from .config import ModelEntry as _ME
+                entry = m if isinstance(m, _ME) else _ME(name=str(m))
+                models_list.append({
+                    "name": entry.name,
+                    "multimodality": list(entry.multimodality),
+                    "image_fallback": entry.image_fallback,
+                    "audio_fallback": entry.audio_fallback,
+                    "video_fallback": entry.video_fallback,
+                    "deepseek_reasoning": entry.deepseek_reasoning,
+                    "max_reasoning_effort": entry.max_reasoning_effort,
+                })
+            eps[fmt] = {
+                "base_url": ep.base_url,
+                "deepseek_reasoning": ep.deepseek_reasoning,
+                "max_reasoning_effort": ep.max_reasoning_effort,
+                "models": models_list,
+            }
+        providers_data[pname] = {
+            "api_key": prov.api_key,
+            "base_url": prov.base_url,
+            "endpoints": eps,
+        }
+    return {"server": server_data, "providers": providers_data}
+
+
+def _data_to_yaml(data: Dict[str, Any]) -> str:
+    """Convert GUI data dict back to clean YAML for saving."""
+    def _nonempty(v: Any) -> bool:
+        return v is not None and v != "" and v != []
+
+    server_raw = data.get("server", {})
+    server_out: Dict[str, Any] = {}
+    for k, v in server_raw.items():
+        if _nonempty(v):
+            server_out[k] = v
+
+    providers_out: Dict[str, Any] = {}
+    for pname, prov in data.get("providers", {}).items():
+        eps_out: Dict[str, Any] = {}
+        for fmt, ep in prov.get("endpoints", {}).items():
+            ep_out: Dict[str, Any] = {}
+            if _nonempty(ep.get("base_url")):
+                ep_out["base_url"] = ep["base_url"]
+            if ep.get("deepseek_reasoning") is not None:
+                ep_out["deepseek_reasoning"] = ep["deepseek_reasoning"]
+            if _nonempty(ep.get("max_reasoning_effort")):
+                ep_out["max_reasoning_effort"] = ep["max_reasoning_effort"]
+            models_out = []
+            for m in ep.get("models", []):
+                if not m.get("name"):
+                    continue
+                extra: Dict[str, Any] = {}
+                mm = m.get("multimodality") or []
+                if mm:
+                    extra["multimodality"] = mm
+                for fb in ("image_fallback", "audio_fallback", "video_fallback"):
+                    if _nonempty(m.get(fb)):
+                        extra[fb] = m[fb]
+                if m.get("deepseek_reasoning") is not None:
+                    extra["deepseek_reasoning"] = m["deepseek_reasoning"]
+                if _nonempty(m.get("max_reasoning_effort")):
+                    extra["max_reasoning_effort"] = m["max_reasoning_effort"]
+                if extra:
+                    models_out.append({"name": m["name"], **extra})
+                else:
+                    models_out.append(m["name"])
+            if models_out:
+                ep_out["models"] = models_out
+            eps_out[fmt] = ep_out
+
+        prov_out: Dict[str, Any] = {}
+        if _nonempty(prov.get("api_key")):
+            prov_out["api_key"] = prov["api_key"]
+        if _nonempty(prov.get("base_url")):
+            prov_out["base_url"] = prov["base_url"]
+        prov_out["endpoints"] = eps_out
+        providers_out[pname] = prov_out
+
+    result: Dict[str, Any] = {}
+    if server_out:
+        result["server"] = server_out
+    if providers_out:
+        result["providers"] = providers_out
+
+    return _yaml_module.dump(result, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
 
 def _parse_stats_days(raw: Optional[str]) -> int:
@@ -725,53 +1122,37 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         return HTMLResponse(page_html)
 
     # ------------------------------------------------------------------
-    # GET /config/yaml  — return raw YAML config
-    # POST /config/yaml — save new YAML config
-    # POST /config/test — quick-test a model
-    # GET  /config      — HTML config editor page
+    # Config API  (GET/POST /config/data, POST /config/test, GET /config)
+    # GET/POST /config/yaml  — raw YAML for YAML tab
     # ------------------------------------------------------------------
 
-    @app.get("/config/yaml")
-    async def config_yaml_get(request: Request):
-        if config_path is None:
-            return JSONResponse(
-                status_code=503,
-                content={"error": "Config path unknown (server started without --config file path)"},
-            )
-        try:
-            raw = config_path.read_text()
-        except Exception as exc:
-            return JSONResponse(status_code=500, content={"error": str(exc)})
-        from fastapi.responses import PlainTextResponse
-        return PlainTextResponse(raw, media_type="text/plain; charset=utf-8")
+    @app.get("/config/data")
+    async def config_data_get(request: Request) -> JSONResponse:
+        cfg: RouterConfig = request.app.state.config
+        return JSONResponse(_config_to_data(cfg))
 
-    @app.post("/config/yaml")
-    async def config_yaml_post(request: Request):
+    @app.post("/config/data")
+    async def config_data_post(request: Request) -> JSONResponse:
         if config_path is None:
             return JSONResponse(
                 status_code=503,
-                content={"error": "Config path unknown (server started without --config file path)"},
+                content={"error": "Config path unknown (server started without a config file)"},
             )
-        body_bytes = await request.body()
-        new_yaml = body_bytes.decode("utf-8")
-        # Validate before saving
-        import yaml as _yaml
+        data = await request.json()
         try:
-            parsed = _yaml.safe_load(new_yaml)
-            if not isinstance(parsed, dict):
-                raise ValueError("YAML must be a mapping at the top level")
-            from .config import RouterConfig as _RC
-            _RC.model_validate(parsed)
+            new_yaml = _data_to_yaml(data)
+            parsed = _yaml_module.safe_load(new_yaml)
+            RouterConfig.model_validate(parsed)
         except Exception as exc:
             return JSONResponse(status_code=400, content={"error": f"Invalid config: {exc}"})
         try:
             config_path.write_text(new_yaml, encoding="utf-8")
         except Exception as exc:
             return JSONResponse(status_code=500, content={"error": f"Write error: {exc}"})
-        return JSONResponse({"ok": True, "message": "Config saved. Reload will apply automatically."})
+        return JSONResponse({"ok": True})
 
     @app.post("/config/test")
-    async def config_test(request: Request):
+    async def config_test(request: Request) -> JSONResponse:
         body: Dict[str, Any] = await request.json()
         model_str: str = body.get("model", "")
         if not model_str:
@@ -782,295 +1163,237 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         result = await test_model_direct(model_str, cfg, client)
         return JSONResponse(result)
 
+    @app.get("/config/yaml")
+    async def config_yaml_get(request: Request):
+        if config_path is None:
+            return JSONResponse(status_code=503, content={"error": "Config path unknown"})
+        try:
+            raw = config_path.read_text()
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"error": str(exc)})
+        return PlainTextResponse(raw, media_type="text/plain; charset=utf-8")
+
+    @app.post("/config/yaml")
+    async def config_yaml_post(request: Request):
+        if config_path is None:
+            return JSONResponse(status_code=503, content={"error": "Config path unknown"})
+        body_bytes = await request.body()
+        new_yaml = body_bytes.decode("utf-8")
+        try:
+            parsed = _yaml_module.safe_load(new_yaml)
+            if not isinstance(parsed, dict):
+                raise ValueError("YAML must be a mapping at the top level")
+            RouterConfig.model_validate(parsed)
+        except Exception as exc:
+            return JSONResponse(status_code=400, content={"error": f"Invalid config: {exc}"})
+        try:
+            config_path.write_text(new_yaml, encoding="utf-8")
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"error": f"Write error: {exc}"})
+        return JSONResponse({"ok": True})
+
     @app.get("/config")
     async def config_page(request: Request) -> HTMLResponse:  # noqa: C901
         cfg: RouterConfig = request.app.state.config
+        data = _config_to_data(cfg)
+        s = data["server"]
+        has_config_path = config_path is not None
+        config_path_str = html.escape(str(config_path) if config_path else "(unknown)")
 
-        def _fmt_multimodal(entry) -> str:
-            mm = getattr(entry, "multimodality", []) or []
-            if not mm:
-                return '<span class="badge badge-grey">text</span>'
-            icons = {"image": "🖼", "audio": "🎵", "video": "🎬"}
-            return " ".join(
-                f'<span class="badge badge-blue">{icons.get(m, m)}{m}</span>'
-                for m in mm
+        log_level_opts = ""
+        for lvl in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            sel = " selected" if s.get("log_level") == lvl else ""
+            log_level_opts += f'<option value="{lvl}"{sel}>{lvl}</option>'
+
+        def _v(key, default=""):
+            return html.escape(str(s.get(key) or default))
+
+        server_html = (
+            '<div class="field-grid">'
+            '<div class="field-row"><label>port</label>'
+            f'<input type="number" data-server="port" value="{_v("port","8080")}" style="width:90px" /></div>'
+            '<div class="field-row"><label>host</label>'
+            f'<input type="text" data-server="host" value="{_v("host")}" placeholder="127.0.0.1" /></div>'
+            '<div class="field-row"><label>log_level</label>'
+            f'<select data-server="log_level">{log_level_opts}</select></div>'
+            '<div class="field-row"><label>log_file</label>'
+            f'<input type="text" data-server="log_file" value="{_v("log_file")}" placeholder="router.log" /></div>'
+            '<div class="field-row"><label>max_retries</label>'
+            f'<input type="number" data-server="max_retries" value="{_v("max_retries","3")}" style="width:70px" /></div>'
+            '<div class="field-row"><label>fallback_max_concurrency</label>'
+            f'<input type="number" data-server="multimodal_fallback_max_concurrency"'
+            f' value="{_v("multimodal_fallback_max_concurrency","3")}" style="width:70px" /></div>'
+            '<div class="field-row"><label>image_model</label>'
+            f'<input type="text" data-server="image_model" value="{_v("image_model")}" placeholder="provider/model" /></div>'
+            '<div class="field-row"><label>audio_model</label>'
+            f'<input type="text" data-server="audio_model" value="{_v("audio_model")}" placeholder="provider/model" /></div>'
+            '<div class="field-row"><label>video_model</label>'
+            f'<input type="text" data-server="video_model" value="{_v("video_model")}" placeholder="provider/model" /></div>'
+            '<div class="field-row"><label>image_fallback</label>'
+            f'<input type="text" data-server="image_fallback" value="{_v("image_fallback")}" placeholder="provider/model" /></div>'
+            '<div class="field-row"><label>audio_fallback</label>'
+            f'<input type="text" data-server="audio_fallback" value="{_v("audio_fallback")}" placeholder="provider/model" /></div>'
+            '<div class="field-row"><label>video_fallback</label>'
+            f'<input type="text" data-server="video_fallback" value="{_v("video_fallback")}" placeholder="provider/model" /></div>'
+            '<div class="field-row"><label>debug_log</label>'
+            f'<input type="text" data-server="debug_log" value="{_v("debug_log")}" placeholder="path/to/debug.log" /></div>'
+            '</div>'
+        )
+
+        def _model_row(m):
+            mm = set(m.get("multimodality", []))
+            img = " checked" if "image" in mm else ""
+            aud = " checked" if "audio" in mm else ""
+            vid = " checked" if "video" in mm else ""
+            img_fb = html.escape(m.get("image_fallback") or "")
+            aud_fb = html.escape(m.get("audio_fallback") or "")
+            vid_fb = html.escape(m.get("video_fallback") or "")
+            adv = ""
+            if img_fb or aud_fb or vid_fb:
+                adv = (
+                    '<div class="model-adv">'
+                    f'<input type="text" class="model-img-fb" placeholder="image_fallback" value="{img_fb}" />'
+                    f'<input type="text" class="model-aud-fb" placeholder="audio_fallback" value="{aud_fb}" />'
+                    f'<input type="text" class="model-vid-fb" placeholder="video_fallback" value="{vid_fb}" />'
+                    '</div>'
+                )
+            return (
+                '<div class="model-row">'
+                f'<input type="text" class="model-name" value="{html.escape(m["name"])}" placeholder="model name" />'
+                '<label class="mm-label mm-text"><input type="checkbox" checked disabled> text</label>'
+                f'<label class="mm-label"><input type="checkbox" class="mm-check" value="image"{img}> image</label>'
+                f'<label class="mm-label"><input type="checkbox" class="mm-check" value="audio"{aud}> audio</label>'
+                f'<label class="mm-label"><input type="checkbox" class="mm-check" value="video"{vid}> video</label>'
+                '<button class="adv-btn" onclick="toggleAdv(this)" type="button">&#8943;</button>'
+                '<button class="del-btn" onclick="delModel(this)" type="button">&#10005;</button>'
+                + adv +
+                '</div>'
             )
 
-        model_rows = []
-        for prov_name, prov in cfg.providers.items():
+        providers_html = ""
+        for pname, prov in data["providers"].items():
+            eps_html = ""
+            for fmt, ep in prov["endpoints"].items():
+                rows = "\n".join(_model_row(m) for m in ep["models"])
+                ep_base = html.escape(ep.get("base_url") or "")
+                eps_html += (
+                    f'<div class="ep-section" data-fmt="{html.escape(fmt)}">'
+                    f'<div class="ep-header">'
+                    f'<code class="fmt-badge">{html.escape(fmt)}</code>'
+                    f'<input type="text" class="ep-baseurl" value="{ep_base}" placeholder="Base URL (optional)" />'
+                    f'</div>'
+                    f'<div class="models-list">{rows}</div>'
+                    f'<button class="add-model-btn" onclick="addModel(this)" type="button">+ Add Model</button>'
+                    f'</div>'
+                )
+            prov_apikey = html.escape(prov.get("api_key") or "")
+            prov_baseurl = html.escape(prov.get("base_url") or "")
+            providers_html += (
+                f'<details class="prov-card" open>'
+                f'<summary class="prov-summary"><span class="prov-name">{html.escape(pname)}</span></summary>'
+                f'<div class="prov-body" data-prov="{html.escape(pname)}">'
+                f'<div class="field-row"><label>api_key</label>'
+                f'<div class="key-wrap">'
+                f'<input type="password" class="prov-apikey" value="{prov_apikey}" autocomplete="off" />'
+                f'<button class="show-key-btn" onclick="toggleKey(this)" type="button">Show</button>'
+                f'</div></div>'
+                f'<div class="field-row"><label>base_url</label>'
+                f'<input type="text" class="prov-baseurl" value="{prov_baseurl}" placeholder="optional" />'
+                f'</div>'
+                + eps_html +
+                f'</div></details>'
+            )
+
+        save_disabled = "" if has_config_path else " disabled"
+        save_notice = "" if has_config_path else '<p class="notice warn">Config path unknown &#8212; cannot save.</p>'
+
+        model_rows_html = []
+        for pname, prov in cfg.providers.items():
             for fmt, ep in prov.endpoints.items():
                 for m in ep.models:
                     from .config import ModelEntry as _ME
                     entry = m if isinstance(m, _ME) else _ME(name=str(m))
-                    full_id = f"{prov_name}/{entry.name}"
-                    model_rows.append(
-                        f'<tr data-model="{html.escape(full_id)}">'
-                        f'<td class="prov-cell">{html.escape(prov_name)}</td>'
+                    full_id = html.escape(f"{pname}/{entry.name}")
+                    mm = list(entry.multimodality)
+                    badges = '<span class="badge bg">text</span>'
+                    for mt in ("image", "audio", "video"):
+                        if mt in mm:
+                            badges += f'<span class="badge bb">{mt}</span>'
+                    model_rows_html.append(
+                        f'<tr data-model="{full_id}">'
+                        f'<td class="pc">{html.escape(pname)}</td>'
                         f'<td>{html.escape(entry.name)}</td>'
-                        f'<td><code class="fmt">{html.escape(fmt)}</code></td>'
-                        f'<td>{_fmt_multimodal(entry)}</td>'
+                        f'<td><code class="fmt-badge">{html.escape(fmt)}</code></td>'
+                        f'<td>{badges}</td>'
                         f'<td class="test-cell">'
-                        f'  <button class="test-btn" onclick="testModel(this, \'{html.escape(full_id)}\')">'
-                        f"    Test"
-                        f"  </button>"
-                        f'  <span class="test-result"></span>'
-                        f"</td>"
-                        f"</tr>"
+                        f'<button class="test-btn" onclick="testModel(this,&quot;{full_id}&quot;)">Test</button>'
+                        f'<span class="test-result"></span>'
+                        f'</td></tr>'
                     )
+        model_table_body = "\n".join(model_rows_html) or '<tr><td colspan="5" class="empty">No models configured</td></tr>'
 
-        model_table = "\n".join(model_rows) or '<tr><td colspan="5" class="empty">No models configured</td></tr>'
-        has_config_path = config_path is not None
-        config_path_str = str(config_path) if config_path else "(unknown)"
-        editor_disabled = "" if has_config_path else "disabled"
-        editor_notice = "" if has_config_path else '<p class="notice warn">Config path unknown — editor disabled.</p>'
-
-        page_html = f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Router Config</title>
-  <style>
-    :root {{ color-scheme: dark light; }}
-    body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; background: #111827; color: #e5e7eb; }}
-    a {{ color: #93c5fd; text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    h1 {{ margin: 0 0 4px; font-size: 26px; }}
-    .subhead {{ color: #94a3b8; font-size: 13px; margin-bottom: 18px; }}
-    .nav {{ display: flex; gap: 12px; margin-bottom: 24px; align-items: center; }}
-    .nav a {{ border: 1px solid #374151; border-radius: 999px; padding: 5px 14px; color: #cbd5e1; font-size: 13px; }}
-    .nav a:hover {{ border-color: #2563eb; text-decoration: none; }}
-    .nav a.active {{ background: #2563eb; border-color: #2563eb; color: #fff; }}
-    .layout {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }}
-    @media (max-width: 900px) {{ .layout {{ grid-template-columns: 1fr; }} }}
-    .panel {{ background: #111827; border: 1px solid #374151; border-radius: 12px; overflow: hidden; }}
-    .panel-header {{ padding: 14px 16px; border-bottom: 1px solid #374151; display: flex; align-items: center; justify-content: space-between; }}
-    .panel-header h2 {{ margin: 0; font-size: 15px; }}
-    .table-wrap {{ overflow-x: auto; }}
-    table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-    th, td {{ padding: 8px 12px; border-bottom: 1px solid #1f2937; text-align: left; white-space: nowrap; }}
-    th {{ color: #94a3b8; font-weight: 600; }}
-    tr:last-child td {{ border-bottom: 0; }}
-    .prov-cell {{ color: #93c5fd; font-weight: 500; }}
-    .fmt {{ background: #1f2937; padding: 2px 6px; border-radius: 4px; font-size: 11px; color: #94a3b8; }}
-    .badge {{ display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; }}
-    .badge-grey {{ background: #1f2937; color: #94a3b8; }}
-    .badge-blue {{ background: #1e3a5f; color: #93c5fd; }}
-    .empty {{ color: #94a3b8; text-align: center; }}
-    .test-btn {{
-      padding: 3px 10px; font-size: 12px; border-radius: 6px; cursor: pointer;
-      border: 1px solid #374151; background: #1f2937; color: #cbd5e1;
-    }}
-    .test-btn:hover {{ border-color: #2563eb; color: #93c5fd; }}
-    .test-btn:disabled {{ opacity: 0.5; cursor: default; }}
-    .test-result {{ font-size: 12px; margin-left: 8px; }}
-    .test-result.ok {{ color: #4ade80; }}
-    .test-result.err {{ color: #f87171; }}
-    .test-result.loading {{ color: #94a3b8; }}
-    .editor-wrap {{ padding: 16px; display: flex; flex-direction: column; gap: 12px; }}
-    textarea#yaml-editor {{
-      width: 100%; box-sizing: border-box; height: 560px; resize: vertical;
-      font-family: 'SF Mono', 'Fira Code', Consolas, monospace; font-size: 12px;
-      background: #0d1117; color: #e6edf3; border: 1px solid #374151;
-      border-radius: 8px; padding: 12px; outline: none; tab-size: 2;
-    }}
-    textarea#yaml-editor:focus {{ border-color: #2563eb; }}
-    .btn-row {{ display: flex; gap: 10px; align-items: center; }}
-    .btn {{
-      padding: 7px 18px; font-size: 13px; border-radius: 8px; cursor: pointer;
-      border: 1px solid #374151; background: #1f2937; color: #cbd5e1;
-    }}
-    .btn-primary {{ background: #2563eb; border-color: #2563eb; color: #fff; font-weight: 500; }}
-    .btn:hover {{ opacity: 0.85; }}
-    .btn:disabled {{ opacity: 0.5; cursor: default; }}
-    .save-status {{ font-size: 13px; }}
-    .save-status.ok {{ color: #4ade80; }}
-    .save-status.err {{ color: #f87171; }}
-    .notice {{ font-size: 13px; padding: 8px 12px; border-radius: 8px; margin: 0; }}
-    .notice.warn {{ background: #422006; color: #fbbf24; border: 1px solid #78350f; }}
-    pre.preview {{ background: #1f2937; padding: 8px 12px; border-radius: 6px; font-size: 11px; color: #94a3b8; margin: 4px 0 0; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-  </style>
-</head>
-<body>
-  <h1>Simple API Router</h1>
-  <p class="subhead">Config: <code>{html.escape(config_path_str)}</code></p>
-  <nav class="nav">
-    <a href="/stats">📊 Stats</a>
-    <a href="/config" class="active">⚙ Config</a>
-    <a href="/health">🩺 Health</a>
-  </nav>
-
-  <div class="layout">
-    <!-- ── Left: model list ───────────────────────────────────────── -->
-    <div class="panel">
-      <div class="panel-header">
-        <h2>Models</h2>
-        <button class="btn" onclick="testAll()" id="test-all-btn">Test All</button>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Provider</th><th>Model</th><th>Format</th><th>Modality</th><th>Test</th>
-            </tr>
-          </thead>
-          <tbody>
-{model_table}
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- ── Right: YAML editor ─────────────────────────────────────── -->
-    <div class="panel">
-      <div class="panel-header">
-        <h2>Config Editor</h2>
-        <span class="save-status" id="save-status"></span>
-      </div>
-      <div class="editor-wrap">
-        {editor_notice}
-        <textarea id="yaml-editor" spellcheck="false" {editor_disabled}
-          placeholder="Loading config..."></textarea>
-        <div class="btn-row">
-          <button class="btn btn-primary" id="save-btn" onclick="saveConfig()" {editor_disabled}>
-            Save Config
-          </button>
-          <button class="btn" id="reload-btn" onclick="loadConfig()" {editor_disabled}>
-            ↺ Reload
-          </button>
-          <span style="color:#94a3b8;font-size:12px">Config reloads automatically after save.</span>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    // ── load config YAML ─────────────────────────────────────────────────
-    async function loadConfig() {{
-      const ta = document.getElementById('yaml-editor');
-      const btn = document.getElementById('reload-btn');
-      if (!ta || ta.disabled) return;
-      btn.disabled = true;
-      btn.textContent = '↺ Loading…';
-      try {{
-        const r = await fetch('/config/yaml');
-        if (r.ok) {{
-          ta.value = await r.text();
-          setStatus('', '');
-        }} else {{
-          const d = await r.json().catch(() => ({{}}));
-          setStatus('err', 'Load failed: ' + (d.error || r.status));
-        }}
-      }} catch(e) {{
-        setStatus('err', 'Load failed: ' + e.message);
-      }} finally {{
-        btn.disabled = false;
-        btn.textContent = '↺ Reload';
-      }}
-    }}
-
-    // ── save config YAML ─────────────────────────────────────────────────
-    async function saveConfig() {{
-      const ta = document.getElementById('yaml-editor');
-      const btn = document.getElementById('save-btn');
-      if (!ta || ta.disabled) return;
-      btn.disabled = true;
-      btn.textContent = 'Saving…';
-      setStatus('', 'Saving…');
-      try {{
-        const r = await fetch('/config/yaml', {{
-          method: 'POST',
-          headers: {{'Content-Type': 'text/plain; charset=utf-8'}},
-          body: ta.value,
-        }});
-        const d = await r.json().catch(() => ({{}}));
-        if (r.ok) {{
-          setStatus('ok', '✓ Saved');
-        }} else {{
-          setStatus('err', '✗ ' + (d.error || r.status));
-        }}
-      }} catch(e) {{
-        setStatus('err', '✗ ' + e.message);
-      }} finally {{
-        btn.disabled = false;
-        btn.textContent = 'Save Config';
-      }}
-    }}
-
-    function setStatus(cls, msg) {{
-      const el = document.getElementById('save-status');
-      el.className = 'save-status' + (cls ? ' ' + cls : '');
-      el.textContent = msg;
-    }}
-
-    // ── test a single model ───────────────────────────────────────────────
-    async function testModel(btn, model) {{
-      const resultEl = btn.parentElement.querySelector('.test-result');
-      btn.disabled = true;
-      resultEl.className = 'test-result loading';
-      resultEl.textContent = '…testing';
-      try {{
-        const r = await fetch('/config/test', {{
-          method: 'POST',
-          headers: {{'Content-Type': 'application/json'}},
-          body: JSON.stringify({{model}}),
-        }});
-        const d = await r.json();
-        if (d.success) {{
-          resultEl.className = 'test-result ok';
-          const ms = d.latency_ms != null ? d.latency_ms + 'ms' : '';
-          resultEl.textContent = '✓ ' + ms;
-          if (d.response_preview) {{
-            const pre = document.createElement('pre');
-            pre.className = 'preview';
-            pre.textContent = d.response_preview;
-            resultEl.appendChild(pre);
-          }}
-        }} else {{
-          resultEl.className = 'test-result err';
-          const ms = d.latency_ms != null ? ' ' + d.latency_ms + 'ms' : '';
-          resultEl.textContent = '✗' + ms + ' ' + (d.error || 'error');
-        }}
-      }} catch(e) {{
-        resultEl.className = 'test-result err';
-        resultEl.textContent = '✗ ' + e.message;
-      }} finally {{
-        btn.disabled = false;
-      }}
-    }}
-
-    // ── test all models sequentially ──────────────────────────────────────
-    async function testAll() {{
-      const allBtn = document.getElementById('test-all-btn');
-      allBtn.disabled = true;
-      const rows = document.querySelectorAll('tr[data-model]');
-      for (const row of rows) {{
-        const btn = row.querySelector('.test-btn');
-        const model = row.getAttribute('data-model');
-        if (btn && model) await testModel(btn, model);
-      }}
-      allBtn.disabled = false;
-    }}
-
-    // ── handle Tab key in textarea ────────────────────────────────────────
-    document.addEventListener('DOMContentLoaded', () => {{
-      loadConfig();
-      const ta = document.getElementById('yaml-editor');
-      if (ta && !ta.disabled) {{
-        ta.addEventListener('keydown', (e) => {{
-          if (e.key === 'Tab') {{
-            e.preventDefault();
-            const s = ta.selectionStart, end = ta.selectionEnd;
-            ta.value = ta.value.substring(0, s) + '  ' + ta.value.substring(end);
-            ta.selectionStart = ta.selectionEnd = s + 2;
-          }}
-        }});
-      }}
-    }});
-  </script>
-</body>
-</html>
-"""
+        _css = _CONFIG_PAGE_CSS
+        _js = _CONFIG_PAGE_JS
+        page_html = (
+            '<!doctype html><html lang="en"><head>'
+            '<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<title>Router Config</title>'
+            f'<style>{_css}</style>'
+            '</head><body>'
+            '<h1>Simple API Router</h1>'
+            f'<p class="subhead">Config: <code>{config_path_str}</code></p>'
+            '<nav class="nav">'
+            '<a href="/stats">&#128202; Stats</a>'
+            '<a href="/config" class="active">&#9881; Config</a>'
+            '<a href="/health">&#129322; Health</a>'
+            '</nav>'
+            '<div class="layout">'
+            '<div class="panel">'
+            '<div class="panel-hdr"><h2>Models</h2>'
+            '<button class="btn" id="test-all-btn" onclick="testAll()">Test All</button>'
+            '</div>'
+            '<div class="table-wrap"><table>'
+            '<thead><tr><th>Provider</th><th>Model</th><th>Format</th><th>Modality</th><th>Test</th></tr></thead>'
+            f'<tbody>{model_table_body}</tbody>'
+            '</table></div>'
+            '</div>'
+            '<div class="panel">'
+            '<div class="tab-bar">'
+            '<button class="tab-btn active" onclick="switchTab(this,\'settings\')">Settings</button>'
+            '<button class="tab-btn" onclick="switchTab(this,\'yaml\')">YAML</button>'
+            '</div>'
+            '<div id="tab-settings" class="tab-pane active">'
+            '<div class="form-scroll">'
+            f'{save_notice}'
+            '<details class="settings-section" open>'
+            '<summary>Server</summary>'
+            f'<div>{server_html}</div>'
+            '</details>'
+            '<details class="settings-section" open>'
+            '<summary>Providers</summary>'
+            f'<div id="providers-form">{providers_html}</div>'
+            '</details>'
+            '</div>'
+            '<div class="save-bar">'
+            f'<button class="btn btn-primary" id="save-btn" onclick="saveSettings()"{save_disabled}>Save Config</button>'
+            '<span class="save-status" id="save-status"></span>'
+            '</div>'
+            '</div>'
+            '<div id="tab-yaml" class="tab-pane">'
+            '<div class="yaml-wrap">'
+            '<textarea id="yaml-editor" spellcheck="false" placeholder="Loading&#8230;"></textarea>'
+            '</div>'
+            '<div class="save-bar">'
+            f'<button class="btn btn-primary" id="yaml-save-btn" onclick="saveYaml()"{save_disabled}>Save YAML</button>'
+            '<button class="btn" onclick="loadYaml()">&#8635; Reload</button>'
+            '<span class="save-status" id="yaml-status"></span>'
+            '</div>'
+            '</div>'
+            '</div>'
+            '</div>'
+            f'<script>{_js}</script>'
+            '</body></html>'
+        )
         return HTMLResponse(page_html)
 
     # ------------------------------------------------------------------

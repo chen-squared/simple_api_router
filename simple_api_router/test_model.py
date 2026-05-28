@@ -88,15 +88,15 @@ async def _run_test(
             resp = await client.post(url, headers=headers, json=base_body)
 
         elif api_format in ("openai_chat", "openai_responses"):
-            from .converter_openai import anthropic_to_openai_chat_request
+            from .converter_openai import anthropic_to_openai_request
             headers = _build_openai_headers(provider.api_key)
             base_url = endpoint.resolve_base_url(api_format, provider.base_url)
             if api_format == "openai_responses":
-                from .converter_openai import anthropic_to_responses_request
+                from .converter_responses import anthropic_to_responses_request
                 req_body = anthropic_to_responses_request(base_body, backend_model)
                 url = f"{base_url}/v1/responses"
             else:
-                req_body = anthropic_to_openai_chat_request(base_body)
+                req_body = anthropic_to_openai_request(base_body)
                 url = f"{base_url}/v1/chat/completions"
             resp = await client.post(url, headers=headers, json=req_body)
 
