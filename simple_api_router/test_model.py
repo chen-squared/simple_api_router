@@ -96,7 +96,7 @@ async def _run_test(
                 req_body = anthropic_to_responses_request(base_body, backend_model)
                 url = f"{base_url}/v1/responses"
             else:
-                req_body = anthropic_to_openai_request(base_body)
+                req_body = anthropic_to_openai_request(base_body, backend_model)
                 url = f"{base_url}/v1/chat/completions"
             resp = await client.post(url, headers=headers, json=req_body)
 

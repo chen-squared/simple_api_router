@@ -8,7 +8,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
 import yaml as _yaml_module
@@ -362,73 +362,117 @@ def _config_to_data(cfg: RouterConfig) -> Dict[str, Any]:
                 "models": models_list,
             }
         providers_data[pname] = {
-            "api_key": prov.api_key,
+            # Mask the key so it is never exposed in the HTTP response.
+            # The GUI shows "***" and skips updating the key if unchanged.
+            "api_key": "***" if prov.api_key else "",
             "base_url": prov.base_url,
             "endpoints": eps,
         }
     return {"server": server_data, "providers": providers_data}
 
 
-def _data_to_yaml(data: Dict[str, Any]) -> str:
-    """Convert GUI data dict back to clean YAML for saving."""
-    def _nonempty(v: Any) -> bool:
-        return v is not None and v != "" and v != []
+def _patch_yaml(existing_yaml: str, gui_data: Dict[str, Any]) -> str:
+    """Merge GUI changes into the existing parsed YAML dict.
 
-    server_raw = data.get("server", {})
-    server_out: Dict[str, Any] = {}
-    for k, v in server_raw.items():
-        if _nonempty(v):
-            server_out[k] = v
+    Unknown fields (e.g. pricing, model_map) are preserved because we only
+    overwrite the keys the GUI explicitly manages.
+    api_key is never overwritten when the GUI sends "***" (the masked value).
+    """
+    existing: Dict[str, Any] = _yaml_module.safe_load(existing_yaml) or {}
 
-    providers_out: Dict[str, Any] = {}
-    for pname, prov in data.get("providers", {}).items():
-        eps_out: Dict[str, Any] = {}
-        for fmt, ep in prov.get("endpoints", {}).items():
-            ep_out: Dict[str, Any] = {}
-            if _nonempty(ep.get("base_url")):
-                ep_out["base_url"] = ep["base_url"]
-            if ep.get("deepseek_reasoning") is not None:
-                ep_out["deepseek_reasoning"] = ep["deepseek_reasoning"]
-            if _nonempty(ep.get("max_reasoning_effort")):
-                ep_out["max_reasoning_effort"] = ep["max_reasoning_effort"]
-            models_out = []
-            for m in ep.get("models", []):
-                if not m.get("name"):
+    # ── Server settings ──────────────────────────────────────────────────────
+    gui_server = gui_data.get("server") or {}
+    if gui_server:
+        srv = existing.setdefault("server", {})
+        for k, v in gui_server.items():
+            if v is None or v == "":
+                srv.pop(k, None)
+            else:
+                srv[k] = v
+        if not srv:
+            existing.pop("server", None)
+
+    # ── Providers ────────────────────────────────────────────────────────────
+    gui_provs = gui_data.get("providers") or {}
+    for pname, gui_prov in gui_provs.items():
+        provs = existing.setdefault("providers", {})
+        if pname not in provs:
+            continue  # Settings tab doesn't add/remove providers; use YAML tab
+        ep_dict = provs[pname]
+
+        # api_key — skip update when the GUI sent the masked placeholder
+        gui_key = gui_prov.get("api_key")
+        if gui_key and gui_key != "***":
+            ep_dict["api_key"] = gui_key
+        elif gui_key == "":
+            ep_dict.pop("api_key", None)
+        # gui_key == "***" → leave existing value untouched
+
+        # base_url
+        if "base_url" in gui_prov:
+            if gui_prov["base_url"]:
+                ep_dict["base_url"] = gui_prov["base_url"]
+            else:
+                ep_dict.pop("base_url", None)
+
+        # endpoints
+        gui_eps = gui_prov.get("endpoints") or {}
+        for fmt, gui_ep in gui_eps.items():
+            eps_section = ep_dict.setdefault("endpoints", {})
+            if fmt not in eps_section:
+                continue  # don't add new endpoint formats via Settings tab
+            existing_ep = eps_section[fmt]
+            if existing_ep is None:
+                existing_ep = {}
+                eps_section[fmt] = existing_ep
+
+            # endpoint base_url
+            if gui_ep.get("base_url"):
+                existing_ep["base_url"] = gui_ep["base_url"]
+            else:
+                existing_ep.pop("base_url", None)
+
+            # models — merge by name so pricing / other per-model fields survive
+            gui_models_list = gui_ep.get("models") or []
+            raw_existing: List[Any] = existing_ep.get("models") or []
+            existing_by_name: Dict[str, Any] = {}
+            for m in raw_existing:
+                if isinstance(m, dict) and m.get("name"):
+                    existing_by_name[m["name"]] = dict(m)
+                elif isinstance(m, str):
+                    existing_by_name[m] = m
+
+            new_models: List[Any] = []
+            for gm in gui_models_list:
+                name = (gm.get("name") or "").strip()
+                if not name:
                     continue
-                extra: Dict[str, Any] = {}
-                mm = m.get("multimodality") or []
-                if mm:
-                    extra["multimodality"] = mm
-                for fb in ("image_fallback", "audio_fallback", "video_fallback"):
-                    if _nonempty(m.get(fb)):
-                        extra[fb] = m[fb]
-                if m.get("deepseek_reasoning") is not None:
-                    extra["deepseek_reasoning"] = m["deepseek_reasoning"]
-                if _nonempty(m.get("max_reasoning_effort")):
-                    extra["max_reasoning_effort"] = m["max_reasoning_effort"]
-                if extra:
-                    models_out.append({"name": m["name"], **extra})
+                base = existing_by_name.get(name)
+                if isinstance(base, dict):
+                    new_m: Dict[str, Any] = dict(base)
                 else:
-                    models_out.append(m["name"])
-            if models_out:
-                ep_out["models"] = models_out
-            eps_out[fmt] = ep_out
+                    new_m = {"name": name}
 
-        prov_out: Dict[str, Any] = {}
-        if _nonempty(prov.get("api_key")):
-            prov_out["api_key"] = prov["api_key"]
-        if _nonempty(prov.get("base_url")):
-            prov_out["base_url"] = prov["base_url"]
-        prov_out["endpoints"] = eps_out
-        providers_out[pname] = prov_out
+                mm = gm.get("multimodality") or []
+                if mm:
+                    new_m["multimodality"] = mm
+                else:
+                    new_m.pop("multimodality", None)
+                for fb in ("image_fallback", "audio_fallback", "video_fallback"):
+                    if gm.get(fb):
+                        new_m[fb] = gm[fb]
+                    else:
+                        new_m.pop(fb, None)
 
-    result: Dict[str, Any] = {}
-    if server_out:
-        result["server"] = server_out
-    if providers_out:
-        result["providers"] = providers_out
+                other_keys = {k for k in new_m if k != "name"}
+                new_models.append(name if not other_keys else new_m)
 
-    return _yaml_module.dump(result, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            if new_models:
+                existing_ep["models"] = new_models
+            else:
+                existing_ep.pop("models", None)
+
+    return _yaml_module.dump(existing, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
 
 def _parse_stats_days(raw: Optional[str]) -> int:
@@ -1140,7 +1184,11 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
             )
         data = await request.json()
         try:
-            new_yaml = _data_to_yaml(data)
+            existing_yaml = config_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"error": f"Read error: {exc}"})
+        try:
+            new_yaml = _patch_yaml(existing_yaml, data)
             parsed = _yaml_module.safe_load(new_yaml)
             RouterConfig.model_validate(parsed)
         except Exception as exc:
