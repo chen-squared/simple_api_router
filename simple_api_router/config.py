@@ -35,6 +35,7 @@ class ServerConfig(BaseModel):
     image_fallback: Optional[str] = None
     audio_fallback: Optional[str] = None
     video_fallback: Optional[str] = None
+    pdf_fallback: Optional[str] = None
     # Max concurrent media description calls during fallback.
     multimodal_fallback_max_concurrency: int = 3
     # MCP tools.  When any of these is set, the router mounts the corresponding
@@ -42,6 +43,7 @@ class ServerConfig(BaseModel):
     image_model: Optional[str] = None   # enables image_understanding tool
     audio_model: Optional[str] = None   # enables audio_understanding tool
     video_model: Optional[str] = None   # enables video_understanding tool
+    pdf_model: Optional[str] = None     # enables pdf_understanding tool
     # Path to debug log file.  When set, all 4 request/response stages are
     # appended to this file for every request.  None = disabled.
     debug_log: Optional[str] = None
@@ -52,8 +54,8 @@ class ModelEntry(BaseModel):
     name: str
     # Media types this model natively supports.  Any type NOT listed here will be
     # auto-described via the corresponding *_fallback before forwarding.
-    # Valid values: "image", "audio", "video".
-    # Example: multimodality: [image, video]  — supports images and video but not audio.
+    # Valid values: "image", "audio", "video", "pdf".
+    # Example: multimodality: [image, pdf]  — supports images and PDFs but not audio/video.
     # Empty list (default) = model does not support any media; all will be described.
     multimodality: List[str] = Field(default_factory=list)
     # Per-model fallback overrides for each media type.
@@ -61,6 +63,7 @@ class ModelEntry(BaseModel):
     image_fallback: Optional[str] = None
     audio_fallback: Optional[str] = None
     video_fallback: Optional[str] = None
+    pdf_fallback: Optional[str] = None
     # Inline pricing for this model.  Takes precedence over the top-level
     # RouterConfig.pricing section when both are present.
     pricing: Optional["PricingEntry"] = None

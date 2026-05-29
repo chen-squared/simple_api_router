@@ -148,10 +148,12 @@ Then pick any configured model:
 | `image_fallback` | `null` | Global fallback model for image description (`"provider/model"`) |
 | `audio_fallback` | `null` | Global fallback model for audio description (`"provider/model"`) |
 | `video_fallback` | `null` | Global fallback model for video description (`"provider/model"`) |
+| `pdf_fallback` | `null` | Global fallback model for PDF description (`"provider/model"`) |
 | `multimodal_fallback_max_concurrency` | `3` | Max concurrent media description calls during fallback |
 | `image_model` | `null` | Enable `image_understanding` MCP tool at `/mcp` (`"provider/model"`) |
 | `audio_model` | `null` | Enable `audio_understanding` MCP tool at `/mcp` (`"provider/model"`) |
 | `video_model` | `null` | Enable `video_understanding` MCP tool at `/mcp` (`"provider/model"`) |
+| `pdf_model` | `null` | Enable `pdf_understanding` MCP tool at `/mcp` (`"provider/model"`) |
 | `debug_log` | `null` | Path to debug log file; all 4 request/response stages logged per request |
 
 ### `providers`
@@ -196,15 +198,19 @@ A single provider can have multiple endpoint formats, each with its own model li
 
 Each model declares which media types it natively supports via the `multimodality` list. When a model receives content of an unsupported type, the router automatically describes it using the appropriate fallback model before forwarding the request.
 
+Supported media types: `image`, `audio`, `video`, `pdf`.
+
 - Plain string models (no `ModelEntry`) default to `multimodality: []` — no media support.
 - The fallback model generates a textual description, which replaces the original block.
 - Results are cached (URL: 1 hour; base64/file: 30 days) to avoid redundant API calls.
+- **PDF special case**: if a model doesn't support `pdf` and no `pdf_fallback`/`pdf_model` is configured, binary PDF blocks are stripped and replaced with a placeholder (rather than forwarded, which would cause an upstream error).
 
 ```yaml
 server:
   image_fallback: "google/gemini-2.5-flash"   # global default for images
   audio_fallback: "openai/gpt-4o-audio-preview"
   video_fallback: "google/gemini-2.5-flash"
+  pdf_fallback: "anthropic/claude-opus-4-5"   # global default for PDFs
 
 providers:
   local:
@@ -217,9 +223,15 @@ providers:
           - name: deepseek-r1                  # uses server.image_fallback for images
           - name: qwen2.5-coder:32b
             image_fallback: "local/llava"      # per-model override — use local llava
+  anthropic:
+    endpoints:
+      anthropic:
+        models:
+          - name: claude-opus-4-5
+            multimodality: [image, pdf]        # Claude natively supports images and PDFs
 ```
 
-Priority: **per-model `*_fallback`** > **`server.*_fallback`** > forward as-is (with a warning).
+Priority: **per-model `*_fallback`** > **`server.*_fallback`** > **`server.*_model` MCP placeholder** > strip with placeholder (pdf) / forward as-is with warning (other types).
 
 ### `pricing`
 
@@ -341,6 +353,58 @@ simple-api-router usage [--last N] [--period day|week|month]
 
 The `¥ Cost` and `$ Cost` columns show costs in CNY and USD respectively; a `-` means no pricing is configured for that model. Cost is computed at query time from the current config — pricing changes apply retroactively.
 
+### `simple-api-router test`
+
+Quickly test whether a model is correctly configured and reachable.
+
+```
+simple-api-router test <provider/model> [--config PATH]
+```
+
+Sends a minimal "Hello" message and prints the response. Exits with a non-zero status on any error.
+
+### `simple-api-router auto-config`
+
+Automatically generate config entries for online providers by fetching model metadata from [models.dev](https://models.dev).
+
+```
+simple-api-router auto-config <online-provider> [<online-model-id>]
+                              [--provider <local-provider>]
+                              [--model <local-model-id>]
+                              [--dry-run]
+                              [--config PATH]
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<online-provider>` | Provider name as listed on models.dev (e.g. `anthropic`, `openai`, `openrouter`) |
+| `<online-model-id>` | Specific model to add; if omitted, adds all models for the provider |
+| `--provider` | Local provider name to write to (defaults to the online provider name) |
+| `--model` | Local model ID to use in config (defaults to the online model ID) |
+| `--dry-run` | Show a git-style diff of what would change without writing to disk |
+
+When adding new models, `auto-config`:
+- Infers the endpoint format from the provider's SDK metadata
+- Detects supported modalities (image, audio, video, pdf) from the model's capabilities
+- Sets pricing from models.dev (formatted to ≥ 2 decimal places)
+- Backs up `config.yaml` to `config.yaml.bak` before writing
+
+When updating existing models, only `multimodality` and `pricing` are overwritten — user-set fields like `max_reasoning_effort` and per-model fallbacks are preserved.
+
+**Examples:**
+
+```bash
+# Preview all Anthropic models (dry run)
+simple-api-router auto-config anthropic --dry-run
+
+# Add a single model from OpenRouter under a local provider name
+simple-api-router auto-config openrouter qwen3.7-max \
+    --provider openrouter --model qwen/qwen3.7-max
+
+# Add all Gemini models to a provider named "google"
+simple-api-router auto-config google --provider google
+```
+
 ### Service management commands
 
 ```
@@ -388,7 +452,7 @@ Returns the same usage data as JSON for programmatic access.
 
 ## Media MCP Server
 
-When any of `server.image_model`, `server.audio_model`, or `server.video_model` is set, the router mounts an [MCP](https://modelcontextprotocol.io/) server at `/mcp` on the **same port** (Streamable HTTP transport). This exposes per-type understanding tools that let any MCP-capable client (e.g. Claude Code) ask questions about images, audio, or video files.
+When any of `server.image_model`, `server.audio_model`, `server.video_model`, or `server.pdf_model` is set, the router mounts an [MCP](https://modelcontextprotocol.io/) server at `/mcp` on the **same port** (Streamable HTTP transport). This exposes per-type understanding tools that let any MCP-capable client (e.g. Claude Code) ask questions about images, audio, video files, or PDFs.
 
 Requests from the MCP tools go through the router's own `/v1/messages` endpoint, so they appear in usage logs and are subject to the same routing rules.
 
@@ -402,6 +466,7 @@ server:
   image_model: "google/gemini-2.5-flash"        # enables image_understanding
   audio_model: "openai/gpt-4o-audio-preview"    # enables audio_understanding
   video_model: "google/gemini-2.5-flash"        # enables video_understanding
+  pdf_model: "anthropic/claude-opus-4-5"        # enables pdf_understanding
 ```
 
 Restart the router once to mount the endpoint. After that, changing model names in config hot-reloads without restart.
@@ -421,7 +486,7 @@ Restart the router once to mount the endpoint. After that, changing model names 
 
 ### Tool signatures
 
-All three tools share the same input schema: provide **exactly one** of `path`, `url`, or `base64_data`.
+All four tools share the same input schema: provide **exactly one** of `path`, `url`, or `base64_data`.
 
 ```
 image_understanding(
@@ -448,6 +513,14 @@ video_understanding(
     base64_data? — raw base64-encoded bytes (no data: prefix)
     media_type?  — MIME type for base64 input (default: "video/mp4")
     question?    — what to ask (default: "Please describe this video in detail.")
+    max_tokens?  — response length limit (default: 16384)
+)
+
+pdf_understanding(
+    path?        — absolute or relative path to a local PDF file
+    url?         — HTTPS URL of a PDF
+    base64_data? — raw base64-encoded bytes (no data: prefix)
+    question?    — what to ask (default: "Please read and summarize this PDF document in detail.")
     max_tokens?  — response length limit (default: 16384)
 )
 ```
@@ -492,18 +565,18 @@ providers:
       anthropic:
         models:
           - name: claude-opus-4-5
-            multimodality: [image]
+            multimodality: [image, pdf]
           - name: claude-sonnet-4-5
-            multimodality: [image]
+            multimodality: [image, pdf]
   ant2:
     api_key: "${ANTHROPIC_KEY_2}"
     endpoints:
       anthropic:
         models:
           - name: claude-opus-4-5
-            multimodality: [image]
+            multimodality: [image, pdf]
           - name: claude-sonnet-4-5
-            multimodality: [image]
+            multimodality: [image, pdf]
 ```
 
 Use `model: "ant1/claude-opus-4-5"` or `model: "ant2/claude-opus-4-5"`.
@@ -539,7 +612,7 @@ providers:
       anthropic:
         models:
           - name: claude-opus-4-5
-            multimodality: [image]
+            multimodality: [image, pdf]
       openai_chat:
         models:
           - name: gpt-4o

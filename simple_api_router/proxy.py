@@ -662,12 +662,17 @@ _MEDIA_DESCRIBE_PROMPTS: Dict[str, str] = {
         "Describe this video in detail. "
         "Include all visual content, any text, actions, and context."
     ),
+    "pdf": (
+        "Read and summarize this document in detail. "
+        "Include all key information, text, data, and structure."
+    ),
 }
 
 _MCP_TOOL_NAMES: Dict[str, str] = {
     "image": "image_understanding",
     "audio": "audio_understanding",
     "video": "video_understanding",
+    "pdf": "pdf_understanding",
 }
 
 _MEDIA_PLACEHOLDER_TMPL = (
@@ -684,8 +689,10 @@ def _replace_media_with_placeholder(
 
     Used when the MCP understanding tool is configured but no fallback model
     is set — the model is instructed to call the MCP tool instead.
+
+    For ``pdf``, matches ``document`` blocks with a non-text source (binary PDFs).
     """
-    label = media_type.capitalize()
+    label = media_type.upper() if media_type == "pdf" else media_type.capitalize()
     tool = _MCP_TOOL_NAMES.get(media_type, f"{media_type}_understanding")
     placeholder = _MEDIA_PLACEHOLDER_TMPL.format(
         label=label,
@@ -693,15 +700,22 @@ def _replace_media_with_placeholder(
         tool=tool,
     )
 
+    def _is_target(block: dict) -> bool:
+        btype = block.get("type", "")
+        if btype == media_type:
+            return True
+        if media_type == "pdf" and btype == "document" and (block.get("source") or {}).get("type") != "text":
+            return True
+        return False
+
     def replace_in_blocks(blocks: list) -> list:
         result = list(blocks)
         for i, block in enumerate(result):
             if not isinstance(block, dict):
                 continue
-            btype = block.get("type")
-            if btype == media_type:
+            if _is_target(block):
                 result[i] = {"type": "text", "text": placeholder}
-            elif btype == "tool_result":
+            elif block.get("type") == "tool_result":
                 nested = block.get("content", "")
                 if isinstance(nested, list):
                     b = dict(block)
@@ -721,45 +735,9 @@ def _replace_media_with_placeholder(
     return body
 
 
-_PDF_PLACEHOLDER = (
-    "[Document: binary content omitted — this model does not support PDF input. "
-    "Consider using a model with pdf in its multimodality list.]"
-)
-
-
-def _strip_binary_documents(body: Dict[str, Any]) -> Dict[str, Any]:
-    """Replace non-text document blocks with a placeholder (for PDF-unsupported models)."""
-    def strip_in_blocks(blocks: list) -> list:
-        result = list(blocks)
-        for i, block in enumerate(result):
-            if not isinstance(block, dict):
-                continue
-            btype = block.get("type")
-            if btype == "document" and (block.get("source") or {}).get("type") != "text":
-                result[i] = {"type": "text", "text": _PDF_PLACEHOLDER}
-            elif btype == "tool_result":
-                nested = block.get("content", "")
-                if isinstance(nested, list):
-                    b = dict(block)
-                    b["content"] = strip_in_blocks(nested)
-                    result[i] = b
-        return result
-
-    body = copy.deepcopy(body)
-    new_messages = []
-    for msg in body.get("messages", []):
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            msg = dict(msg)
-            msg["content"] = strip_in_blocks(content)
-        new_messages.append(msg)
-    body["messages"] = new_messages
-    return body
-
-
 async def _describe_media_in_body(
     body: Dict[str, Any],
-    media_type: str,           # "image" | "audio" | "video"
+    media_type: str,           # "image" | "audio" | "video" | "pdf"
     fallback_model: str,
     router_port: int,
     client: httpx.AsyncClient,
@@ -771,8 +749,7 @@ async def _describe_media_in_body(
     - URL sources:          key = URL,         TTL = 1 hour
     - base64 / file sources: key = content MD5, TTL = 30 days
 
-    Binary document blocks (PDFs etc.) are always stripped to a placeholder
-    regardless of *media_type* — they have no model-specific fallback.
+    For ``pdf``, matches ``document`` blocks with a non-text source.
     """
     import base64 as _b64
     from .image_cache import URL_TTL, CONTENT_TTL
@@ -780,7 +757,18 @@ async def _describe_media_in_body(
     prompt = _MEDIA_DESCRIBE_PROMPTS.get(
         media_type, f"Describe this {media_type} in detail."
     )
-    label = media_type.capitalize()   # "Image" | "Audio" | "Video"
+    label = media_type.upper() if media_type == "pdf" else media_type.capitalize()   # "Image" | "Audio" | "Video" | "PDF"
+
+    # For pdf, the Anthropic block type is "document" (not "pdf").
+    _send_type = "document" if media_type == "pdf" else media_type
+
+    def _is_media_block(block: dict) -> bool:
+        btype = block.get("type", "")
+        if btype == media_type:
+            return True
+        if media_type == "pdf" and btype == "document" and (block.get("source") or {}).get("type") != "text":
+            return True
+        return False
 
     sem = asyncio.Semaphore(max_concurrency)
     describe_url = f"http://127.0.0.1:{router_port}/v1/messages"
@@ -811,7 +799,7 @@ async def _describe_media_in_body(
                     logger.debug("%s cache hit (md5 via url download): %s", label, cache_key[:16])
                     return {"type": "text", "text": f"[{label}: {cached}]"}
                 media_block = {
-                    "type": media_type,
+                    "type": _send_type,
                     "source": {
                         "type": "base64",
                         "media_type": detected_mt,
@@ -833,7 +821,7 @@ async def _describe_media_in_body(
                     logger.debug("%s cache hit (md5): %s", label, cache_key[:16])
                     return {"type": "text", "text": f"[{label}: {cached}]"}
                 media_block = {
-                    "type": media_type,
+                    "type": _send_type,
                     "source": {
                         "type": "base64",
                         "media_type": detected_mt,
@@ -909,11 +897,10 @@ async def _describe_media_in_body(
         for i, block in enumerate(blocks):
             if not isinstance(block, dict):
                 continue
-            btype = block.get("type")
-            if btype == media_type:
+            if _is_media_block(block):
                 tasks.append(describe_block(block))
                 indices.append((i, "replace"))
-            elif btype == "tool_result":
+            elif block.get("type") == "tool_result":
                 nested = block.get("content", "")
                 if isinstance(nested, list):
                     tasks.append(process_blocks(nested))
@@ -1048,11 +1035,6 @@ async def route_request(
         entry = endpoint.get_model_entry(model)
         supported = set(entry.multimodality)
         unsupported = media_present - supported
-        # PDF: no vision-fallback model needed — just strip binary docs if unsupported.
-        if "pdf" in unsupported:
-            logger.info("model '%s' doesn't support pdf; stripping binary document blocks", model)
-            body = _strip_binary_documents(body)
-            unsupported = unsupported - {"pdf"}
         for mtype in sorted(unsupported):   # deterministic order
             fallback = (
                 getattr(entry, f"{mtype}_fallback", None)
@@ -1074,6 +1056,15 @@ async def route_request(
                         "model '%s' doesn't support %s and no %s_fallback is set; "
                         "replacing with MCP tool placeholder (mcp model: '%s')",
                         model, mtype, mtype, mcp_model,
+                    )
+                    body = _replace_media_with_placeholder(body, mtype)
+                elif mtype == "pdf":
+                    # PDF blocks will cause hard errors on non-PDF models; strip
+                    # them to a safe placeholder regardless of MCP configuration.
+                    logger.info(
+                        "model '%s' doesn't support pdf and no pdf_fallback or "
+                        "pdf_model is configured; stripping binary document blocks",
+                        model,
                     )
                     body = _replace_media_with_placeholder(body, mtype)
                 else:

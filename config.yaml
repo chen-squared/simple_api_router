@@ -13,14 +13,16 @@ server:
   # image_fallback: "google/gemini-2.5-flash"
   # audio_fallback: "openai/gpt-4o-audio-preview"
   # video_fallback: "google/gemini-2.5-flash"
+  # pdf_fallback: "anthropic/claude-opus-4-5"   # describe PDFs for non-PDF models
 
   # ── MCP media tools ────────────────────────────────────────────────────────
   # When any of these is set, the router mounts the corresponding tool at /mcp.
   # Claude Code config: { "mcpServers": { "media": { "type": "http",
   #                        "url": "http://localhost:8080/mcp" } } }
-  # image_model: "google/gemini-2.5-flash"   # enables image_understanding tool
-  # audio_model: "openai/gpt-4o-audio-preview" # enables audio_understanding tool
-  # video_model: "google/gemini-2.5-flash"   # enables video_understanding tool
+  # image_model: "google/gemini-2.5-flash"      # enables image_understanding tool
+  # audio_model: "openai/gpt-4o-audio-preview"  # enables audio_understanding tool
+  # video_model: "google/gemini-2.5-flash"      # enables video_understanding tool
+  # pdf_model: "anthropic/claude-opus-4-5"      # enables pdf_understanding tool
 
   # Debug logging: log all 4 request/response stages to a file.
   # Each request gets a short ID; grep by it to see the full round-trip:
@@ -34,11 +36,11 @@ providers:
     endpoints:
       anthropic:
         models:
-          # claude-opus-4-5 and claude-sonnet-4-5 support images natively.
+          # claude-opus-4-5 and claude-sonnet-4-5 support images and PDFs natively.
           - name: claude-opus-4-5
-            multimodality: [image]
+            multimodality: [image, pdf]
           - name: claude-sonnet-4-5
-            multimodality: [image]
+            multimodality: [image, pdf]
 
   # ── OpenAI ────────────────────────────────────────────────────────────────
   openai:
@@ -118,14 +120,14 @@ providers:
 #       anthropic:
 #         models:
 #           - name: claude-opus-4-5
-#             multimodality: [image]
+#             multimodality: [image, pdf]
 #             pricing:
 #               input: 15.0
 #               output: 75.0
 #               cache_read: 1.50
 #               cache_write: 18.75
 #           - name: claude-sonnet-4-5
-#             multimodality: [image]
+#             multimodality: [image, pdf]
 #             pricing:
 #               input: 3.0
 #               output: 15.0
