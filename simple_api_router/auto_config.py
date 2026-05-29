@@ -14,6 +14,15 @@ import yaml
 _ANTHROPIC_FORMAT_PROVIDERS = frozenset({"anthropic", "google-vertex-anthropic"})
 _GOOGLE_FORMAT_PROVIDERS = frozenset({"google", "google-vertex"})
 
+# model-level provider.npm → router format
+_NPM_TO_FORMAT: Dict[str, str] = {
+    "@ai-sdk/anthropic":          "anthropic",
+    "@ai-sdk/google":             "google",
+    "@ai-sdk/google-vertex/anthropic": "anthropic",
+    "@ai-sdk/openai":             "openai_chat",
+    "@ai-sdk/openai-compatible":  "openai_chat",
+}
+
 # Well-known base URLs for providers whose models.dev entry has no api URL.
 _KNOWN_URLS: Dict[str, str] = {
     "cerebras":     "https://api.cerebras.ai",
@@ -108,11 +117,24 @@ def find_model(provider_data: Dict[str, Any], model_id: str) -> Dict[str, Any]:
 # ── Inference helpers ──────────────────────────────────────────────────────
 
 def infer_format(provider_id: str, _provider_data: Dict[str, Any]) -> str:
+    """Infer the API format for a whole provider (fallback when no per-model hint)."""
     if provider_id in _ANTHROPIC_FORMAT_PROVIDERS:
         return "anthropic"
     if provider_id in _GOOGLE_FORMAT_PROVIDERS:
         return "google"
     return "openai_chat"
+
+
+def infer_model_format(
+    model_data: Dict[str, Any],
+    provider_id: str,
+    provider_data: Dict[str, Any],
+) -> str:
+    """Infer format for a single model, checking model-level provider.npm first."""
+    npm = (model_data.get("provider") or {}).get("npm", "")
+    if npm in _NPM_TO_FORMAT:
+        return _NPM_TO_FORMAT[npm]
+    return infer_format(provider_id, provider_data)
 
 
 def infer_base_url(provider_id: str, provider_data: Dict[str, Any]) -> Optional[str]:
@@ -201,10 +223,10 @@ def merge_model_into_endpoint(
 def merge_into_config(
     config_dict: Dict[str, Any],
     local_provider: str,
-    api_format: str,
     base_url: Optional[str],
     api_key_env: Optional[str],
-    models_to_add: List[Tuple[str, str, Dict[str, Any]]],  # (local_name, online_id, model_data)
+    # (local_name, online_id, model_data, api_format) — format may vary per model
+    models_to_add: List[Tuple[str, str, Dict[str, Any], str]],
 ) -> None:
     """Merge provider+models into *config_dict* in-place."""
     providers: Dict[str, Any] = config_dict.setdefault("providers", {})
@@ -215,16 +237,16 @@ def merge_into_config(
             provider_dict["api_key"] = f"${{{api_key_env}}}"
         if base_url:
             provider_dict["base_url"] = base_url
-        provider_dict["endpoints"] = {api_format: {"models": []}}
+        provider_dict["endpoints"] = {}
         providers[local_provider] = provider_dict
-    else:
-        provider_dict = providers[local_provider]
-        endpoints: Dict[str, Any] = provider_dict.setdefault("endpoints", {})
+
+    provider_dict = providers[local_provider]
+    endpoints: Dict[str, Any] = provider_dict.setdefault("endpoints", {})
+
+    for local_name, online_id, model_data, api_format in models_to_add:
         if api_format not in endpoints:
             endpoints[api_format] = {"models": []}
-
-    ep = providers[local_provider]["endpoints"][api_format]
-    for local_name, online_id, model_data in models_to_add:
+        ep = endpoints[api_format]
         entry = build_model_entry(model_data, local_name)
         merge_model_into_endpoint(ep, entry, local_name, online_id)
 
@@ -264,9 +286,10 @@ def list_models(provider_id: str, provider_data: Dict[str, Any]) -> None:
     models: Dict[str, Any] = provider_data.get("models") or {}
     name = provider_data.get("name", provider_id)
     print(f"\n{BOLD}{name} ({provider_id}){RESET} — {len(models)} models\n")
-    print(f"{BOLD}{'Model ID':<55} {'Modalities':<25} Cost ($/MTok){RESET}")
-    print("─" * 100)
+    print(f"{BOLD}{'Model ID':<50} {'Format':<14} {'Modalities':<22} Cost ($/MTok){RESET}")
+    print("─" * 110)
     for mid, mdata in models.items():
+        fmt = infer_model_format(mdata, provider_id, provider_data)
         input_types = mdata.get("modalities", {}).get("input") or []
         modalities = "+".join(t for t in input_types if t != "text") or "text-only"
         cost = mdata.get("cost") or {}
@@ -274,7 +297,7 @@ def list_models(provider_id: str, provider_data: Dict[str, Any]) -> None:
             cost_str = f"in={cost.get('input',0):.3f} out={cost.get('output',0):.3f}"
         else:
             cost_str = GREY + "n/a" + RESET
-        print(f"  {mid:<55} {modalities:<25} {cost_str}")
+        print(f"  {mid:<50} {fmt:<14} {modalities:<22} {cost_str}")
 
 
 # ── Main command ───────────────────────────────────────────────────────────
@@ -303,16 +326,19 @@ def auto_config_command(args: Any, config_path: Path) -> None:
     online_provider_id, provider_data = find_provider(data, args.online_provider)
     local_provider = args.provider or online_provider_id
 
-    api_format = args.format or infer_format(online_provider_id, provider_data)
     base_url = infer_base_url(online_provider_id, provider_data)
     env_vars: List[str] = provider_data.get("env") or []
     api_key_env = env_vars[0] if env_vars else None
 
-    # ── Build list of (local_name, online_id, model_data) ─────────────────
+    # ── Build list of (local_name, online_id, model_data, api_format) ────────
+    forced_format = args.format  # None unless user explicitly overrides
     if args.online_model_id:
         model_data = find_model(provider_data, args.online_model_id)
         local_model = args.model or args.online_model_id
-        models_to_add = [(local_model, args.online_model_id, model_data)]
+        fmt = forced_format or infer_model_format(model_data, online_provider_id, provider_data)
+        models_to_add: List[Tuple[str, str, Dict[str, Any], str]] = [
+            (local_model, args.online_model_id, model_data, fmt)
+        ]
     else:
         all_models = provider_data.get("models") or {}
         if not all_models:
@@ -321,7 +347,13 @@ def auto_config_command(args: Any, config_path: Path) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        models_to_add = [(mid, mid, mdata) for mid, mdata in all_models.items()]
+        models_to_add = [
+            (
+                mid, mid, mdata,
+                forced_format or infer_model_format(mdata, online_provider_id, provider_data),
+            )
+            for mid, mdata in all_models.items()
+        ]
 
     # ── Load existing config ───────────────────────────────────────────────
     config_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
@@ -331,7 +363,6 @@ def auto_config_command(args: Any, config_path: Path) -> None:
     merge_into_config(
         config_dict,
         local_provider=local_provider,
-        api_format=api_format,
         base_url=base_url,
         api_key_env=api_key_env,
         models_to_add=models_to_add,
@@ -360,11 +391,12 @@ def auto_config_command(args: Any, config_path: Path) -> None:
         if len(models_to_add) == 1
         else f"{len(models_to_add)} models"
     )
+    formats_used = sorted(set(fmt for _, _, _, fmt in models_to_add))
     print(
         f"{GREEN}✓{RESET} Added {model_summary} "
         f"from {BOLD}{online_provider_id}{RESET} "
         f"→ local provider {BOLD}{local_provider}{RESET} "
-        f"(format: {api_format})"
+        f"(format: {', '.join(formats_used)})"
     )
     print(f"  Config: {config_path}")
     if api_key_env and local_provider not in (yaml.safe_load(config_text) or {}).get("providers", {}):
