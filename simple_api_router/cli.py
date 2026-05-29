@@ -28,22 +28,29 @@ def _models_command(config_path: str) -> None:
         print(f"Error loading config: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    MULTIMODAL = "\033[36mmultimodal\033[0m"
-    TEXT       = "\033[90mtext      \033[0m"
     GREY       = "\033[90m"
     RESET      = "\033[0m"
     BOLD       = "\033[1m"
+
+    _MTYPE_LABELS = {"image": "image", "audio": "audio", "video": "video", "pdf": "pdf"}
+
+    def _fmt_modalities(entry) -> str:
+        types = entry.multimodality or []
+        if not types:
+            return f"{GREY}{'text':<20}{RESET}"
+        label = " ".join(_MTYPE_LABELS.get(t, t) for t in types)
+        return f"\033[36m{label:<20}\033[0m"
 
     def _fmt_pricing(p) -> str:
         if p is None:
             return ""
         sym = "¥" if getattr(p, "currency", "CNY").upper() == "CNY" else "$"
         tier = p.tiers[0] if p.tiers else p
-        parts = [f"{sym}{tier.input:.3f}in", f"{sym}{tier.output:.3f}out"]
+        parts = [f"{sym}{tier.input:.2f}in", f"{sym}{tier.output:.2f}out"]
         if tier.cache_read is not None:
-            parts.append(f"{sym}{tier.cache_read:.3f}cr")
+            parts.append(f"{sym}{tier.cache_read:.2f}cr")
         if tier.cache_write is not None:
-            parts.append(f"{sym}{tier.cache_write:.3f}cw")
+            parts.append(f"{sym}{tier.cache_write:.2f}cw")
         suffix = "+  /MTok" if p.tiers else "  /MTok"
         return f"  {GREY}{' '.join(parts)}{suffix}{RESET}"
 
@@ -55,9 +62,8 @@ def _models_command(config_path: str) -> None:
             print(f"\n{BOLD}{pname}{RESET}  [{ename}]")
             for m in ep.models:
                 entry = m if isinstance(m, ModelEntry) else ModelEntry(name=m)
-                cap = TEXT if entry.text_only else MULTIMODAL
                 pricing = cfg.get_pricing(f"{pname}/{entry.name}")
-                print(f"  {entry.name:<50} {cap}{_fmt_pricing(pricing)}")
+                print(f"  {entry.name:<48} {_fmt_modalities(entry)}{_fmt_pricing(pricing)}")
                 total += 1
 
     print(f"\n{total} models across {len(cfg.providers)} providers")

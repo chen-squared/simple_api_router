@@ -19,8 +19,9 @@ Designed for use with tools like [Claude Code](https://claude.ai/code) that spea
 - **Google Gemini backend** — full bidirectional Anthropic ↔ Gemini `generateContent` conversion:
   - System prompt, tools, tool choice, images, streaming
 - **DeepSeek reasoning passthrough** — `reasoning_content` preserved; auto-enabled for `deepseek-*` models
-- **Per-type media fallback** — when a model receives image/audio/video content it doesn't support, the content is auto-described by a configurable fallback model and replaced with text; the original model then handles the request normally. Configurable per media type (image/audio/video) and per model.
-- **Media MCP server** — optional `image_understanding`, `audio_understanding`, `video_understanding` MCP tools, mounted on the same port; lets models describe screenshots, audio, and video on demand
+- **Per-type media fallback** — when a model receives image/audio/video/PDF content it doesn't support, the content is auto-described by a configurable fallback model and replaced with text; the original model then handles the request normally. Configurable per media type and per model.
+- **Media MCP server** — optional `image_understanding`, `audio_understanding`, `video_understanding`, `pdf_understanding` MCP tools, mounted on the same port; lets models describe screenshots, audio, video, and PDFs on demand
+- **`auto-config` command** — auto-generate config entries from [models.dev](https://models.dev) metadata: infers endpoint format, modalities, and pricing; smart-merges into existing config preserving user-set fields; `--dry-run` shows a git-style diff before writing
 - **Usage logging** — every request logged to `router_usage.db` (SQLite); view with `simple-api-router usage` or `/stats`
 - **Hot reload** — provider/model/key changes apply within a second, no restart needed
 - **`model_map`** — remap external model names to backend names per endpoint
@@ -317,16 +318,16 @@ simple-api-router models [--config PATH]
 Output example:
 ```
 anthropic  [anthropic]
-  claude-opus-4-5                                    image       ¥109.00in ¥545.00out ¥10.89cr ¥136.73cw  /MTok
-  claude-sonnet-4-5                                  image       ¥21.82in ¥109.10out ¥2.18cr ¥27.27cw  /MTok
+  claude-opus-4-5                                image pdf         $15.00in $75.00out $1.50cr $18.75cw  /MTok
+  claude-sonnet-4-5                              image pdf         $3.00in $15.00out $0.30cr $3.75cw  /MTok
 
 openai  [openai_chat]
-  gpt-4o                                             image
-  gpt-4o-mini                                        image
+  gpt-4o                                         image
+  gpt-4o-mini                                    image
 
 openai  [openai_responses]
-  o3
-  o4-mini
+  o3                                             text
+  o4-mini                                        text
 ```
 
 ### `simple-api-router usage`

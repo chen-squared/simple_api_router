@@ -369,18 +369,23 @@ def list_models(provider_id: str, provider_data: Dict[str, Any]) -> None:
     models: Dict[str, Any] = provider_data.get("models") or {}
     name = provider_data.get("name", provider_id)
     print(f"\n{BOLD}{name} ({provider_id}){RESET} — {len(models)} models\n")
-    print(f"{BOLD}{'Model ID':<50} {'Format':<14} {'Modalities':<22} Cost ($/MTok){RESET}")
-    print("─" * 110)
+    print(f"{BOLD}{'Model ID':<48} {'Format':<16} {'Modalities':<20} Cost ($/MTok){RESET}")
+    print("─" * 115)
     for mid, mdata in models.items():
         fmt = infer_model_format(mdata, provider_id, provider_data)
         input_types = mdata.get("modalities", {}).get("input") or []
-        modalities = "+".join(t for t in input_types if t != "text") or "text-only"
+        modalities = " ".join(t for t in input_types if t != "text") or "text"
         cost = mdata.get("cost") or {}
         if cost:
-            cost_str = f"in={cost.get('input',0):.3f} out={cost.get('output',0):.3f}"
+            parts = [f"in={cost.get('input', 0):.2f}", f"out={cost.get('output', 0):.2f}"]
+            if cost.get("cache_read") is not None:
+                parts.append(f"cr={cost['cache_read']:.2f}")
+            if cost.get("cache_write") is not None:
+                parts.append(f"cw={cost['cache_write']:.2f}")
+            cost_str = " ".join(parts)
         else:
             cost_str = GREY + "n/a" + RESET
-        print(f"  {mid:<50} {fmt:<14} {modalities:<22} {cost_str}")
+        print(f"  {mid:<48} {fmt:<16} {modalities:<20} {cost_str}")
 
 
 # ── Main command ───────────────────────────────────────────────────────────
