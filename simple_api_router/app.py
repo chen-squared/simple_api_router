@@ -1093,7 +1093,7 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         save_disabled = "" if has_config_path else " disabled"
         save_notice = "" if has_config_path else '<p class="notice warn">Config path unknown &#8212; cannot save.</p>'
 
-        _MODALITY_EMOJI = {"text": "\u270f\ufe0f", "image": "\U0001f5bc\ufe0f", "audio": "\U0001f3b5", "video": "\U0001f3ac"}
+        _MODALITY_EMOJI = {"text": "\u270f\ufe0f", "image": "\U0001f5bc\ufe0f", "audio": "\U0001f3b5", "video": "\U0001f3ac", "pdf": "\U0001f4c4"}
 
         model_rows_html = []
         for pname, prov in cfg.providers.items():
@@ -1104,7 +1104,7 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
                     full_id = html.escape(f"{pname}/{entry.name}")
                     mm = list(entry.multimodality)
                     badges = f'<span class="badge bg">{_MODALITY_EMOJI["text"]} text</span>'
-                    for mt in ("image", "audio", "video"):
+                    for mt in ("image", "audio", "video", "pdf"):
                         if mt in mm:
                             badges += f'<span class="badge bb">{_MODALITY_EMOJI[mt]} {mt}</span>'
                     model_rows_html.append(

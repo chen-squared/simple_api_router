@@ -92,12 +92,12 @@ class TestMediaTypesInBody(unittest.TestCase):
 
     # ── negative / non-media cases ─────────────────────────────────────────
 
-    def test_document_block_not_detected(self):
-        # document blocks are handled separately; not in the media type set
+    def test_document_block_detected_as_pdf(self):
+        # binary document blocks are now detected as "pdf"
         body = {"messages": [self._msg([
             {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "abc"}}
         ])]}
-        self.assertFalse(_media_types_in_body(body))
+        self.assertEqual(_media_types_in_body(body), {"pdf"})
 
     def test_document_text_source_not_detected(self):
         body = {"messages": [self._msg([
@@ -628,9 +628,9 @@ class TestMediaTypesInBlocks(unittest.TestCase):
         blocks = [{"type": "text", "text": "hello"}]
         self.assertFalse(_media_types_in_blocks(blocks))
 
-    def test_document_block_not_detected(self):
+    def test_document_block_detected_as_pdf(self):
         blocks = [{"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "abc"}}]
-        self.assertFalse(_media_types_in_blocks(blocks))
+        self.assertEqual(_media_types_in_blocks(blocks), {"pdf"})
 
     def test_tool_use_block_not_detected(self):
         blocks = [{"type": "tool_use", "id": "tu_1", "name": "search", "input": {}}]

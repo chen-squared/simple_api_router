@@ -550,11 +550,11 @@ def parse_model(model_str: str) -> Tuple[Optional[str], str]:
     return None, clean
 
 
-_SUPPORTED_MEDIA_TYPES = frozenset({"image", "audio", "video"})
+_SUPPORTED_MEDIA_TYPES = frozenset({"image", "audio", "video", "pdf"})
 
 
 def _media_types_in_blocks(blocks: list) -> set:
-    """Return the set of media types (image/audio/video) present in content blocks."""
+    """Return the set of media types (image/audio/video/pdf) present in content blocks."""
     types: set = set()
     for block in blocks:
         if not isinstance(block, dict):
@@ -562,6 +562,8 @@ def _media_types_in_blocks(blocks: list) -> set:
         btype = block.get("type")
         if btype in _SUPPORTED_MEDIA_TYPES:
             types.add(btype)
+        elif btype == "document" and (block.get("source") or {}).get("type") != "text":
+            types.add("pdf")
         # tool_result content can itself contain media blocks (e.g. a screenshot tool)
         if btype == "tool_result":
             nested = block.get("content", "")
@@ -714,6 +716,42 @@ def _replace_media_with_placeholder(
         if isinstance(content, list):
             msg = dict(msg)
             msg["content"] = replace_in_blocks(content)
+        new_messages.append(msg)
+    body["messages"] = new_messages
+    return body
+
+
+_PDF_PLACEHOLDER = (
+    "[Document: binary content omitted — this model does not support PDF input. "
+    "Consider using a model with pdf in its multimodality list.]"
+)
+
+
+def _strip_binary_documents(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Replace non-text document blocks with a placeholder (for PDF-unsupported models)."""
+    def strip_in_blocks(blocks: list) -> list:
+        result = list(blocks)
+        for i, block in enumerate(result):
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "document" and (block.get("source") or {}).get("type") != "text":
+                result[i] = {"type": "text", "text": _PDF_PLACEHOLDER}
+            elif btype == "tool_result":
+                nested = block.get("content", "")
+                if isinstance(nested, list):
+                    b = dict(block)
+                    b["content"] = strip_in_blocks(nested)
+                    result[i] = b
+        return result
+
+    body = copy.deepcopy(body)
+    new_messages = []
+    for msg in body.get("messages", []):
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            msg = dict(msg)
+            msg["content"] = strip_in_blocks(content)
         new_messages.append(msg)
     body["messages"] = new_messages
     return body
@@ -875,9 +913,6 @@ async def _describe_media_in_body(
             if btype == media_type:
                 tasks.append(describe_block(block))
                 indices.append((i, "replace"))
-            elif btype == "document" and (block.get("source") or {}).get("type") != "text":
-                # Binary documents (PDFs etc.) — strip with placeholder regardless of type.
-                result[i] = {"type": "text", "text": "[Document: binary content omitted]"}
             elif btype == "tool_result":
                 nested = block.get("content", "")
                 if isinstance(nested, list):
@@ -1013,6 +1048,11 @@ async def route_request(
         entry = endpoint.get_model_entry(model)
         supported = set(entry.multimodality)
         unsupported = media_present - supported
+        # PDF: no vision-fallback model needed — just strip binary docs if unsupported.
+        if "pdf" in unsupported:
+            logger.info("model '%s' doesn't support pdf; stripping binary document blocks", model)
+            body = _strip_binary_documents(body)
+            unsupported = unsupported - {"pdf"}
         for mtype in sorted(unsupported):   # deterministic order
             fallback = (
                 getattr(entry, f"{mtype}_fallback", None)

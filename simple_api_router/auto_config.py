@@ -158,7 +158,7 @@ def infer_base_url(provider_id: str, provider_data: Dict[str, Any]) -> Optional[
 
 def infer_multimodality(model_data: Dict[str, Any]) -> List[str]:
     input_types = model_data.get("modalities", {}).get("input") or []
-    return [m for m in ("image", "audio", "video") if m in input_types]
+    return [m for m in ("image", "audio", "video", "pdf") if m in input_types]
 
 
 def infer_pricing(model_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -273,8 +273,8 @@ def print_diff(old_text: str, new_text: str, label: str) -> None:
     CYAN   = "\033[36m"
     RESET  = "\033[0m"
 
-    old_lines = old_text.splitlines(keepends=True)
-    new_lines = new_text.splitlines(keepends=True)
+    old_lines = old_text.splitlines()
+    new_lines = new_text.splitlines()
     diff = list(difflib.unified_diff(
         old_lines, new_lines,
         fromfile=f"a/{label}",
@@ -296,7 +296,7 @@ def print_diff(old_text: str, new_text: str, label: str) -> None:
         elif line.startswith("-"):
             print(f"{RED}{line}{RESET}")
         else:
-            print(line, end="")
+            print(line)
 
 
 # ── Display helpers ────────────────────────────────────────────────────────
