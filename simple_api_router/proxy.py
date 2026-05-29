@@ -680,10 +680,17 @@ _MEDIA_PLACEHOLDER_TMPL = (
     "Use the `{tool}` MCP tool to process this {label_lower}.]"
 )
 
+_PDF_NO_CONFIG_PLACEHOLDER = (
+    "[PDF not loaded — this model does not support pdf input. "
+    "Consider using a model with pdf in its multimodality list, "
+    "or configure pdf_fallback / pdf_model in config.yaml.]"
+)
+
 
 def _replace_media_with_placeholder(
     body: Dict[str, Any],
     media_type: str,
+    placeholder_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Replace every block of *media_type* with a text placeholder.
 
@@ -691,14 +698,20 @@ def _replace_media_with_placeholder(
     is set — the model is instructed to call the MCP tool instead.
 
     For ``pdf``, matches ``document`` blocks with a non-text source (binary PDFs).
+
+    If *placeholder_text* is given, it is used verbatim instead of the
+    MCP-tool template.
     """
-    label = media_type.upper() if media_type == "pdf" else media_type.capitalize()
-    tool = _MCP_TOOL_NAMES.get(media_type, f"{media_type}_understanding")
-    placeholder = _MEDIA_PLACEHOLDER_TMPL.format(
-        label=label,
-        label_lower=media_type,
-        tool=tool,
-    )
+    if placeholder_text is not None:
+        placeholder = placeholder_text
+    else:
+        label = media_type.upper() if media_type == "pdf" else media_type.capitalize()
+        tool = _MCP_TOOL_NAMES.get(media_type, f"{media_type}_understanding")
+        placeholder = _MEDIA_PLACEHOLDER_TMPL.format(
+            label=label,
+            label_lower=media_type,
+            tool=tool,
+        )
 
     def _is_target(block: dict) -> bool:
         btype = block.get("type", "")
@@ -1075,7 +1088,7 @@ async def route_request(
                         "pdf_model is configured; stripping binary document blocks",
                         model,
                     )
-                    body = _replace_media_with_placeholder(body, mtype)
+                    body = _replace_media_with_placeholder(body, mtype, _PDF_NO_CONFIG_PLACEHOLDER)
                 else:
                     logger.warning(
                         "model '%s' received %s content it may not support, "
