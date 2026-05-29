@@ -11,6 +11,31 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 import yaml
 
+
+# ── Custom YAML dumper: floats always show ≥2 decimal places ─────────────────
+
+class _ConfigDumper(yaml.Dumper):
+    pass
+
+
+def _float_representer(dumper: yaml.Dumper, value: float) -> yaml.ScalarNode:
+    s = f"{value:g}"  # removes trailing zeros
+    if "." not in s and "e" not in s.lower():
+        s += ".00"
+    elif "." in s:
+        int_part, dec_part = s.split(".")
+        if len(dec_part) < 2:
+            dec_part = dec_part.ljust(2, "0")
+        s = f"{int_part}.{dec_part}"
+    return dumper.represent_scalar("tag:yaml.org,2002:float", s)
+
+
+_ConfigDumper.add_representer(float, _float_representer)
+
+
+def _yaml_dump(data: Any) -> str:
+    return yaml.dump(data, Dumper=_ConfigDumper, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
 # ── Format inference ───────────────────────────────────────────────────────
 _ANTHROPIC_FORMAT_PROVIDERS = frozenset({"anthropic", "google-vertex-anthropic"})
 _GOOGLE_FORMAT_PROVIDERS = frozenset({"google", "google-vertex"})
@@ -205,6 +230,11 @@ def _model_name(entry: Any) -> str:
     return entry.get("name", "")
 
 
+# Fields written by auto-config from models.dev data (may be overwritten on update).
+# Everything else (e.g. max_reasoning_effort, text_only) is user-set and preserved.
+_AUTO_FIELDS = frozenset({"multimodality", "pricing"})
+
+
 def merge_model_into_endpoint(
     ep: Dict[str, Any],
     model_entry: Any,
@@ -216,7 +246,18 @@ def merge_model_into_endpoint(
     existing_names = [_model_name(m) for m in models_list]
     if local_name in existing_names:
         idx = existing_names.index(local_name)
-        models_list[idx] = model_entry
+        old = models_list[idx]
+        # Preserve user-set fields (anything outside _AUTO_FIELDS) from existing entry.
+        old_dict: Dict[str, Any] = {"name": old} if isinstance(old, str) else dict(old)
+        new_dict: Dict[str, Any] = {"name": local_name} if isinstance(model_entry, str) else dict(model_entry)
+        # Start from old, update auto-generated fields from new (or remove if no longer present)
+        merged: Dict[str, Any] = {k: v for k, v in old_dict.items() if k not in _AUTO_FIELDS}
+        for key in _AUTO_FIELDS:
+            if key in new_dict:
+                merged[key] = new_dict[key]
+        merged["name"] = local_name
+        # If the only meaningful key is "name", store as plain string
+        models_list[idx] = local_name if set(merged) == {"name"} else merged
     else:
         models_list.append(model_entry)
 
@@ -407,16 +448,13 @@ def auto_config_command(args: Any, config_path: Path) -> None:
         models_to_add=models_to_add,
     )
 
-    new_yaml = yaml.dump(config_dict, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    new_yaml = _yaml_dump(config_dict)
 
     # ── Dry-run ────────────────────────────────────────────────────────────
     if args.dry_run:
         # Normalize the old text through the same serializer so that
         # cosmetic differences (quotes, indentation style) don't show as changes.
-        old_normalized = yaml.dump(
-            yaml.safe_load(config_text) or {},
-            default_flow_style=False, allow_unicode=True, sort_keys=False,
-        )
+        old_normalized = _yaml_dump(yaml.safe_load(config_text) or {})
         label = config_path.name
         print(f"# Dry run — would write to {config_path}\n")
         print_diff(old_normalized, new_yaml, label)
