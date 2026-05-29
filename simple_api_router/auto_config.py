@@ -247,13 +247,16 @@ def merge_model_into_endpoint(
     if local_name in existing_names:
         idx = existing_names.index(local_name)
         old = models_list[idx]
-        # Preserve user-set fields (anything outside _AUTO_FIELDS) from existing entry.
+        # Preserve user-set fields (anything outside _AUTO_FIELDS) from existing entry,
+        # while updating auto-generated fields in their original key positions.
         old_dict: Dict[str, Any] = {"name": old} if isinstance(old, str) else dict(old)
         new_dict: Dict[str, Any] = {"name": local_name} if isinstance(model_entry, str) else dict(model_entry)
-        # Start from old, update auto-generated fields from new (or remove if no longer present)
-        merged: Dict[str, Any] = {k: v for k, v in old_dict.items() if k not in _AUTO_FIELDS}
+        # Rebuild preserving old key order; update AUTO_FIELDS values in-place, add new ones at end.
+        merged: Dict[str, Any] = {}
+        for k, v in old_dict.items():
+            merged[k] = new_dict[k] if k in _AUTO_FIELDS and k in new_dict else v
         for key in _AUTO_FIELDS:
-            if key in new_dict:
+            if key in new_dict and key not in merged:
                 merged[key] = new_dict[key]
         merged["name"] = local_name
         # If the only meaningful key is "name", store as plain string

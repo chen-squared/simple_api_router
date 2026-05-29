@@ -1129,18 +1129,10 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         _monaco_init = f"""
 (function() {{
   var fb = document.getElementById('editor-fallback');
-  // Preload YAML into the textarea fallback (works offline and while Monaco loads).
-  fetch('/config/yaml')
-    .then(function(r) {{ return r.ok ? r.text() : Promise.reject(r.status); }})
-    .then(function(t) {{ fb.value = t; }})
-    .catch(function(e) {{ fb.value = '# Error loading config: ' + e; }});
-  // If the CDN loaded, replace the textarea with Monaco.
-  if (typeof require === 'undefined') {{
-    fb.style.display = '';
-    return;
-  }}
-  require.config({{ paths: {{ vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@{_monaco_ver}/min/vs' }} }});
-  require(['vs/editor/editor.main'], function() {{
+  var yamlReady = false, monacoReady = false, yamlText = '';
+
+  function tryInit() {{
+    if (!yamlReady || !monacoReady) return;
     var ed = document.getElementById('editor');
     ed.style.display = '';
     window._editor = monaco.editor.create(ed, {{
@@ -1155,9 +1147,28 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
       wordWrap: 'off',
     }});
     fb.style.display = 'none';
-    window._editor.setValue(fb.value);
+    window._editor.setValue(yamlText);
+  }}
+
+  fetch('/config/yaml')
+    .then(function(r) {{ return r.ok ? r.text() : Promise.reject(r.status); }})
+    .then(function(t) {{
+      yamlText = t;
+      fb.value = t;
+      yamlReady = true;
+      if (monacoReady) tryInit(); else if (!window._editor) {{ /* Monaco not up yet, textarea shows */ }}
+    }})
+    .catch(function(e) {{ fb.value = '# Error loading config: ' + e; fb.style.display = ''; }});
+
+  if (typeof require === 'undefined') {{
+    fb.style.display = '';
+    return;
+  }}
+  require.config({{ paths: {{ vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@{_monaco_ver}/min/vs' }} }});
+  require(['vs/editor/editor.main'], function() {{
+    monacoReady = true;
+    if (yamlReady) tryInit();
   }}, function(err) {{
-    // require() failed (e.g. CDN returned 404) — keep textarea.
     fb.style.display = '';
     console.warn('Monaco load failed, using textarea fallback', err);
   }});
