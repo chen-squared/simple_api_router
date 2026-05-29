@@ -229,6 +229,47 @@ def main() -> None:
     subparsers.add_parser("log",       help="Tail service logs")
     subparsers.add_parser("models",    help="List configured providers and models")
 
+    # ── auto-config ─────────────────────────────────────────────────────────
+    ac_p = subparsers.add_parser(
+        "auto-config",
+        help="Auto-generate config from models.dev (e.g. auto-config openrouter)",
+    )
+    ac_p.add_argument(
+        "online_provider", nargs="?", default=None,
+        metavar="ONLINE_PROVIDER",
+        help="Provider ID on models.dev (e.g. openrouter, groq, deepseek)",
+    )
+    ac_p.add_argument(
+        "online_model_id", nargs="?", default=None,
+        metavar="ONLINE_MODEL_ID",
+        help="Specific model ID to add (omit to add all models for the provider)",
+    )
+    ac_p.add_argument(
+        "--provider", default=None, metavar="NAME",
+        help="Local provider name in your config (default: same as online provider ID)",
+    )
+    ac_p.add_argument(
+        "--model", default=None, metavar="NAME",
+        help="Local model name in your config (default: same as online model ID)",
+    )
+    ac_p.add_argument(
+        "--format", default=None,
+        choices=["anthropic", "openai_chat", "openai_responses", "google"],
+        help="Override inferred API format",
+    )
+    ac_p.add_argument(
+        "--list", action="store_true",
+        help="List providers (or models for a given provider) without modifying config",
+    )
+    ac_p.add_argument(
+        "--dry-run", action="store_true", dest="dry_run",
+        help="Print the resulting YAML without writing to disk",
+    )
+    ac_p.add_argument(
+        "--config", "-c", metavar="PATH", default=None,
+        help="Config file to update (default: auto-detect)",
+    )
+
     # ── test ────────────────────────────────────────────────────────────────
     test_p = subparsers.add_parser(
         "test",
@@ -290,6 +331,13 @@ def main() -> None:
     if cmd == "install":
         from simple_api_router.service import install
         install(config=args.config, exe_override=args.exe)
+        return
+
+    if cmd == "auto-config":
+        from simple_api_router.service import resolve_config
+        from simple_api_router.auto_config import auto_config_command
+        cfg = Path(resolve_config(getattr(args, "config", None)))
+        auto_config_command(args, cfg)
         return
 
     if cmd == "models":
