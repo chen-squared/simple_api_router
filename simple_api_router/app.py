@@ -624,6 +624,13 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
                         "created": 0,
                         "owned_by": prov_name,
                     })
+        for alias in cfg.server.model_map:
+            model_data.append({
+                "id": alias,
+                "object": "model",
+                "created": 0,
+                "owned_by": "alias",
+            })
         return JSONResponse({"object": "list", "data": model_data})
 
     # ------------------------------------------------------------------

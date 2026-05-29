@@ -1667,3 +1667,112 @@ class TestIsSoftRatelimit(unittest.TestCase):
 
     def test_empty_body(self):
         self.assertFalse(self.fn(400, ""))
+
+
+# ===========================================================================
+# server.model_map alias resolution in route_request
+# ===========================================================================
+
+class TestServerModelMap(unittest.TestCase):
+    """Tests that server-level model aliases are resolved before routing."""
+
+    def _make_config(self, model_map: dict) -> RouterConfig:
+        ep = EndpointConfig(
+            base_url="https://api.anthropic.com",
+            models=[ModelEntry(name="claude-opus-4-5")],
+        )
+        prov = ProviderConfig(api_key="sk-test", endpoints={"anthropic": ep})
+        return RouterConfig(
+            server=ServerConfig(model_map=model_map),
+            providers={"anthropic": prov},
+        )
+
+    def test_alias_resolves_to_provider_model(self):
+        """Alias in server.model_map should be resolved to 'provider/model'."""
+        from simple_api_router.proxy import route_request
+        import asyncio
+
+        config = self._make_config({"claude": "anthropic/claude-opus-4-5"})
+
+        fake_request = MagicMock()
+        fake_request.state = MagicMock()
+        fake_request.headers = {}
+
+        body = {
+            "model": "claude",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 10,
+        }
+
+        async def fake_proxy(*args, **kwargs):
+            return MagicMock()
+
+        with patch("simple_api_router.proxy._proxy_anthropic", side_effect=fake_proxy):
+            asyncio.get_event_loop().run_until_complete(
+                route_request(fake_request, body, config, MagicMock())
+            )
+
+        # usage_meta.model should be the resolved "provider/model", not the alias
+        logged_model = fake_request.state.usage_meta["model"]
+        self.assertEqual(logged_model, "anthropic/claude-opus-4-5")
+
+    def test_alias_with_suffix_resolves(self):
+        """Alias with bracket suffix (e.g. 'claude[1m]') should still match."""
+        from simple_api_router.proxy import route_request
+        import asyncio
+
+        config = self._make_config({"claude": "anthropic/claude-opus-4-5"})
+
+        fake_request = MagicMock()
+        fake_request.state = MagicMock()
+        fake_request.headers = {}
+
+        body = {
+            "model": "claude[1m]",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 10,
+        }
+
+        async def fake_proxy(*args, **kwargs):
+            return MagicMock()
+
+        with patch("simple_api_router.proxy._proxy_anthropic", side_effect=fake_proxy):
+            asyncio.get_event_loop().run_until_complete(
+                route_request(fake_request, body, config, MagicMock())
+            )
+
+        logged_model = fake_request.state.usage_meta["model"]
+        self.assertEqual(logged_model, "anthropic/claude-opus-4-5")
+
+    def test_no_alias_passes_through(self):
+        """If no alias matches, the model string is used as-is."""
+        from simple_api_router.proxy import route_request
+        import asyncio
+
+        config = self._make_config({"other": "anthropic/claude-opus-4-5"})
+
+        fake_request = MagicMock()
+        fake_request.state = MagicMock()
+        fake_request.headers = {}
+
+        body = {
+            "model": "anthropic/claude-opus-4-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 10,
+        }
+
+        async def fake_proxy(*args, **kwargs):
+            return MagicMock()
+
+        with patch("simple_api_router.proxy._proxy_anthropic", side_effect=fake_proxy):
+            asyncio.get_event_loop().run_until_complete(
+                route_request(fake_request, body, config, MagicMock())
+            )
+
+        logged_model = fake_request.state.usage_meta["model"]
+        self.assertEqual(logged_model, "anthropic/claude-opus-4-5")
+
+    def test_server_model_map_default_empty(self):
+        """ServerConfig.model_map defaults to an empty dict."""
+        s = ServerConfig()
+        self.assertEqual(s.model_map, {})

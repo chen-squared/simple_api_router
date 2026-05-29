@@ -67,7 +67,14 @@ def _models_command(config_path: str) -> None:
                 total += 1
 
     print(f"\n{total} models across {len(cfg.providers)} providers")
-    print(f"Config: {cfg_path}")
+
+    aliases = cfg.server.model_map
+    if aliases:
+        print(f"\n{BOLD}[server aliases]{RESET}")
+        for alias, target in aliases.items():
+            print(f"  {alias:<48} → {target}")
+
+    print(f"\nConfig: {cfg_path}")
 
 
 def _test_command(model_str: str, config_path: str) -> None:

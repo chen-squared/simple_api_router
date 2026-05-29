@@ -1024,6 +1024,15 @@ async def route_request(
     if not model_str:
         raise HTTPException(status_code=400, detail="'model' field is required")
 
+    # Resolve server-level model alias (e.g. "claude" → "anthropic/claude-opus-4-5").
+    # Check after stripping bracket suffixes so "claude[1m]" still matches "claude".
+    _alias_key = strip_model_suffixes(model_str)
+    if config.server.model_map and _alias_key in config.server.model_map:
+        resolved = config.server.model_map[_alias_key]
+        logger.info("Server model alias '%s' → '%s'", _alias_key, resolved)
+        model_str = resolved
+        body = {**body, "model": model_str}
+
     provider_name, model = parse_model(model_str)
     provider, endpoint, api_format, backend_model = resolve_provider(provider_name, model, config)
     max_retries = config.server.max_retries

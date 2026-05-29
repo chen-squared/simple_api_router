@@ -29,6 +29,14 @@ server:
   #   grep "req=ab12cd34" /tmp/router_debug.log
   # debug_log: "/tmp/router_debug.log"
 
+  # ── Global model aliases ───────────────────────────────────────────────────
+  # Clients may use the alias as the model name (no "provider/" prefix needed).
+  # Billing uses the resolved "provider/model", not the alias.
+  # model_map:
+  #   claude:  "anthropic/claude-opus-4-5"
+  #   sonnet:  "anthropic/claude-sonnet-4-5"
+  #   fast:    "openai/gpt-4o-mini"
+
 providers:
   # ── Anthropic ─────────────────────────────────────────────────────────────
   anthropic:

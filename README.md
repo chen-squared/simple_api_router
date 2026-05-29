@@ -24,7 +24,7 @@ Designed for use with tools like [Claude Code](https://claude.ai/code) that spea
 - **`auto-config` command** — auto-generate config entries from [models.dev](https://models.dev) metadata: infers endpoint format, modalities, and pricing; smart-merges into existing config preserving user-set fields; `--dry-run` shows a git-style diff before writing
 - **Usage logging** — every request logged to `router_usage.db` (SQLite); view with `simple-api-router usage` or `/stats`
 - **Hot reload** — provider/model/key changes apply within a second, no restart needed
-- **`model_map`** — remap external model names to backend names per endpoint
+- **`model_map`** — remap external model names to backend names per endpoint; global server-level aliases (`server.model_map`) let clients use short names without a `provider/` prefix, billing tracks the resolved model
 - **1M context suffix** — Claude Code's `[1m]` suffix stripped before forwarding
 
 ---
@@ -156,6 +156,7 @@ Then pick any configured model:
 | `video_model` | `null` | Enable `video_understanding` MCP tool at `/mcp` (`"provider/model"`) |
 | `pdf_model` | `null` | Enable `pdf_understanding` MCP tool at `/mcp` (`"provider/model"`) |
 | `debug_log` | `null` | Path to debug log file; all 4 request/response stages logged per request |
+| `model_map` | `{}` | Global model aliases (`alias: "provider/model"`); clients send the alias, billing uses the resolved model |
 
 ### `providers`
 

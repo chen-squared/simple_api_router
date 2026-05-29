@@ -47,6 +47,11 @@ class ServerConfig(BaseModel):
     # Path to debug log file.  When set, all 4 request/response stages are
     # appended to this file for every request.  None = disabled.
     debug_log: Optional[str] = None
+    # Global model aliases.  Clients may use the alias as the model name instead
+    # of the full "provider/model" string.  The alias is resolved before routing;
+    # billing uses the resolved "provider/model", not the alias.
+    # Example: model_map: {claude: "anthropic/claude-opus-4-5", fast: "openai/gpt-4o-mini"}
+    model_map: Dict[str, str] = Field(default_factory=dict)
 
 
 class ModelEntry(BaseModel):
