@@ -1,6 +1,7 @@
 """auto-config: auto-generate router config entries from models.dev data."""
 from __future__ import annotations
 
+import difflib
 import shutil
 import sys
 from datetime import datetime
@@ -15,12 +16,15 @@ _ANTHROPIC_FORMAT_PROVIDERS = frozenset({"anthropic", "google-vertex-anthropic"}
 _GOOGLE_FORMAT_PROVIDERS = frozenset({"google", "google-vertex"})
 
 # model-level provider.npm → router format
+# @ai-sdk/openai         uses the Responses API (not OpenAI Chat)
+# @ai-sdk/openai-compatible uses the Chat Completions API
+# No provider field at all  → default openai_chat (handled by fallback)
 _NPM_TO_FORMAT: Dict[str, str] = {
-    "@ai-sdk/anthropic":          "anthropic",
-    "@ai-sdk/google":             "google",
+    "@ai-sdk/anthropic":               "anthropic",
+    "@ai-sdk/google":                  "google",
     "@ai-sdk/google-vertex/anthropic": "anthropic",
-    "@ai-sdk/openai":             "openai_chat",
-    "@ai-sdk/openai-compatible":  "openai_chat",
+    "@ai-sdk/openai":                  "openai_responses",
+    "@ai-sdk/openai-compatible":       "openai_chat",
 }
 
 # Well-known base URLs for providers whose models.dev entry has no api URL.
@@ -260,6 +264,41 @@ def backup_config(config_path: Path) -> Path:
     return backup
 
 
+# ── Colored diff ────────────────────────────────────────────────────────────
+
+def print_diff(old_text: str, new_text: str, label: str) -> None:
+    """Print a git-style colored unified diff between old and new YAML."""
+    RED    = "\033[31m"
+    GREEN  = "\033[32m"
+    CYAN   = "\033[36m"
+    RESET  = "\033[0m"
+
+    old_lines = old_text.splitlines(keepends=True)
+    new_lines = new_text.splitlines(keepends=True)
+    diff = list(difflib.unified_diff(
+        old_lines, new_lines,
+        fromfile=f"a/{label}",
+        tofile=f"b/{label}",
+        lineterm="",
+    ))
+
+    if not diff:
+        print("(no changes)")
+        return
+
+    for line in diff:
+        if line.startswith("---") or line.startswith("+++"):
+            print(f"\033[1m{line}\033[0m")
+        elif line.startswith("@@"):
+            print(f"{CYAN}{line}{RESET}")
+        elif line.startswith("+"):
+            print(f"{GREEN}{line}{RESET}")
+        elif line.startswith("-"):
+            print(f"{RED}{line}{RESET}")
+        else:
+            print(line, end="")
+
+
 # ── Display helpers ────────────────────────────────────────────────────────
 
 def list_providers(data: Dict[str, Any]) -> None:
@@ -372,8 +411,15 @@ def auto_config_command(args: Any, config_path: Path) -> None:
 
     # ── Dry-run ────────────────────────────────────────────────────────────
     if args.dry_run:
+        # Normalize the old text through the same serializer so that
+        # cosmetic differences (quotes, indentation style) don't show as changes.
+        old_normalized = yaml.dump(
+            yaml.safe_load(config_text) or {},
+            default_flow_style=False, allow_unicode=True, sort_keys=False,
+        )
+        label = config_path.name
         print(f"# Dry run — would write to {config_path}\n")
-        print(new_yaml)
+        print_diff(old_normalized, new_yaml, label)
         return
 
     # ── Backup + write ─────────────────────────────────────────────────────
