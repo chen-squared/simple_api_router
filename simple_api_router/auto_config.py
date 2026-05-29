@@ -192,13 +192,13 @@ def infer_pricing(model_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
     p: Dict[str, Any] = {
         "currency": "USD",
-        "input": cost["input"],
-        "output": cost["output"],
+        "input": float(cost["input"]),
+        "output": float(cost["output"]),
     }
     if "cache_read" in cost:
-        p["cache_read"] = cost["cache_read"]
+        p["cache_read"] = float(cost["cache_read"])
     if "cache_write" in cost:
-        p["cache_write"] = cost["cache_write"]
+        p["cache_write"] = float(cost["cache_write"])
     return p
 
 
