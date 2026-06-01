@@ -1184,34 +1184,64 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
                 return '<tr><td colspan="8" class="empty">No usage data</td></tr>'
             cells = []
             for day in sorted(by_day_agg.keys(), reverse=True):
-                dt = _total_agg(by_day_agg[day])
+                day_models = by_day_agg[day]
+                dt = _total_agg(day_models)
                 day_cny = round(dt["cost_cny"], 4) if dt.get("_has_cost_cny") else None
                 day_usd = round(dt["cost_usd"], 4) if dt.get("_has_cost_usd") else None
                 cells.append(
                     f'<tr class="day-hdr">'
-                    f'<td colspan="8"><strong>{html.escape(day)}</strong>'
-                    f'&emsp;<span class="muted">{dt["requests"]} req'
-                    f'&ensp;in {_fmt_stat_tokens(dt["input_tokens"])}'
-                    f'&ensp;out {_fmt_stat_tokens(dt["output_tokens"])}'
-                    + (f'&ensp;{_fmt_stat_cost(day_cny, "¥")}' if day_cny is not None else '')
-                    + (f'&ensp;{_fmt_stat_cost(day_usd, "$")}' if day_usd is not None else '')
-                    + f'</span></td></tr>'
+                    f'<td><strong>{html.escape(day)}</strong></td>'
+                    f"<td>{dt['requests']}</td>"
+                    f"<td>{_fmt_stat_tokens(dt['input_tokens'])}</td>"
+                    f"<td>{_fmt_stat_tokens(dt['output_tokens'])}</td>"
+                    f"<td>{_fmt_stat_tokens(dt['cache_write_tokens'])}</td>"
+                    f"<td>{_fmt_stat_tokens(dt['cache_read_tokens'])}</td>"
+                    f"<td>{_fmt_stat_cost(day_cny, '¥')}</td>"
+                    f"<td>{_fmt_stat_cost(day_usd, '$')}</td>"
+                    "</tr>"
                 )
-                for model, agg in sorted(by_day_agg[day].items(), key=lambda x: -x[1]["requests"]):
-                    cost_cny = round(agg["cost_cny"], 4) if agg.get("_has_cost_cny") else None
-                    cost_usd = round(agg["cost_usd"], 4) if agg.get("_has_cost_usd") else None
+                day_grouped_by_provider = _group_by_provider(day_models)
+                for prov in sorted(
+                    day_grouped_by_provider,
+                    key=lambda p: (-_total_agg(day_grouped_by_provider[p])["requests"], p),
+                ):
+                    prov_total = _total_agg(day_grouped_by_provider[prov])
+                    prov_cny = round(prov_total["cost_cny"], 4) if prov_total.get("_has_cost_cny") else None
+                    prov_usd = round(prov_total["cost_usd"], 4) if prov_total.get("_has_cost_usd") else None
                     cells.append(
-                        "<tr>"
-                        f"<td>&ensp;{html.escape(model)}</td>"
-                        f"<td>{agg['requests']}</td>"
-                        f"<td>{_fmt_stat_tokens(agg['input_tokens'])}</td>"
-                        f"<td>{_fmt_stat_tokens(agg['output_tokens'])}</td>"
-                        f"<td>{_fmt_stat_tokens(agg['cache_write_tokens'])}</td>"
-                        f"<td>{_fmt_stat_tokens(agg['cache_read_tokens'])}</td>"
-                        f"<td>{_fmt_stat_cost(cost_cny, '¥')}</td>"
-                        f"<td>{_fmt_stat_cost(cost_usd, '$')}</td>"
+                        '<tr class="prov-hdr">'
+                        f"<td><strong>{html.escape(prov)}</strong></td>"
+                        f"<td>{prov_total['requests']}</td>"
+                        f"<td>{_fmt_stat_tokens(prov_total['input_tokens'])}</td>"
+                        f"<td>{_fmt_stat_tokens(prov_total['output_tokens'])}</td>"
+                        f"<td>{_fmt_stat_tokens(prov_total['cache_write_tokens'])}</td>"
+                        f"<td>{_fmt_stat_tokens(prov_total['cache_read_tokens'])}</td>"
+                        f"<td>{_fmt_stat_cost(prov_cny, '¥')}</td>"
+                        f"<td>{_fmt_stat_cost(prov_usd, '$')}</td>"
                         "</tr>"
                     )
+                    for model, agg in sorted(
+                        day_grouped_by_provider[prov].items(),
+                        key=lambda item: (-item[1]["requests"], item[0]),
+                    ):
+                        model_label = model.split("/", 1)[1] if "/" in model else model
+                        cost_cny = round(agg["cost_cny"], 4) if agg.get("_has_cost_cny") else None
+                        cost_usd = round(agg["cost_usd"], 4) if agg.get("_has_cost_usd") else None
+                        cells.append(
+                            "<tr>"
+                            f"<td>&emsp;&ensp;{html.escape(model_label)}</td>"
+                            f"<td>{agg['requests']}</td>"
+                            f"<td>{_fmt_stat_tokens(agg['input_tokens'])}</td>"
+                            f"<td>{_fmt_stat_tokens(agg['output_tokens'])}</td>"
+                            f"<td>{_fmt_stat_tokens(agg['cache_write_tokens'])}</td>"
+                            f"<td>{_fmt_stat_tokens(agg['cache_read_tokens'])}</td>"
+                            f"<td>{_fmt_stat_cost(cost_cny, '¥')}</td>"
+                            f"<td>{_fmt_stat_cost(cost_usd, '$')}</td>"
+                            "</tr>"
+                        )
+                cells.append(
+                    '<tr class="day-gap" aria-hidden="true"><td colspan="8"></td></tr>'
+                )
             return "".join(cells)
 
         def recent_rows() -> str:
@@ -1261,7 +1291,7 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         if view == "daily":
             main_section = f"""
   <section class="panel">
-    <h2>By Day — Model Breakdown</h2>
+    <h2>By Day — Provider &amp; Model Breakdown</h2>
     <div class="table-wrap">
       <table>
         <thead><tr><th>Day / Model</th><th>Req</th><th>Input</th><th>Output</th><th>Cache↑</th><th>Cache↓</th><th>¥ Cost</th><th>$ Cost</th></tr></thead>
@@ -1326,8 +1356,10 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     th, td {{ padding: 8px 12px; border-bottom: 1px solid #1f2937; text-align: left; white-space: nowrap; }}
     th {{ color: #94a3b8; font-weight: 600; }}
     tr:last-child td {{ border-bottom: 0; }}
-    tr.day-hdr td {{ background: #1a2236; color: #93c5fd; padding: 10px 12px 6px; }}
+    tr.day-hdr td {{ background: #172554; color: #dbeafe; padding: 10px 12px; border-top: 1px solid #60a5fa; border-bottom-color: #1e3a8a; }}
+    tr.day-hdr td:first-child {{ color: #f8fafc; font-weight: 700; letter-spacing: .02em; }}
     tr.prov-hdr td {{ background: #1a2236; color: #7dd3fc; padding: 8px 12px; }}
+    tr.day-gap td {{ height: 14px; padding: 0; border: 0; background: transparent; }}
     .empty {{ color: #94a3b8; text-align: center; }}
     .muted {{ color: #94a3b8; font-size: 13px; }}
     .pagination {{ display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid #1f2937; }}

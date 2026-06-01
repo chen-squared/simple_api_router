@@ -1234,6 +1234,64 @@ class TestConfigPageModelTests(unittest.TestCase):
         self.assertEqual(logged["status"], 200)
 
 
+class TestStatsPageDailyView(unittest.TestCase):
+    def test_daily_view_shows_provider_rows_and_day_header_summary(self):
+        import tempfile
+
+        from simple_api_router.app import create_app
+        from simple_api_router.usage_db import UsageDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = UsageDB(Path(tmpdir) / "usage.db")
+            try:
+                db.log({
+                    "ts": "2026-05-30T09:00:00+08:00",
+                    "model": "anthropic/claude-sonnet-4-5",
+                    "provider": "anthropic",
+                    "input_tokens": 1000,
+                    "output_tokens": 200,
+                })
+                db.log({
+                    "ts": "2026-05-30T10:00:00+08:00",
+                    "model": "anthropic/claude-opus-4-5",
+                    "provider": "anthropic",
+                    "input_tokens": 2000,
+                    "output_tokens": 300,
+                })
+                db.log({
+                    "ts": "2026-05-30T11:00:00+08:00",
+                    "model": "openai/gpt-4o",
+                    "provider": "openai",
+                    "input_tokens": 3000,
+                    "output_tokens": 400,
+                })
+
+                with patch("simple_api_router.app.setup_usage_db"), patch(
+                    "simple_api_router.app.get_usage_db", return_value=db
+                ):
+                    app = create_app(RouterConfig.model_validate({}))
+                    with TestClient(app) as client:
+                        resp = client.get("/stats?view=daily&from=2026-05-30&to=2026-05-30")
+            finally:
+                db.close()
+
+        self.assertEqual(resp.status_code, 200)
+        page = resp.text
+        self.assertIn("By Day — Provider &amp; Model Breakdown", page)
+        self.assertIn("tr.day-hdr td { background: #172554;", page)
+        self.assertIn(
+            '<tr class="day-hdr"><td><strong>2026-05-30</strong></td><td>3</td><td>6.0K</td><td>900</td><td>0</td><td>0</td>',
+            page,
+        )
+        self.assertIn('<tr class="prov-hdr"><td><strong>anthropic</strong></td><td>2</td>', page)
+        self.assertIn('<tr class="prov-hdr"><td><strong>openai</strong></td><td>1</td>', page)
+        self.assertIn("claude-sonnet-4-5", page)
+        self.assertIn("claude-opus-4-5", page)
+        self.assertIn("gpt-4o", page)
+        self.assertIn('<tr class="day-gap" aria-hidden="true"><td colspan="8"></td></tr>', page)
+        self.assertNotIn('day-subtotal', page)
+
+
 # ===========================================================================
 # Pricing config and cost calculation
 # ===========================================================================
