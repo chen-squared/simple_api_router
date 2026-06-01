@@ -7,6 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
+
 from simple_api_router.config import (
     EndpointConfig,
     ModelEntry,
@@ -1118,6 +1121,14 @@ class TestUsageDB(unittest.TestCase):
 
 
 class TestStatsPeriodParsing(unittest.TestCase):
+    def test_default_period_is_today(self):
+        from simple_api_router.app import _stats_period_from_params
+
+        period = _stats_period_from_params({})
+        self.assertEqual(period["mode"], "days")
+        self.assertEqual(period["days"], 1)
+        self.assertEqual(period["label"], "Today")
+
     def test_days_mode_uses_last_n_days(self):
         from simple_api_router.app import _stats_period_from_params
 
@@ -1174,6 +1185,53 @@ class TestStatsPeriodParsing(unittest.TestCase):
         self.assertEqual(idx[""][0]["label"], "anthropic/claude-sonnet-4-5")
         self.assertEqual(idx["anthropic"][0]["value"], "anthropic/claude-sonnet-4-5")
         self.assertEqual(idx["anthropic"][0]["label"], "claude-sonnet-4-5")
+
+
+class TestConfigPageModelTests(unittest.TestCase):
+    def test_config_test_goes_through_router_and_logs_usage(self):
+        from simple_api_router.app import create_app
+
+        async def fake_route_request(request, body, config, client):
+            self.assertEqual(body["model"], "minimax/minimax-m3")
+            self.assertEqual(
+                body["messages"],
+                [{"role": "user", "content": "Say exactly: OK"}],
+            )
+            request.state.usage_meta = {
+                "model": "minimax/minimax-m3",
+                "provider": "minimax",
+                "backend_model": "Minimax-M3",
+            }
+            return JSONResponse(
+                {
+                    "content": [{"type": "text", "text": "OK"}],
+                    "usage": {"input_tokens": 7, "output_tokens": 3},
+                }
+            )
+
+        with patch("simple_api_router.app.setup_usage_db"), patch(
+            "simple_api_router.app.log_usage"
+        ) as log_usage_mock, patch(
+            "simple_api_router.app.route_request", side_effect=fake_route_request
+        ):
+            app = create_app(RouterConfig.model_validate({}))
+            with TestClient(app) as client:
+                resp = client.post("/config/test", json={"model": "minimax/minimax-m3"})
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["response_preview"], "OK")
+        self.assertGreaterEqual(data["latency_ms"], 0)
+        log_usage_mock.assert_called_once()
+        logged = log_usage_mock.call_args.args[0]
+        self.assertEqual(logged["model"], "minimax/minimax-m3")
+        self.assertEqual(logged["provider"], "minimax")
+        self.assertEqual(logged["backend_model"], "Minimax-M3")
+        self.assertEqual(logged["input_tokens"], 7)
+        self.assertEqual(logged["output_tokens"], 3)
+        self.assertFalse(logged["streaming"])
+        self.assertEqual(logged["status"], 200)
 
 
 # ===========================================================================

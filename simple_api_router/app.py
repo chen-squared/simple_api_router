@@ -51,30 +51,55 @@ _CONFIG_PAGE_CSS = """
     .nav { display:flex; gap:10px; margin-bottom:22px; }
     .nav a { border:1px solid #374151; border-radius:999px; padding:5px 14px; color:#cbd5e1; font-size:13px; }
     .nav a.active { background:#2563eb; border-color:#2563eb; color:#fff; }
-    .layout { display:grid; grid-template-columns:1fr 1.5fr; gap:18px; align-items:start; }
-    @media(max-width:900px) { .layout { grid-template-columns:1fr; } }
+    .layout { --config-left-width:760px; display:flex; gap:16px; align-items:stretch; }
+    .layout > .panel { min-width:0; }
+    .panel-models { flex:0 0 clamp(560px, var(--config-left-width), calc(100% - 520px)); }
+    .panel-editor { flex:1 1 0; min-width:500px; }
+    .layout-resizer { flex:0 0 12px; position:relative; cursor:col-resize; border-radius:999px; user-select:none; touch-action:none; }
+    .layout-resizer::before { content:''; position:absolute; top:8px; bottom:8px; left:50%; width:3px; transform:translateX(-50%); background:#374151; border-radius:999px; transition:background .15s ease; }
+    .layout-resizer:hover::before, .layout.is-dragging .layout-resizer::before { background:#2563eb; }
+    @media(max-width:1180px) {
+      .layout { display:block; }
+      .panel-models, .panel-editor { min-width:0; width:100%; }
+      .layout-resizer { display:none; }
+      .panel-editor { margin-top:18px; }
+    }
     .panel { background:#111827; border:1px solid #374151; border-radius:12px; overflow:hidden; }
     .panel-hdr { padding:12px 16px; border-bottom:1px solid #374151; display:flex; align-items:center; justify-content:space-between; gap:8px; }
     .panel-hdr h2 { margin:0; font-size:15px; }
-    .table-wrap { overflow-x:auto; }
+    .table-scroll-top { overflow-x:auto; overflow-y:hidden; padding:0 16px; border-bottom:1px solid #1f2937; background:#111827; scrollbar-gutter:stable; }
+    .table-scroll-top[hidden] { display:none; }
+    .table-scroll-top-inner { height:1px; }
+    .table-wrap { overflow:auto; scrollbar-gutter:stable both-edges; }
     table { width:100%; border-collapse:collapse; font-size:13px; }
     th,td { padding:7px 11px; border-bottom:1px solid #1f2937; text-align:left; white-space:nowrap; }
     th { color:#94a3b8; font-weight:600; }
     tr:last-child td { border-bottom:0; }
+    .panel-models .panel-hdr { position:sticky; top:0; z-index:3; background:#111827; }
+    .table-wrap-models { max-height:min(72vh, 760px); }
+    .table-wrap-models table { width:max-content; min-width:100%; }
+    .table-wrap-models thead th { position:sticky; top:0; z-index:2; background:#111827; }
+    .col-provider { min-width:96px; }
+    .col-model { min-width:220px; }
+    .col-format { min-width:92px; }
+    .col-modality { min-width:210px; white-space:normal; }
+    .col-test { min-width:170px; }
     .pc { color:#93c5fd; font-weight:500; }
     .empty { color:#94a3b8; text-align:center; }
     .fmt-badge { background:#1f2937; padding:2px 6px; border-radius:4px; font-size:11px; color:#94a3b8; }
     .badge { display:inline-block; padding:2px 6px; border-radius:4px; font-size:12px; margin-right:2px; }
     .bg { background:#1f2937; color:#94a3b8; }
     .bb { background:#1e3a5f; color:#93c5fd; }
-    .test-btn { padding:3px 10px; font-size:12px; border-radius:6px; cursor:pointer; border:1px solid #374151; background:#1f2937; color:#cbd5e1; }
+    .test-cell { min-width:170px; white-space:normal; }
+    .test-row { display:flex; align-items:flex-start; gap:8px; min-width:150px; }
+    .test-btn { padding:3px 10px; font-size:12px; border-radius:6px; cursor:pointer; border:1px solid #374151; background:#1f2937; color:#cbd5e1; white-space:nowrap; flex:0 0 auto; }
     .test-btn:hover { border-color:#2563eb; }
     .test-btn:disabled { opacity:.5; cursor:default; }
-    .test-result { font-size:12px; margin-left:6px; }
+    .test-result { font-size:12px; min-width:0; flex:1 1 auto; }
     .test-result.ok { color:#4ade80; }
     .test-result.err { color:#f87171; }
     .test-result.spin { color:#94a3b8; }
-    pre.preview { background:#1f2937; padding:4px 8px; border-radius:5px; font-size:11px; color:#94a3b8; margin:2px 0 0; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    pre.preview { background:#1f2937; padding:4px 8px; border-radius:5px; font-size:11px; color:#94a3b8; margin:4px 0 0; max-width:320px; overflow:auto; text-overflow:ellipsis; white-space:pre-wrap; }
     .save-bar { padding:12px 16px; border-top:1px solid #374151; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
     .btn { padding:7px 18px; font-size:13px; border-radius:8px; cursor:pointer; border:1px solid #374151; background:#1f2937; color:#cbd5e1; }
     .btn:hover { border-color:#2563eb; }
@@ -84,7 +109,7 @@ _CONFIG_PAGE_CSS = """
     .save-status { font-size:13px; }
     .save-status.ok { color:#4ade80; }
     .save-status.err { color:#f87171; }
-    #editor-wrap { padding:14px 14px 0; }
+    #editor-wrap { padding:14px 14px 0; min-width:0; }
     #editor { width:100%; height:580px; border:1px solid #374151; border-radius:8px; overflow:hidden; }
     #editor-fallback { width:100%; height:580px; resize:vertical;
       font-family:'SF Mono','Fira Code',Consolas,monospace; font-size:13px;
@@ -163,6 +188,109 @@ _CONFIG_PAGE_JS = """
       }
       btn.disabled = false;
     }
+    function initConfigLayout() {
+      const layout = document.getElementById('config-layout');
+      const handle = document.getElementById('config-layout-resizer');
+      if (!layout || !handle) return;
+      const mediaQuery = window.matchMedia('(max-width: 1180px)');
+
+      const storageKey = 'simple-api-router.config.left-width';
+      const clampWidth = (px) => {
+        const rect = layout.getBoundingClientRect();
+        const min = 560;
+        const max = Math.max(min, rect.width - 520);
+        return Math.min(Math.max(px, min), max);
+      };
+
+      const saved = parseFloat(window.localStorage.getItem(storageKey) || '');
+      if (!Number.isNaN(saved) && saved > 0) {
+        layout.style.setProperty('--config-left-width', clampWidth(saved) + 'px');
+      }
+
+      let dragging = false;
+      const stopDrag = () => {
+        if (!dragging) return;
+        dragging = false;
+        layout.classList.remove('is-dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        const current = parseFloat(getComputedStyle(layout).getPropertyValue('--config-left-width'));
+        if (!Number.isNaN(current) && current > 0) {
+          window.localStorage.setItem(storageKey, String(current));
+        }
+      };
+
+      const moveDrag = (event) => {
+        if (!dragging) return;
+        const rect = layout.getBoundingClientRect();
+        const nextWidth = clampWidth(event.clientX - rect.left);
+        layout.style.setProperty('--config-left-width', nextWidth + 'px');
+      };
+
+      handle.addEventListener('pointerdown', (event) => {
+        if (mediaQuery.matches) return;
+        dragging = true;
+        handle.setPointerCapture(event.pointerId);
+        layout.classList.add('is-dragging');
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        moveDrag(event);
+        event.preventDefault();
+      });
+      handle.addEventListener('pointermove', moveDrag);
+      handle.addEventListener('pointerup', stopDrag);
+      handle.addEventListener('pointercancel', stopDrag);
+      window.addEventListener('resize', () => {
+        if (mediaQuery.matches) return;
+        const current = parseFloat(getComputedStyle(layout).getPropertyValue('--config-left-width'));
+        if (!Number.isNaN(current) && current > 0) {
+          layout.style.setProperty('--config-left-width', clampWidth(current) + 'px');
+        }
+      });
+    }
+    function initModelsTableScroll() {
+      const top = document.getElementById('models-scroll-top');
+      const topInner = document.getElementById('models-scroll-top-inner');
+      const wrap = document.getElementById('models-table-wrap');
+      const table = document.getElementById('models-table');
+      if (!top || !topInner || !wrap || !table) return;
+
+      let rafId = null;
+      let syncSource = null;
+      let syncTarget = null;
+
+      const syncMetrics = () => {
+        topInner.style.width = table.scrollWidth + 'px';
+        const hasOverflow = table.scrollWidth > wrap.clientWidth + 1;
+        top.hidden = !hasOverflow;
+        if (hasOverflow) top.scrollLeft = wrap.scrollLeft;
+      };
+
+      const schedule = (src, tgt) => {
+        syncSource = src;
+        syncTarget = tgt;
+        if (rafId !== null) return;
+        rafId = requestAnimationFrame(() => {
+          syncTarget.scrollLeft = syncSource.scrollLeft;
+          rafId = null;
+          syncSource = syncTarget = null;
+        });
+      };
+
+      top.addEventListener('scroll', () => schedule(top, wrap));
+      wrap.addEventListener('scroll', () => schedule(wrap, top));
+
+      if (window.ResizeObserver) {
+        const observer = new ResizeObserver(syncMetrics);
+        observer.observe(wrap);
+        observer.observe(table);
+      } else {
+        window.addEventListener('resize', syncMetrics);
+      }
+      syncMetrics();
+    }
+    initConfigLayout();
+    initModelsTableScroll();
 """
 
 def _config_to_data(cfg: RouterConfig) -> Dict[str, Any]:
@@ -322,9 +450,9 @@ def _patch_yaml(existing_yaml: str, gui_data: Dict[str, Any]) -> str:
 
 def _parse_stats_days(raw: Optional[str]) -> int:
     try:
-        days = int(raw or "7")
+        days = int(raw or "1")
     except ValueError:
-        days = 7
+        days = 1
     return max(1, min(days, 90))
 
 
@@ -389,7 +517,7 @@ def _stats_period_from_params(params: Any) -> dict:
     return {
         "mode": "days",
         "days": days,
-        "label": f"Last {days} day{'s' if days != 1 else ''}",
+        "label": "Today" if days == 1 else f"Last {days} days",
         "day": "",
         "date_from": "",
         "date_to": "",
@@ -1357,10 +1485,16 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         model_str: str = body.get("model", "")
         if not model_str:
             return JSONResponse(status_code=400, content={"error": "model is required"})
-        cfg: RouterConfig = request.app.state.config
-        client: httpx.AsyncClient = request.app.state.http_client
-        from .test_model import test_model_direct
-        result = await test_model_direct(model_str, cfg, client)
+        from .test_model import run_model_via_router_test
+
+        transport = httpx.ASGITransport(app=request.app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url=str(request.base_url).rstrip("/"),
+            timeout=httpx.Timeout(60.0),
+            follow_redirects=True,
+        ) as client:
+            result = await run_model_via_router_test(model_str, client)
         return JSONResponse(result)
 
     @app.get("/config/yaml")
@@ -1417,13 +1551,15 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
                             badges += f'<span class="badge bb">{_MODALITY_EMOJI[mt]} {mt}</span>'
                     model_rows_html.append(
                         f'<tr data-model="{full_id}">'
-                        f'<td class="pc">{html.escape(pname)}</td>'
-                        f'<td>{html.escape(entry.name)}</td>'
-                        f'<td><code class="fmt-badge">{html.escape(fmt)}</code></td>'
-                        f'<td>{badges}</td>'
+                        f'<td class="pc col-provider">{html.escape(pname)}</td>'
+                        f'<td class="col-model">{html.escape(entry.name)}</td>'
+                        f'<td class="col-format"><code class="fmt-badge">{html.escape(fmt)}</code></td>'
+                        f'<td class="col-modality">{badges}</td>'
                         f'<td class="test-cell">'
+                        f'<div class="test-row">'
                         f'<button class="test-btn" onclick="testModel(this,&quot;{full_id}&quot;)">Test</button>'
                         f'<span class="test-result"></span>'
+                        f'</div>'
                         f'</td></tr>'
                     )
         model_table_body = "\n".join(model_rows_html) or '<tr><td colspan="5" class="empty">No models configured</td></tr>'
@@ -1495,19 +1631,21 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
             '<a href="/config" class="active">&#9881; Config</a>'
             '<a href="/health">&#129322; Health</a>'
             '</nav>'
-            '<div class="layout">'
+            '<div class="layout" id="config-layout">'
             # Left panel: Models table
-            '<div class="panel">'
+            '<div class="panel panel-models" id="config-models-panel">'
             '<div class="panel-hdr"><h2>Models</h2>'
             '<button class="btn" id="test-all-btn" onclick="testAll()">Test All</button>'
             '</div>'
-            '<div class="table-wrap"><table>'
-            '<thead><tr><th>Provider</th><th>Model</th><th>Format</th><th>Modality</th><th>Test</th></tr></thead>'
+            '<div class="table-scroll-top" id="models-scroll-top" hidden><div class="table-scroll-top-inner" id="models-scroll-top-inner"></div></div>'
+            '<div class="table-wrap table-wrap-models" id="models-table-wrap"><table id="models-table">'
+            '<thead><tr><th class="col-provider">Provider</th><th class="col-model">Model</th><th class="col-format">Format</th><th class="col-modality">Modality</th><th class="col-test">Test</th></tr></thead>'
             f'<tbody>{model_table_body}</tbody>'
             '</table></div>'
             '</div>'
+            '<div class="layout-resizer" id="config-layout-resizer" role="separator" aria-orientation="vertical" aria-label="Resize panels"></div>'
             # Right panel: Monaco YAML editor
-            '<div class="panel">'
+            '<div class="panel panel-editor">'
             '<div class="panel-hdr"><h2>YAML Config</h2></div>'
             f'{save_notice}'
             '<div id="editor-wrap">'

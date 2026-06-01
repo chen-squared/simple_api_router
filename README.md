@@ -23,6 +23,7 @@ Designed for use with tools like [Claude Code](https://claude.ai/code) that spea
 - **Media MCP server** — optional `image_understanding`, `audio_understanding`, `video_understanding`, `pdf_understanding` MCP tools, mounted on the same port; lets models describe screenshots, audio, video, and PDFs on demand
 - **`auto-config` command** — auto-generate config entries from [models.dev](https://models.dev) metadata: infers endpoint format, modalities, and pricing; smart-merges into existing config preserving user-set fields; `--dry-run` shows a git-style diff before writing
 - **Usage logging** — every request logged to `router_usage.db` (SQLite); view with `simple-api-router usage` or `/stats`
+- **Config GUI model tests** — `/config` page tests now send requests through the router’s own `/v1/messages` path, so they follow normal routing and appear in usage/stats
 - **Hot reload** — provider/model/key changes apply within a second, no restart needed
 - **`model_map`** — remap external model names to backend names per endpoint; global server-level aliases (`server.model_map`) let clients use short names without a `provider/` prefix, billing tracks the resolved model
 - **1M context suffix** — Claude Code's `[1m]` suffix stripped before forwarding

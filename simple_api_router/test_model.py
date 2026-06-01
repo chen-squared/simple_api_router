@@ -1,8 +1,4 @@
-"""Quick connectivity test for a configured model.
-
-Makes a minimal single-turn request directly to the upstream provider
-(no router server needed) and returns timing + response preview.
-"""
+"""Helpers for quick model connectivity tests."""
 from __future__ import annotations
 
 import time
@@ -21,7 +17,54 @@ from .proxy import (
 _TEST_MESSAGE = [{"role": "user", "content": "Say exactly: OK"}]
 
 
-async def test_model_direct(
+async def run_model_via_router_test(
+    model_str: str,
+    client: httpx.AsyncClient,
+) -> Dict[str, Any]:
+    """Test a model by sending a minimal request through the router."""
+    body = {
+        "model": model_str,
+        "messages": _TEST_MESSAGE,
+        "max_tokens": 10,
+    }
+    try:
+        start = time.monotonic()
+        resp = await client.post("/v1/messages", json=body)
+        latency_ms = round((time.monotonic() - start) * 1000)
+        if resp.status_code == 200:
+            return {
+                "success": True,
+                "latency_ms": latency_ms,
+                "response_preview": _extract_preview(resp, "anthropic"),
+                "model": model_str,
+            }
+        try:
+            err_detail = resp.json()
+        except Exception:
+            err_detail = resp.text[:300]
+        return {
+            "success": False,
+            "latency_ms": latency_ms,
+            "error": f"HTTP {resp.status_code}: {err_detail}",
+            "model": model_str,
+        }
+    except httpx.TimeoutException:
+        return {
+            "success": False,
+            "error": "Request timed out",
+            "latency_ms": None,
+            "model": model_str,
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "latency_ms": None,
+            "model": model_str,
+        }
+
+
+async def run_model_direct_test(
     model_str: str,
     config: RouterConfig,
     client: Optional[httpx.AsyncClient] = None,
@@ -39,6 +82,13 @@ async def test_model_direct(
         follow_redirects=True,
     ) as _client:
         return await _run_test(model_str, config, _client)
+
+
+# Backward-compatible aliases for any external imports.
+test_model_via_router = run_model_via_router_test
+test_model_via_router.__test__ = False
+test_model_direct = run_model_direct_test
+test_model_direct.__test__ = False
 
 
 async def _run_test(
