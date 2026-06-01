@@ -6,9 +6,10 @@ import html
 import json
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
+from urllib.parse import urlencode
 
 import httpx
 import yaml as _yaml_module
@@ -325,6 +326,134 @@ def _parse_stats_days(raw: Optional[str]) -> int:
     except ValueError:
         days = 7
     return max(1, min(days, 90))
+
+
+def _parse_stats_date(raw: Optional[str]) -> Optional[date]:
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _stats_period_from_params(params: Any) -> dict:
+    now = datetime.now().astimezone()
+    tz = now.tzinfo
+    days = _parse_stats_days(params.get("days"))
+    day = _parse_stats_date(params.get("day"))
+    date_from = _parse_stats_date(params.get("from"))
+    date_to = _parse_stats_date(params.get("to"))
+
+    if day is not None:
+        since_dt = datetime(day.year, day.month, day.day, tzinfo=tz)
+        until_dt = since_dt + timedelta(days=1)
+        return {
+            "mode": "day",
+            "days": days,
+            "label": day.isoformat(),
+            "day": day.isoformat(),
+            "date_from": "",
+            "date_to": "",
+            "since_epoch": since_dt.timestamp(),
+            "until_epoch": until_dt.timestamp(),
+        }
+
+    if date_from is not None or date_to is not None:
+        if date_from is None:
+            date_from = date_to
+        if date_to is None:
+            date_to = date_from
+        if date_from > date_to:
+            date_from, date_to = date_to, date_from
+        since_dt = datetime(date_from.year, date_from.month, date_from.day, tzinfo=tz)
+        until_dt = datetime(date_to.year, date_to.month, date_to.day, tzinfo=tz) + timedelta(days=1)
+        label = (
+            date_from.isoformat()
+            if date_from == date_to
+            else f"{date_from.isoformat()} → {date_to.isoformat()}"
+        )
+        return {
+            "mode": "range",
+            "days": days,
+            "label": label,
+            "day": "",
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "since_epoch": since_dt.timestamp(),
+            "until_epoch": until_dt.timestamp(),
+        }
+
+    today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    since_dt = today_midnight - timedelta(days=days - 1)
+    return {
+        "mode": "days",
+        "days": days,
+        "label": f"Last {days} day{'s' if days != 1 else ''}",
+        "day": "",
+        "date_from": "",
+        "date_to": "",
+        "since_epoch": since_dt.timestamp(),
+        "until_epoch": now.timestamp(),
+    }
+
+
+def _stats_query_params(
+    *,
+    period: dict,
+    view: str,
+    page: int,
+    provider: str = "",
+    model: str = "",
+) -> Dict[str, str]:
+    params = {
+        "view": view,
+        "page": str(page),
+        "days": str(period["days"]),
+    }
+    if period.get("day") and not period.get("date_from") and not period.get("date_to"):
+        params["from"] = period["day"]
+        params["to"] = period["day"]
+    if period.get("date_from"):
+        params["from"] = period["date_from"]
+    if period.get("date_to"):
+        params["to"] = period["date_to"]
+    if provider:
+        params["provider"] = provider
+    if model:
+        params["model"] = model
+    return params
+
+
+def _stats_hidden_inputs(params: Dict[str, str], *, exclude: tuple[str, ...] = ()) -> str:
+    fields = []
+    for key, value in params.items():
+        if key in exclude or value in ("", None):
+            continue
+        fields.append(
+            f'<input type="hidden" name="{html.escape(key, quote=True)}" '
+            f'value="{html.escape(str(value), quote=True)}">'
+        )
+    return "".join(fields)
+
+
+def _stats_recent_model_index(by_model_agg: Dict[str, dict]) -> Dict[str, List[Dict[str, str]]]:
+    index: Dict[str, List[Dict[str, str]]] = {
+        "": [
+            {"value": model, "label": model}
+            for model, _agg in sorted(by_model_agg.items(), key=lambda item: (-item[1]["requests"], item[0]))
+        ]
+    }
+    grouped = _group_by_provider(by_model_agg)
+    for provider, models in grouped.items():
+        index[provider] = [
+            {
+                "value": model,
+                "label": model.split("/", 1)[1] if "/" in model else model,
+            }
+            for model, _agg in sorted(models.items(), key=lambda item: (-item[1]["requests"], item[0]))
+        ]
+    return index
 
 
 def _fmt_stat_tokens(n: int) -> str:
@@ -651,17 +780,32 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     # ------------------------------------------------------------------
     @app.get("/stats/data")
     async def stats_data(request: Request) -> JSONResponse:
-        days = _parse_stats_days(request.query_params.get("days"))
-        from datetime import datetime as _dt, timedelta as _td
-        _today_midnight = _dt.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
-        since_epoch = (_today_midnight - _td(days=days - 1)).timestamp()
-        until_epoch = time.time()
+        period = _stats_period_from_params(request.query_params)
+        recent_provider = (request.query_params.get("provider") or "").strip()
+        recent_model = (request.query_params.get("model") or "").strip()
+        since_epoch = period["since_epoch"]
+        until_epoch = period["until_epoch"]
         db = get_usage_db()
         config = request.app.state.config
         records = db.query_raw(since_epoch, until_epoch) if db is not None else []
         by_model_agg = _aggregate_by_model(records, config)
         by_day_agg = _aggregate_by_day_model(records, config)
-        recent = db.query_recent(50) if db is not None else []
+        recent_model_index = _stats_recent_model_index(by_model_agg)
+        if recent_provider and recent_model:
+            valid_models = {item["value"] for item in recent_model_index.get(recent_provider, [])}
+            if recent_model not in valid_models:
+                recent_model = ""
+        recent = (
+            db.query_recent_filtered(
+                50,
+                since_epoch=since_epoch,
+                until_epoch=until_epoch,
+                provider=recent_provider or None,
+                model=recent_model or None,
+            )
+            if db is not None
+            else []
+        )
 
         def _agg_row(model: str, agg: dict) -> dict:
             return {
@@ -706,7 +850,18 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
                 "models": [_agg_row(m, a) for m, a in sorted(by_provider_agg[prov].items(), key=lambda x: -x[1]["requests"])],
             })
         return JSONResponse({
-            "period_days": days,
+            "period_days": period["days"],
+            "period": {
+                "mode": period["mode"],
+                "label": period["label"],
+                "day": period["day"],
+                "from": period["date_from"],
+                "to": period["date_to"],
+            },
+            "recent_filters": {
+                "provider": recent_provider or None,
+                "model": recent_model or None,
+            },
             "by_model": by_model,
             "by_provider": by_provider,
             "by_day": by_day,
@@ -718,53 +873,130 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     # ------------------------------------------------------------------
     @app.get("/stats")
     async def stats(request: Request) -> HTMLResponse:  # noqa: C901
-        days = _parse_stats_days(request.query_params.get("days"))
+        period = _stats_period_from_params(request.query_params)
+        days = period["days"]
         try:
             page = max(1, int(request.query_params.get("page", "1") or "1"))
         except ValueError:
             page = 1
         view = request.query_params.get("view", "summary")  # "summary" | "daily"
+        recent_provider = (request.query_params.get("provider") or "").strip()
+        recent_model = (request.query_params.get("model") or "").strip()
         page_size = 25
 
-        from datetime import datetime as _dt, timedelta as _td
-        _today_midnight = _dt.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
-        since_epoch = (_today_midnight - _td(days=days - 1)).timestamp()
-        until_epoch = time.time()
+        since_epoch = period["since_epoch"]
+        until_epoch = period["until_epoch"]
         db = get_usage_db()
         config = request.app.state.config
         records = db.query_raw(since_epoch, until_epoch) if db is not None else []
         by_model_agg = _aggregate_by_model(records, config)
         by_day_agg = _aggregate_by_day_model(records, config)
+        grouped_by_provider = _group_by_provider(by_model_agg)
+        recent_model_index = _stats_recent_model_index(by_model_agg)
+        if recent_provider and recent_model:
+            valid_models = {item["value"] for item in recent_model_index.get(recent_provider, [])}
+            if recent_model not in valid_models:
+                recent_model = ""
 
-        total_recent = db.count_all() if db is not None else 0
-        recent_offset = (page - 1) * page_size
-        recent = db.query_recent(page_size, recent_offset) if db is not None else []
+        total_recent = (
+            db.count_filtered(
+                since_epoch=since_epoch,
+                until_epoch=until_epoch,
+                provider=recent_provider or None,
+                model=recent_model or None,
+            )
+            if db is not None
+            else 0
+        )
         total_pages = max(1, (total_recent + page_size - 1) // page_size)
+        page = min(page, total_pages)
+        recent_offset = (page - 1) * page_size
+        recent = (
+            db.query_recent_filtered(
+                page_size,
+                recent_offset,
+                since_epoch=since_epoch,
+                until_epoch=until_epoch,
+                provider=recent_provider or None,
+                model=recent_model or None,
+            )
+            if db is not None
+            else []
+        )
 
         total = _total_agg(by_model_agg)
         summary = _sum_usage_rows(total)
+        base_query = _stats_query_params(
+            period=period,
+            view=view,
+            page=page,
+            provider=recent_provider,
+            model=recent_model,
+        )
 
-        def _url(*, d=None, v=None, p=None) -> str:
-            nd = d if d is not None else days
-            nv = v if v is not None else view
-            np = p if p is not None else page
-            return f"/stats?days={nd}&view={nv}&page={np}"
+        def _url(path: str = "/stats", updates: Optional[Dict[str, Any]] = None) -> str:
+            params = dict(base_query)
+            for key, value in (updates or {}).items():
+                if value in (None, ""):
+                    params.pop(key, None)
+                else:
+                    params[key] = str(value)
+            query = urlencode(params)
+            return f"{path}?{query}" if query else path
 
         def period_link(label: str, value: int) -> str:
-            cls = "tab active" if value == days and view == "summary" else "tab"
-            return f'<a class="{cls}" href="{_url(d=value, v="summary", p=1)}">{label}</a>'
+            cls = "tab active" if period["mode"] == "days" and value == days else "tab"
+            return f'<a class="{cls}" href="{_url(updates={"days": value, "day": None, "from": None, "to": None, "page": 1})}">{label}</a>'
 
         def daily_link(label: str, target_view: str) -> str:
             cls = "tab active" if view == target_view else "tab"
-            return f'<a class="{cls}" href="{_url(v=target_view, p=1)}">{label}</a>'
+            return f'<a class="{cls}" href="{_url(updates={"view": target_view, "page": 1})}">{label}</a>'
+
+        recent_anchor = "#recent-requests"
+        provider_options = sorted(
+            grouped_by_provider,
+            key=lambda prov: (-_total_agg(grouped_by_provider[prov])["requests"], prov),
+        )
+        if recent_provider and recent_provider not in provider_options:
+            provider_options.append(recent_provider)
+        recent_model_options = recent_model_index.get(recent_provider, recent_model_index.get("", []))
+        recent_model_options_json = json.dumps(
+            recent_model_index,
+            separators=(",", ":"),
+        ).replace("<", "\\u003c")
+
+        def _select_option(value: str, label: str, selected_value: str) -> str:
+            selected = " selected" if value == selected_value else ""
+            return (
+                f'<option value="{html.escape(value, quote=True)}"{selected}>'
+                f"{html.escape(label)}</option>"
+            )
+
+        def _recent_provider_options() -> str:
+            items = [_select_option("", "All providers", recent_provider)]
+            items.extend(_select_option(prov, prov, recent_provider) for prov in provider_options)
+            return "".join(items)
+
+        def _recent_model_options() -> str:
+            items = [_select_option("", "All models", recent_model)]
+            for item in recent_model_options:
+                items.append(_select_option(item["value"], item["label"], recent_model))
+            return "".join(items)
+
+        def _recent_filter_summary() -> str:
+            parts = [period["label"]]
+            if recent_provider:
+                parts.append(f"provider={recent_provider}")
+            if recent_model:
+                parts.append(f"model={recent_model}")
+            return " · ".join(parts)
 
         def by_model_rows() -> str:
             if not by_model_agg:
                 return '<tr><td colspan="8" class="empty">No usage data</td></tr>'
             cells = []
-            grouped = _group_by_provider(by_model_agg)
-            for prov in sorted(grouped, key=lambda p: -_total_agg(grouped[p])["requests"]):
-                sub = _total_agg(grouped[prov])
+            for prov in sorted(grouped_by_provider, key=lambda p: -_total_agg(grouped_by_provider[p])["requests"]):
+                sub = _total_agg(grouped_by_provider[prov])
                 sub_cny = round(sub["cost_cny"], 4) if sub.get("_has_cost_cny") else None
                 sub_usd = round(sub["cost_usd"], 4) if sub.get("_has_cost_usd") else None
                 cells.append(
@@ -779,7 +1011,7 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
                     f"<td>{_fmt_stat_cost(sub_usd, '$')}</td>"
                     "</tr>"
                 )
-                for model, agg in sorted(grouped[prov].items(), key=lambda x: -x[1]["requests"]):
+                for model, agg in sorted(grouped_by_provider[prov].items(), key=lambda x: -x[1]["requests"]):
                     model_label = model.split("/", 1)[1] if "/" in model else model
                     cost_cny = round(agg["cost_cny"], 4) if agg.get("_has_cost_cny") else None
                     cost_usd = round(agg["cost_usd"], 4) if agg.get("_has_cost_usd") else None
@@ -856,7 +1088,7 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
 
         def recent_rows() -> str:
             if not recent:
-                return '<tr><td colspan="10" class="empty">No usage data</td></tr>'
+                return '<tr><td colspan="11" class="empty">No usage data</td></tr>'
             cells = []
             for row in recent:
                 result = _record_cost_currency(row, config)
@@ -865,10 +1097,15 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
                     cost_str = f"¥{cost:.4f}" if currency.upper() != "USD" else f"${cost:.4f}"
                 else:
                     cost_str = "-"
+                provider_label = row.get("provider", "") or (row.get("model", "").split("/", 1)[0] if "/" in row.get("model", "") else "")
+                model_label = row.get("model", "")
+                if provider_label and model_label.startswith(f"{provider_label}/"):
+                    model_label = model_label.split("/", 1)[1]
                 cells.append(
                     "<tr>"
                     f"<td>{html.escape(row.get('ts', ''))}</td>"
-                    f"<td>{html.escape(row.get('model', ''))}</td>"
+                    f"<td>{html.escape(provider_label)}</td>"
+                    f"<td>{html.escape(model_label)}</td>"
                     f"<td>{_fmt_stat_tokens(row.get('input_tokens', 0))}</td>"
                     f"<td>{_fmt_stat_tokens(row.get('output_tokens', 0))}</td>"
                     f"<td>{_fmt_stat_tokens(row.get('cache_write_tokens', 0))}</td>"
@@ -884,12 +1121,12 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         def pagination() -> str:
             if total_pages <= 1:
                 return ""
-            prev_href = _url(p=page - 1) if page > 1 else ""
-            next_href = _url(p=page + 1) if page < total_pages else ""
-            first_btn = f'<a class="page-btn" href="{_url(p=1)}">«</a>' if page > 1 else '<span class="page-btn disabled">«</span>'
+            prev_href = (_url(updates={"page": page - 1}) + recent_anchor) if page > 1 else ""
+            next_href = (_url(updates={"page": page + 1}) + recent_anchor) if page < total_pages else ""
+            first_btn = f'<a class="page-btn" href="{_url(updates={"page": 1}) + recent_anchor}">«</a>' if page > 1 else '<span class="page-btn disabled">«</span>'
             prev_btn = f'<a class="page-btn" href="{prev_href}">‹ Prev</a>' if prev_href else '<span class="page-btn disabled">‹ Prev</span>'
             next_btn = f'<a class="page-btn" href="{next_href}">Next ›</a>' if next_href else '<span class="page-btn disabled">Next ›</span>'
-            last_btn = f'<a class="page-btn" href="{_url(p=total_pages)}">»</a>' if page < total_pages else '<span class="page-btn disabled">»</span>'
+            last_btn = f'<a class="page-btn" href="{_url(updates={"page": total_pages}) + recent_anchor}">»</a>' if page < total_pages else '<span class="page-btn disabled">»</span>'
             return f'<div class="pagination">{first_btn}{prev_btn}<span class="page-info">Page {page} / {total_pages} ({total_recent} total)</span>{next_btn}{last_btn}</div>'
 
         main_section = ""
@@ -942,10 +1179,12 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     .tab {{ border: 1px solid #374151; border-radius: 999px; padding: 5px 10px; color: #cbd5e1; font-size: 13px; }}
     .tab.active {{ background: #2563eb; border-color: #2563eb; color: #fff; }}
     .tab-sep {{ color: #4b5563; padding: 0 4px; }}
-    .days-form {{ display: inline-flex; gap: 6px; align-items: center; }}
-    .days-form input {{ width: 54px; padding: 4px 6px; border: 1px solid #374151; border-radius: 6px; background: #1f2937; color: #e5e7eb; font-size: 13px; }}
-    .days-form button {{ padding: 4px 10px; border: 1px solid #374151; border-radius: 6px; background: #1f2937; color: #cbd5e1; cursor: pointer; font-size: 13px; }}
-    .days-form button:hover {{ border-color: #2563eb; }}
+    .ctrl-form {{ display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }}
+    .ctrl-form input, .ctrl-form select {{ padding: 4px 6px; border: 1px solid #374151; border-radius: 6px; background: #1f2937; color: #e5e7eb; font-size: 13px; }}
+    .ctrl-form input[type="number"] {{ width: 72px; }}
+    .ctrl-form button {{ padding: 4px 10px; border: 1px solid #374151; border-radius: 6px; background: #1f2937; color: #cbd5e1; cursor: pointer; font-size: 13px; }}
+    .ctrl-form button:hover, .tab-link:hover {{ border-color: #2563eb; }}
+    .ctrl-label {{ color: #94a3b8; font-size: 13px; }}
     .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 18px 0 24px; }}
     .card, .panel {{ background: #111827; border: 1px solid #374151; border-radius: 12px; }}
     .card {{ padding: 14px; }}
@@ -953,6 +1192,7 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     .value {{ font-size: 22px; font-weight: 600; }}
     .panel {{ margin-top: 18px; overflow: hidden; }}
     .panel h2 {{ margin: 0; padding: 14px 16px; font-size: 15px; border-bottom: 1px solid #374151; }}
+    .filter-bar {{ display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #1f2937; flex-wrap: wrap; }}
     .table-wrap {{ overflow-x: auto; }}
     table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
     th, td {{ padding: 8px 12px; border-bottom: 1px solid #1f2937; text-align: left; white-space: nowrap; }}
@@ -967,21 +1207,37 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     .page-btn:hover {{ border-color: #2563eb; }}
     .page-btn.disabled {{ color: #4b5563; border-color: #1f2937; cursor: default; pointer-events: none; }}
     .page-info {{ font-size: 13px; color: #94a3b8; }}
+    .top-links {{ display: flex; gap: 8px; flex-wrap: wrap; }}
+    .tab-link {{ border: 1px solid #374151; border-radius: 999px; padding: 5px 10px; color: #cbd5e1; font-size: 13px; }}
   </style>
 </head>
 <body>
   <div class="top">
     <div>
       <h1 style="margin:0 0 6px 0;font-size:28px;">Usage Stats</h1>
-      <div class="muted">Last {days} day{'s' if days != 1 else ''} · <a href="/stats/data?days={days}">JSON data</a></div>
+      <div class="muted">{html.escape(period["label"])}</div>
+    </div>
+    <div class="top-links">
+      <a class="tab-link" href="{_url('/stats/data', updates={'page': None})}">JSON data</a>
+      <a class="tab-link" href="/config">Config</a>
     </div>
   </div>
   <div class="ctrl-row">
     <div class="tab-group">
       {period_link('Today', 1)}{period_link('7 days', 7)}{period_link('30 days', 30)}
-      <form class="days-form" method="GET" action="/stats">
-        <input type="hidden" name="view" value="{view}">
+      <form class="ctrl-form" method="GET" action="/stats">
+        {_stats_hidden_inputs(base_query, exclude=('days', 'from', 'to', 'page'))}
+        <span class="ctrl-label">Last</span>
         <input type="number" name="days" value="{days}" min="1" max="365" placeholder="days">
+        <span class="ctrl-label">days</span>
+        <button type="submit">Go</button>
+      </form>
+      <form class="ctrl-form" method="GET" action="/stats">
+        {_stats_hidden_inputs(base_query, exclude=('from', 'to', 'page'))}
+        <span class="ctrl-label">From</span>
+        <input type="date" name="from" value="{period['date_from'] or period['day']}">
+        <span class="ctrl-label">To</span>
+        <input type="date" name="to" value="{period['date_to'] or period['day']}">
         <button type="submit">Go</button>
       </form>
     </div>
@@ -1001,16 +1257,61 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     <div class="card"><div class="label">$ Cost</div><div class="value">{_fmt_stat_cost(summary['cost_usd'], '$')}</div></div>
   </section>
 {main_section}
-  <section class="panel">
+  <section class="panel" id="recent-requests">
     <h2>Recent Requests</h2>
+    <div class="filter-bar">
+      <form class="ctrl-form" method="GET" action="/stats#recent-requests">
+        {_stats_hidden_inputs(base_query, exclude=('provider', 'model', 'page'))}
+        <span class="ctrl-label">Provider</span>
+        <select name="provider" id="recent-provider-select">{_recent_provider_options()}</select>
+        <span class="ctrl-label">Model</span>
+        <select name="model" id="recent-model-select">{_recent_model_options()}</select>
+        <button type="submit">Apply</button>
+        <a class="tab-link" href="{_url(updates={'provider': None, 'model': None, 'page': 1}) + recent_anchor}">Reset</a>
+      </form>
+      <div class="muted">{html.escape(_recent_filter_summary())}</div>
+    </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Time</th><th>Model</th><th>In</th><th>Out</th><th>Cache↑</th><th>Cache↓</th><th>Cost</th><th>Stream</th><th>Status</th><th>ms</th></tr></thead>
+        <thead><tr><th>Time</th><th>Provider</th><th>Model</th><th>In</th><th>Out</th><th>Cache↑</th><th>Cache↓</th><th>Cost</th><th>Stream</th><th>Status</th><th>ms</th></tr></thead>
         <tbody>{recent_rows()}</tbody>
       </table>
     </div>
     {pagination()}
   </section>
+  <script>
+    (() => {{
+      const providerSelect = document.getElementById('recent-provider-select');
+      const modelSelect = document.getElementById('recent-model-select');
+      const modelIndex = {recent_model_options_json};
+      if (!providerSelect || !modelSelect) return;
+
+      function rebuildModelOptions() {{
+        const provider = providerSelect.value || '';
+        const selected = modelSelect.value;
+        const options = modelIndex[provider] || modelIndex[''] || [];
+        const values = new Set(options.map((item) => item.value));
+        const nextValue = values.has(selected) ? selected : '';
+        modelSelect.innerHTML = '';
+
+        const allOpt = document.createElement('option');
+        allOpt.value = '';
+        allOpt.textContent = 'All models';
+        modelSelect.appendChild(allOpt);
+
+        for (const item of options) {{
+          const opt = document.createElement('option');
+          opt.value = item.value;
+          opt.textContent = item.label;
+          modelSelect.appendChild(opt);
+        }}
+        modelSelect.value = nextValue;
+      }}
+
+      providerSelect.addEventListener('change', rebuildModelOptions);
+      rebuildModelOptions();
+    }})();
+  </script>
 </body>
 </html>
 """

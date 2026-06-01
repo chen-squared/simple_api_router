@@ -1030,6 +1030,151 @@ class TestUsageDB(unittest.TestCase):
             finally:
                 udb._db_instance = original
 
+    def test_query_recent_filtered_respects_period_provider_and_model(self):
+        from datetime import datetime
+        import tempfile
+        from simple_api_router.usage_db import UsageDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = UsageDB(Path(tmpdir) / "usage.db")
+            try:
+                db.log({
+                    "ts": "2026-05-30T09:00:00+08:00",
+                    "model": "anthropic/claude-sonnet-4-5",
+                    "provider": "anthropic",
+                })
+                db.log({
+                    "ts": "2026-05-30T10:00:00+08:00",
+                    "model": "openai/gpt-4o",
+                    "provider": "openai",
+                })
+                db.log({
+                    "ts": "2026-05-20T08:00:00+08:00",
+                    "model": "anthropic/claude-sonnet-4-5",
+                    "provider": "anthropic",
+                })
+
+                since_epoch = datetime.fromisoformat("2026-05-29T00:00:00+08:00").timestamp()
+                until_epoch = datetime.fromisoformat("2026-05-31T00:00:00+08:00").timestamp()
+                rows = db.query_recent_filtered(
+                    limit=10,
+                    since_epoch=since_epoch,
+                    until_epoch=until_epoch,
+                    provider="anthropic",
+                    model="anthropic/claude-sonnet-4-5",
+                )
+
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["provider"], "anthropic")
+                self.assertEqual(rows[0]["model"], "anthropic/claude-sonnet-4-5")
+            finally:
+                db.close()
+
+    def test_count_filtered_respects_period_provider_and_model(self):
+        from datetime import datetime
+        import tempfile
+        from simple_api_router.usage_db import UsageDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = UsageDB(Path(tmpdir) / "usage.db")
+            try:
+                db.log({
+                    "ts": "2026-05-30T09:00:00+08:00",
+                    "model": "anthropic/claude-sonnet-4-5",
+                    "provider": "anthropic",
+                })
+                db.log({
+                    "ts": "2026-05-30T10:00:00+08:00",
+                    "model": "anthropic/claude-opus-4-5",
+                    "provider": "anthropic",
+                })
+                db.log({
+                    "ts": "2026-05-30T11:00:00+08:00",
+                    "model": "openai/gpt-4o",
+                    "provider": "openai",
+                })
+
+                since_epoch = datetime.fromisoformat("2026-05-29T00:00:00+08:00").timestamp()
+                until_epoch = datetime.fromisoformat("2026-05-31T00:00:00+08:00").timestamp()
+                self.assertEqual(
+                    db.count_filtered(
+                        since_epoch=since_epoch,
+                        until_epoch=until_epoch,
+                        provider="anthropic",
+                    ),
+                    2,
+                )
+                self.assertEqual(
+                    db.count_filtered(
+                        since_epoch=since_epoch,
+                        until_epoch=until_epoch,
+                        provider="anthropic",
+                        model="anthropic/claude-opus-4-5",
+                    ),
+                    1,
+                )
+            finally:
+                db.close()
+
+
+class TestStatsPeriodParsing(unittest.TestCase):
+    def test_days_mode_uses_last_n_days(self):
+        from simple_api_router.app import _stats_period_from_params
+
+        period = _stats_period_from_params({"days": "30"})
+        self.assertEqual(period["mode"], "days")
+        self.assertEqual(period["days"], 30)
+        self.assertEqual(period["label"], "Last 30 days")
+
+    def test_specific_day_mode(self):
+        from simple_api_router.app import _stats_period_from_params
+
+        period = _stats_period_from_params({"day": "2026-05-30"})
+        self.assertEqual(period["mode"], "day")
+        self.assertEqual(period["day"], "2026-05-30")
+        self.assertEqual(period["label"], "2026-05-30")
+
+    def test_range_mode_swaps_inverted_dates(self):
+        from simple_api_router.app import _stats_period_from_params
+
+        period = _stats_period_from_params({"from": "2026-05-31", "to": "2026-05-29"})
+        self.assertEqual(period["mode"], "range")
+        self.assertEqual(period["date_from"], "2026-05-29")
+        self.assertEqual(period["date_to"], "2026-05-31")
+        self.assertEqual(period["label"], "2026-05-29 → 2026-05-31")
+
+    def test_day_mode_query_params_use_from_to_same_day(self):
+        from simple_api_router.app import _stats_query_params
+
+        params = _stats_query_params(
+            period={
+                "mode": "day",
+                "days": 7,
+                "label": "2026-05-30",
+                "day": "2026-05-30",
+                "date_from": "",
+                "date_to": "",
+                "since_epoch": 0,
+                "until_epoch": 0,
+            },
+            view="summary",
+            page=1,
+        )
+        self.assertEqual(params["from"], "2026-05-30")
+        self.assertEqual(params["to"], "2026-05-30")
+        self.assertNotIn("day", params)
+
+    def test_recent_model_index_groups_labels_by_provider(self):
+        from simple_api_router.app import _stats_recent_model_index
+
+        idx = _stats_recent_model_index({
+            "anthropic/claude-sonnet-4-5": {"requests": 3, "provider": "anthropic"},
+            "openai/gpt-4o": {"requests": 1, "provider": "openai"},
+        })
+        self.assertEqual(idx[""][0]["label"], "anthropic/claude-sonnet-4-5")
+        self.assertEqual(idx["anthropic"][0]["value"], "anthropic/claude-sonnet-4-5")
+        self.assertEqual(idx["anthropic"][0]["label"], "claude-sonnet-4-5")
+
 
 # ===========================================================================
 # Pricing config and cost calculation

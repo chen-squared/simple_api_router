@@ -161,16 +161,79 @@ class UsageDB:
         return [dict(row) for row in rows]
 
     def query_recent(self, limit: int = 100, offset: int = 0) -> List[dict]:
+        return self.query_recent_filtered(limit=limit, offset=offset)
+
+    def query_recent_filtered(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        *,
+        since_epoch: Optional[float] = None,
+        until_epoch: Optional[float] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> List[dict]:
+        where_sql, params = self._build_filters(
+            since_epoch=since_epoch,
+            until_epoch=until_epoch,
+            provider=provider,
+            model=model,
+        )
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM usage ORDER BY ts_epoch DESC, id DESC LIMIT ? OFFSET ?",
-                (max(0, int(limit)), max(0, int(offset))),
+                f"SELECT * FROM usage{where_sql} ORDER BY ts_epoch DESC, id DESC LIMIT ? OFFSET ?",
+                (*params, max(0, int(limit)), max(0, int(offset))),
             ).fetchall()
         return [self._full_row_to_dict(row) for row in rows]
 
     def count_all(self) -> int:
+        return self.count_filtered()
+
+    def count_filtered(
+        self,
+        *,
+        since_epoch: Optional[float] = None,
+        until_epoch: Optional[float] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> int:
+        where_sql, params = self._build_filters(
+            since_epoch=since_epoch,
+            until_epoch=until_epoch,
+            provider=provider,
+            model=model,
+        )
         with self._lock:
-            return self._conn.execute("SELECT COUNT(*) FROM usage").fetchone()[0]
+            return self._conn.execute(
+                f"SELECT COUNT(*) FROM usage{where_sql}",
+                params,
+            ).fetchone()[0]
+
+    @staticmethod
+    def _build_filters(
+        *,
+        since_epoch: Optional[float] = None,
+        until_epoch: Optional[float] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> tuple[str, List[Any]]:
+        clauses: List[str] = []
+        params: List[Any] = []
+        if since_epoch is not None:
+            clauses.append("ts_epoch >= ?")
+            params.append(float(since_epoch))
+        if until_epoch is not None:
+            clauses.append("ts_epoch < ?")
+            params.append(float(until_epoch))
+        if provider:
+            clauses.append("provider = ?")
+            params.append(str(provider))
+        if model:
+            clauses.append("model = ?")
+            params.append(str(model))
+        if not clauses:
+            return "", params
+        return " WHERE " + " AND ".join(clauses), params
 
     def _normalize_record(self, record: dict) -> Dict[str, Any]:
         ts = str(record.get("ts") or datetime.now().astimezone().isoformat(timespec="seconds"))

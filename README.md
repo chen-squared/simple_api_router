@@ -444,11 +444,19 @@ Returns all configured models in Anthropic-compatible format.
 
 ### `GET /stats`
 
-Returns a minimal HTML usage dashboard with period tabs, model/day aggregates, and recent requests.
+Returns a minimal HTML usage dashboard with:
+
+- period controls for **last N days** or a **date range** (`from` / `to`; a single day is `from == to`)
+- model/day aggregate tables
+- recent requests filtered to the selected period
+- recent request filters for **provider** and **model**
+- quick links to `/stats/data` and `/config`
 
 ### `GET /stats/data`
 
-Returns the same usage data as JSON for programmatic access.
+Returns the same usage data as JSON for programmatic access. Supports the same
+date-range query parameters for recent requests, plus `provider` / `model`
+filters on the `recent` section.
 
 ---
 
