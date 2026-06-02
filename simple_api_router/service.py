@@ -242,23 +242,20 @@ def _status_macos() -> None:
             capture_output=True, text=True,
         )
     print(r.stdout)
-    stdout_log = LOG_DIR / "stdout.log"
-    if stdout_log.exists():
+    log_file = CONFIG_DIR / "router.log"
+    if log_file.exists():
         print()
         _info("Last 5 log lines:")
-        for line in stdout_log.read_text().splitlines()[-5:]:
+        for line in log_file.read_text().splitlines()[-5:]:
             print(f"    {line}")
 
 
 def _log_macos() -> None:
-    stdout_log = LOG_DIR / "stdout.log"
-    if not stdout_log.exists():
-        _die(f"No logs at {LOG_DIR} — is the service installed?")
-    _info("Tailing logs (Ctrl+C to stop)…")
-    args = ["tail", "-f", str(stdout_log)]
-    stderr_log = LOG_DIR / "stderr.log"
-    if stderr_log.exists():
-        args.append(str(stderr_log))
+    log_file = CONFIG_DIR / "router.log"
+    if not log_file.exists():
+        _die(f"No log file at {log_file} — is the service running?")
+    _info(f"Tailing {log_file} (Ctrl+C to stop)…")
+    args = ["tail", "-f", str(log_file)]
     try:
         subprocess.run(args)
     except KeyboardInterrupt:

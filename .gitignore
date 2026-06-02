@@ -53,3 +53,4 @@ router.log
 # OS
 .DS_Store
 Thumbs.db
+router.log*

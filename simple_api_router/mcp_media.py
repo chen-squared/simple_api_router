@@ -1,8 +1,10 @@
-"""MCP media server — image / audio / video understanding tools.
+"""MCP media server — image / audio / video / PDF understanding tools.
 
-When any of ``server.image_model``, ``server.audio_model``, or
-``server.video_model`` is set in config.yaml, the server mounts the
-corresponding tools at ``/mcp`` (same port, Streamable HTTP transport).
+The router always exposes ``/mcp`` (same port, Streamable HTTP transport).
+The available tools are derived from the current config and hot-reload when
+``server.image_model``, ``server.audio_model``, ``server.video_model``, or
+``server.pdf_model`` changes.
+
 Claude Code config example::
 
     {
@@ -14,17 +16,13 @@ Claude Code config example::
       }
     }
 
-The tools are registered only for the models that are configured:
-- ``image_understanding``  → requires ``server.image_model``
-- ``audio_understanding``  → requires ``server.audio_model``
-- ``video_understanding``  → requires ``server.video_model``
-
 Standalone usage (runs its own HTTP server on a separate port)::
 
     python -m simple_api_router.mcp_media \\
         --image-model provider/model \\
         --audio-model provider/model \\
         --video-model provider/model \\
+        --pdf-model provider/model \\
         --router-url http://localhost:8080 \\
         --port 8081
 """
@@ -34,12 +32,14 @@ import argparse
 import base64
 import json
 import mimetypes
-import sys
 from pathlib import Path
 from typing import Callable, Optional, Union
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+
+
+MaybeGetter = Union[str, Callable[[], Optional[str]], None]
 
 
 # ---------------------------------------------------------------------------
@@ -50,16 +50,14 @@ def _normalize_media_type(mt: str | None) -> str | None:
     """Return a well-known media type, mapping non-standard forms to canonical ones.
 
     ``mimetypes.guess_type`` returns non-standard MIME subtypes on some platforms
-    (e.g. ``"audio/x-wav"`` instead of ``"audio/wav"``).  Strips the ``"x-"``
+    (e.g. ``"audio/x-wav"`` instead of ``"audio/wav"``). Strips the ``"x-"``
     prefix and handles other well-known remappings.
     """
     if mt is None:
         return None
     main, sub = mt.split("/", 1) if "/" in mt else (mt, "")
-    # Strip "x-" prefix from unofficial subtypes.
     if sub.startswith("x-"):
         sub = sub[2:]
-    # Well-known remappings (sub already has x- prefix stripped above).
     sub = {
         "mp4a-latm": "mp4",
         "mpeg": "mp3",
@@ -70,12 +68,48 @@ def _normalize_media_type(mt: str | None) -> str | None:
     return f"{main}/{sub}"
 
 
-def _make_getter(value: Union[str, Callable[[], Optional[str]], None]):
+def _make_getter(value: MaybeGetter) -> Callable[[], Optional[str]]:
     """Return a zero-arg callable that returns the current model name."""
     if callable(value):
         return value
-    _fixed = value
-    return lambda: _fixed  # noqa: E731
+    fixed = value
+    return lambda: fixed  # noqa: E731
+
+
+def _build_media_block(
+    kind: str,
+    path: Optional[str],
+    url: Optional[str],
+    base64_data: Optional[str],
+    media_type: str,
+) -> dict:
+    """Build one Anthropic-format media/document block for the router."""
+    block_type = "document" if kind == "pdf" else kind
+
+    if path:
+        file_path = Path(path).expanduser().resolve()
+        if not file_path.exists():
+            raise FileNotFoundError(str(file_path))
+        resolved_media_type = media_type if kind == "pdf" else (
+            _normalize_media_type(mimetypes.guess_type(str(file_path))[0]) or media_type
+        )
+        with open(file_path, "rb") as fh:
+            encoded = base64.b64encode(fh.read()).decode()
+        return {
+            "type": block_type,
+            "source": {"type": "base64", "media_type": resolved_media_type, "data": encoded},
+        }
+
+    if url:
+        return {"type": block_type, "source": {"type": "url", "url": url}}
+
+    if base64_data:
+        return {
+            "type": block_type,
+            "source": {"type": "base64", "media_type": media_type, "data": base64_data},
+        }
+
+    raise ValueError("provide one of path, url, or base64_data.")
 
 
 async def _call_model_streaming(
@@ -122,199 +156,195 @@ async def _call_model_streaming(
             return "".join(text_parts) or "(no text response)"
 
 
+async def _run_media_tool(
+    messages_url: str,
+    kind: str,
+    model_getter: Callable[[], Optional[str]],
+    path: Optional[str],
+    url: Optional[str],
+    base64_data: Optional[str],
+    media_type: str,
+    question: str,
+    max_tokens: int,
+) -> str:
+    """Execute one media MCP tool call through the router."""
+    current_model = model_getter()
+    if not current_model:
+        return f"Error: {kind}_model is not configured."
+
+    try:
+        block = _build_media_block(kind, path, url, base64_data, media_type)
+    except FileNotFoundError as exc:
+        return f"Error: file not found: {exc}"
+    except ValueError as exc:
+        return f"Error: {exc}"
+
+    try:
+        return await _call_model_streaming(messages_url, current_model, [block], question, max_tokens)
+    except httpx.HTTPStatusError as exc:
+        return f"Router error {exc.response.status_code}: {exc.response.text[:500]}"
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+def sync_media_mcp_tools(mcp: FastMCP) -> list[str]:
+    """Make the registered MCP tools match the currently configured models."""
+    tool_defs = getattr(mcp, "_media_tool_defs", None)
+    if tool_defs is None:
+        return []
+
+    desired = {
+        name
+        for name, spec in tool_defs.items()
+        if spec["getter"]()
+    }
+    active = set(getattr(mcp, "_media_active_tools", set()))
+
+    for name in sorted(active - desired):
+        mcp.remove_tool(name)
+    for name in sorted(desired - active):
+        mcp.add_tool(tool_defs[name]["fn"])
+
+    mcp._media_active_tools = desired
+    return sorted(desired)
+
+
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
 def create_media_mcp(
     router_url: str,
-    image_model: Union[str, Callable[[], Optional[str]], None] = None,
-    audio_model: Union[str, Callable[[], Optional[str]], None] = None,
-    video_model: Union[str, Callable[[], Optional[str]], None] = None,
+    image_model: MaybeGetter = None,
+    audio_model: MaybeGetter = None,
+    video_model: MaybeGetter = None,
+    pdf_model: MaybeGetter = None,
 ) -> FastMCP:
-    """Return a FastMCP instance with tools for the models that are configured.
-
-    Args:
-        router_url:   Base URL of the router, e.g. ``http://127.0.0.1:8080``.
-        image_model:  "provider/model" or callable; enables image_understanding.
-        audio_model:  "provider/model" or callable; enables audio_understanding.
-        video_model:  "provider/model" or callable; enables video_understanding.
-
-    At least one model must be provided or an error is raised.
-    """
-    if not any([image_model, audio_model, video_model]):
-        raise ValueError("At least one of image_model, audio_model, video_model must be set")
-
+    """Return a FastMCP instance whose tool list tracks the current config."""
     get_image = _make_getter(image_model)
     get_audio = _make_getter(audio_model)
     get_video = _make_getter(video_model)
-
-    tool_names = []
-    if image_model:
-        tool_names.append("image_understanding")
-    if audio_model:
-        tool_names.append("audio_understanding")
-    if video_model:
-        tool_names.append("video_understanding")
+    get_pdf = _make_getter(pdf_model)
 
     mcp = FastMCP(
         "media",
         instructions=(
-            f"Available tools: {', '.join(tool_names)}. "
-            "Use image_understanding for screenshots, diagrams, or any visual content. "
-            "Use audio_understanding for voice recordings or audio files. "
-            "Use video_understanding for video content. "
-            "Provide a local file path, an HTTPS URL, or raw base64 data."
+            "Media understanding tools that call the router's Anthropic-compatible "
+            "messages endpoint. The available tool list hot-reloads based on the "
+            "configured image/audio/video/pdf models. Provide exactly one of path, "
+            "url, or base64_data."
         ),
         stateless_http=True,
     )
 
     messages_url = router_url.rstrip("/") + "/v1/messages"
 
-    # ── image_understanding ────────────────────────────────────────────────
-    if image_model:
-        @mcp.tool()
-        async def image_understanding(
-            path: Optional[str] = None,
-            url: Optional[str] = None,
-            base64_data: Optional[str] = None,
-            media_type: str = "image/jpeg",
-            question: str = "Please describe this image in detail.",
-            max_tokens: int = 16384,
-        ) -> str:
-            """Describe or answer questions about an image using a vision model.
+    async def image_understanding(
+        path: Optional[str] = None,
+        url: Optional[str] = None,
+        base64_data: Optional[str] = None,
+        media_type: str = "image/jpeg",
+        question: str = "Please describe this image in detail.",
+        max_tokens: int = 16384,
+    ) -> str:
+        """Describe or answer questions about an image using a vision model.
 
-            Provide **exactly one** of:
-            - ``path``        — absolute or relative path to a local image file
-            - ``url``         — HTTPS URL of an image
-            - ``base64_data`` — raw base64-encoded image (without the ``data:`` prefix)
+        Provide **exactly one** of:
+        - ``path``        — absolute or relative path to a local image file
+        - ``url``         — HTTPS URL of an image
+        - ``base64_data`` — raw base64-encoded image (without the ``data:`` prefix)
 
-            ``media_type`` is only used with ``base64_data`` (default: ``image/jpeg``).
-            ``question`` defaults to a general description request.
-            ``max_tokens`` controls response length (default: 16384).
-            """
-            current_model = get_image()
-            if not current_model:
-                return "Error: image_model is not configured."
+        ``media_type`` is only used with ``base64_data`` (default: ``image/jpeg``).
+        ``question`` defaults to a general description request.
+        ``max_tokens`` controls response length (default: 16384).
+        """
+        return await _run_media_tool(
+            messages_url, "image", get_image, path, url, base64_data, media_type, question, max_tokens
+        )
 
-            if path:
-                p = Path(path).expanduser().resolve()
-                if not p.exists():
-                    return f"Error: file not found: {p}"
-                mt = _normalize_media_type(mimetypes.guess_type(str(p))[0]) or media_type
-                with open(p, "rb") as fh:
-                    b64 = base64.b64encode(fh.read()).decode()
-                block = {"type": "image", "source": {"type": "base64", "media_type": mt, "data": b64}}
-            elif url:
-                block = {"type": "image", "source": {"type": "url", "url": url}}
-            elif base64_data:
-                block = {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": base64_data}}
-            else:
-                return "Error: provide one of path, url, or base64_data."
+    async def audio_understanding(
+        path: Optional[str] = None,
+        url: Optional[str] = None,
+        base64_data: Optional[str] = None,
+        media_type: str = "audio/mp3",
+        question: str = "Please transcribe and describe this audio in detail.",
+        max_tokens: int = 16384,
+    ) -> str:
+        """Transcribe or answer questions about audio using an audio-capable model.
 
-            try:
-                return await _call_model_streaming(messages_url, current_model, [block], question, max_tokens)
-            except httpx.HTTPStatusError as exc:
-                return f"Router error {exc.response.status_code}: {exc.response.text[:500]}"
-            except Exception as exc:
-                return f"Error: {exc}"
+        Provide **exactly one** of:
+        - ``path``        — absolute or relative path to a local audio file
+        - ``url``         — HTTPS URL of an audio file
+        - ``base64_data`` — raw base64-encoded audio (without the ``data:`` prefix)
 
-    # ── audio_understanding ────────────────────────────────────────────────
-    if audio_model:
-        @mcp.tool()
-        async def audio_understanding(
-            path: Optional[str] = None,
-            url: Optional[str] = None,
-            base64_data: Optional[str] = None,
-            media_type: str = "audio/mp3",
-            question: str = "Please transcribe and describe this audio in detail.",
-            max_tokens: int = 16384,
-        ) -> str:
-            """Transcribe or answer questions about audio using an audio-capable model.
+        ``media_type`` is only used with ``base64_data`` (default: ``audio/mp3``).
+        ``question`` defaults to a transcription + description request.
+        ``max_tokens`` controls response length (default: 16384).
+        """
+        return await _run_media_tool(
+            messages_url, "audio", get_audio, path, url, base64_data, media_type, question, max_tokens
+        )
 
-            Provide **exactly one** of:
-            - ``path``        — absolute or relative path to a local audio file
-            - ``url``         — HTTPS URL of an audio file
-            - ``base64_data`` — raw base64-encoded audio (without the ``data:`` prefix)
+    async def video_understanding(
+        path: Optional[str] = None,
+        url: Optional[str] = None,
+        base64_data: Optional[str] = None,
+        media_type: str = "video/mp4",
+        question: str = "Please describe this video in detail.",
+        max_tokens: int = 16384,
+    ) -> str:
+        """Describe or answer questions about a video using a video-capable model.
 
-            ``media_type`` is only used with ``base64_data`` (default: ``audio/mp3``).
-            ``question`` defaults to a transcription + description request.
-            ``max_tokens`` controls response length (default: 16384).
-            """
-            current_model = get_audio()
-            if not current_model:
-                return "Error: audio_model is not configured."
+        Provide **exactly one** of:
+        - ``path``        — absolute or relative path to a local video file
+        - ``url``         — HTTPS URL of a video
+        - ``base64_data`` — raw base64-encoded video (without the ``data:`` prefix)
 
-            if path:
-                p = Path(path).expanduser().resolve()
-                if not p.exists():
-                    return f"Error: file not found: {p}"
-                mt = _normalize_media_type(mimetypes.guess_type(str(p))[0]) or media_type
-                with open(p, "rb") as fh:
-                    b64 = base64.b64encode(fh.read()).decode()
-                block = {"type": "audio", "source": {"type": "base64", "media_type": mt, "data": b64}}
-            elif url:
-                block = {"type": "audio", "source": {"type": "url", "url": url}}
-            elif base64_data:
-                block = {"type": "audio", "source": {"type": "base64", "media_type": media_type, "data": base64_data}}
-            else:
-                return "Error: provide one of path, url, or base64_data."
+        ``media_type`` is only used with ``base64_data`` (default: ``video/mp4``).
+        ``question`` defaults to a general description request.
+        ``max_tokens`` controls response length (default: 16384).
+        """
+        return await _run_media_tool(
+            messages_url, "video", get_video, path, url, base64_data, media_type, question, max_tokens
+        )
 
-            try:
-                return await _call_model_streaming(messages_url, current_model, [block], question, max_tokens)
-            except httpx.HTTPStatusError as exc:
-                return f"Router error {exc.response.status_code}: {exc.response.text[:500]}"
-            except Exception as exc:
-                return f"Error: {exc}"
+    async def pdf_understanding(
+        path: Optional[str] = None,
+        url: Optional[str] = None,
+        base64_data: Optional[str] = None,
+        question: str = "Please read and summarize this PDF in detail.",
+        max_tokens: int = 16384,
+    ) -> str:
+        """Read or answer questions about a PDF using a PDF-capable model.
 
-    # ── video_understanding ────────────────────────────────────────────────
-    if video_model:
-        @mcp.tool()
-        async def video_understanding(
-            path: Optional[str] = None,
-            url: Optional[str] = None,
-            base64_data: Optional[str] = None,
-            media_type: str = "video/mp4",
-            question: str = "Please describe this video in detail.",
-            max_tokens: int = 16384,
-        ) -> str:
-            """Describe or answer questions about a video using a video-capable model.
+        Provide **exactly one** of:
+        - ``path``        — absolute or relative path to a local PDF file
+        - ``url``         — HTTPS URL of a PDF
+        - ``base64_data`` — raw base64-encoded PDF (without the ``data:`` prefix)
 
-            Provide **exactly one** of:
-            - ``path``        — absolute or relative path to a local video file
-            - ``url``         — HTTPS URL of a video
-            - ``base64_data`` — raw base64-encoded video (without the ``data:`` prefix)
+        ``question`` defaults to a summarization request.
+        ``max_tokens`` controls response length (default: 16384).
+        """
+        return await _run_media_tool(
+            messages_url,
+            "pdf",
+            get_pdf,
+            path,
+            url,
+            base64_data,
+            "application/pdf",
+            question,
+            max_tokens,
+        )
 
-            ``media_type`` is only used with ``base64_data`` (default: ``video/mp4``).
-            ``question`` defaults to a general description request.
-            ``max_tokens`` controls response length (default: 16384).
-            """
-            current_model = get_video()
-            if not current_model:
-                return "Error: video_model is not configured."
-
-            if path:
-                p = Path(path).expanduser().resolve()
-                if not p.exists():
-                    return f"Error: file not found: {p}"
-                mt = _normalize_media_type(mimetypes.guess_type(str(p))[0]) or media_type
-                with open(p, "rb") as fh:
-                    b64 = base64.b64encode(fh.read()).decode()
-                block = {"type": "video", "source": {"type": "base64", "media_type": mt, "data": b64}}
-            elif url:
-                block = {"type": "video", "source": {"type": "url", "url": url}}
-            elif base64_data:
-                block = {"type": "video", "source": {"type": "base64", "media_type": media_type, "data": base64_data}}
-            else:
-                return "Error: provide one of path, url, or base64_data."
-
-            try:
-                return await _call_model_streaming(messages_url, current_model, [block], question, max_tokens)
-            except httpx.HTTPStatusError as exc:
-                return f"Router error {exc.response.status_code}: {exc.response.text[:500]}"
-            except Exception as exc:
-                return f"Error: {exc}"
-
+    mcp._media_tool_defs = {
+        "image_understanding": {"getter": get_image, "fn": image_understanding},
+        "audio_understanding": {"getter": get_audio, "fn": audio_understanding},
+        "video_understanding": {"getter": get_video, "fn": video_understanding},
+        "pdf_understanding": {"getter": get_pdf, "fn": pdf_understanding},
+    }
+    mcp._media_active_tools = set()
+    sync_media_mcp_tools(mcp)
     return mcp
 
 
@@ -333,27 +363,26 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--image-model", default=None, help="Image model in provider/model format")
     parser.add_argument("--audio-model", default=None, help="Audio model in provider/model format")
     parser.add_argument("--video-model", default=None, help="Video model in provider/model format")
+    parser.add_argument("--pdf-model", default=None, help="PDF model in provider/model format")
     parser.add_argument(
         "--router-url", default="http://127.0.0.1:8080",
         help="Base URL of the running router (default: http://127.0.0.1:8080)",
     )
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=8081, help="Port for the MCP SSE server (default: 8081)")
+    parser.add_argument("--port", type=int, default=8081, help="Port for the MCP Streamable HTTP server (default: 8081)")
     args = parser.parse_args(argv)
-
-    if not any([args.image_model, args.audio_model, args.video_model]):
-        parser.error("At least one of --image-model, --audio-model, --video-model must be provided")
 
     media_mcp = create_media_mcp(
         router_url=args.router_url,
         image_model=args.image_model,
         audio_model=args.audio_model,
         video_model=args.video_model,
+        pdf_model=args.pdf_model,
     )
     mcp_app = media_mcp.streamable_http_app()
 
-    tools = [t for t, m in [("image", args.image_model), ("audio", args.audio_model), ("video", args.video_model)] if m]
-    print(f"Media MCP server → {args.host}:{args.port}/mcp  (tools: {', '.join(tools)})")
+    tools = sync_media_mcp_tools(media_mcp)
+    print(f"Media MCP server → {args.host}:{args.port}/mcp  (tools: {', '.join(tools) or 'none'})")
     uvicorn.run(mcp_app, host=args.host, port=args.port, log_config=None)
 
 

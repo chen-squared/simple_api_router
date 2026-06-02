@@ -968,24 +968,31 @@ class TestRouterConfigMultimodalityParsing(unittest.TestCase):
 # ===========================================================================
 
 class TestCreateMediaMcp(unittest.TestCase):
+    def _run_async(self, coro):
+        try:
+            return asyncio.run(coro)
+        finally:
+            asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
-    def test_raises_when_all_models_none(self):
-        from simple_api_router.mcp_media import create_media_mcp
-        with self.assertRaises(ValueError):
-            create_media_mcp("http://localhost:8080")
+    def _tool_names(self, mcp):
+        return sorted(tool.name for tool in self._run_async(mcp.list_tools()))
 
-    def test_raises_with_explicit_none_models(self):
+    def test_creates_with_no_models_and_exposes_no_tools(self):
         from simple_api_router.mcp_media import create_media_mcp
-        with self.assertRaises(ValueError):
-            create_media_mcp("http://localhost:8080", image_model=None, audio_model=None, video_model=None)
+        from mcp.server.fastmcp import FastMCP
+
+        mcp = create_media_mcp("http://localhost:8080")
+        self.assertIsInstance(mcp, FastMCP)
+        self.assertEqual(self._tool_names(mcp), [])
 
     def test_creates_with_image_model_only(self):
         from simple_api_router.mcp_media import create_media_mcp
         from mcp.server.fastmcp import FastMCP
         mcp = create_media_mcp("http://localhost:8080", image_model="vision/gpt-4o")
         self.assertIsInstance(mcp, FastMCP)
+        self.assertEqual(self._tool_names(mcp), ["image_understanding"])
 
-    def test_creates_with_all_three_models(self):
+    def test_creates_with_all_four_models(self):
         from simple_api_router.mcp_media import create_media_mcp
         from mcp.server.fastmcp import FastMCP
         mcp = create_media_mcp(
@@ -993,16 +1000,68 @@ class TestCreateMediaMcp(unittest.TestCase):
             image_model="google/gemini-flash",
             audio_model="openai/gpt-4o-audio",
             video_model="google/gemini-flash",
+            pdf_model="openai/gpt-4.1",
         )
         self.assertIsInstance(mcp, FastMCP)
+        self.assertEqual(
+            self._tool_names(mcp),
+            ["audio_understanding", "image_understanding", "pdf_understanding", "video_understanding"],
+        )
 
-    def test_callable_model_accepted(self):
-        """create_media_mcp accepts a zero-arg callable for hot-reload support."""
-        from simple_api_router.mcp_media import create_media_mcp
+    def test_sync_media_mcp_tools_hot_updates_tool_list(self):
+        """Configured media tools should appear and disappear on sync."""
+        from simple_api_router.mcp_media import create_media_mcp, sync_media_mcp_tools
         from mcp.server.fastmcp import FastMCP
-        model_name = ["vision/gpt-4o"]
-        mcp = create_media_mcp("http://localhost:8080", image_model=lambda: model_name[0])
+
+        state = {"image": None, "pdf": None}
+        mcp = create_media_mcp(
+            "http://localhost:8080",
+            image_model=lambda: state["image"],
+            pdf_model=lambda: state["pdf"],
+        )
         self.assertIsInstance(mcp, FastMCP)
+        self.assertEqual(self._tool_names(mcp), [])
+
+        state["image"] = "vision/gpt-4o"
+        sync_media_mcp_tools(mcp)
+        self.assertEqual(self._tool_names(mcp), ["image_understanding"])
+
+        state["pdf"] = "openai/gpt-4.1"
+        sync_media_mcp_tools(mcp)
+        self.assertEqual(self._tool_names(mcp), ["image_understanding", "pdf_understanding"])
+
+        state["image"] = None
+        sync_media_mcp_tools(mcp)
+        self.assertEqual(self._tool_names(mcp), ["pdf_understanding"])
+
+        state["pdf"] = None
+        sync_media_mcp_tools(mcp)
+        self.assertEqual(self._tool_names(mcp), [])
+
+
+class TestMediaMcpAppIntegration(unittest.TestCase):
+    def _run_async(self, coro):
+        try:
+            return asyncio.run(coro)
+        finally:
+            asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+
+    def test_app_media_mcp_tools_follow_live_config(self):
+        from simple_api_router.app import create_app
+        from simple_api_router.mcp_media import sync_media_mcp_tools
+
+        app = create_app(RouterConfig.model_validate({}))
+        with TestClient(app):
+            self.assertEqual(app.state.media_mcp_tools, [])
+
+            app.state.config.server.image_model = "google/gemini-2.5-flash"
+            app.state.config.server.pdf_model = "anthropic/claude-opus-4-5"
+            app.state.media_mcp_tools = sync_media_mcp_tools(app.state.media_mcp)
+
+            self.assertEqual(
+                sorted(tool.name for tool in self._run_async(app.state.media_mcp.list_tools())),
+                ["image_understanding", "pdf_understanding"],
+            )
 
 
 # ===========================================================================

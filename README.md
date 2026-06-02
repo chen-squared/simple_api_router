@@ -463,13 +463,13 @@ filters on the `recent` section.
 
 ## Media MCP Server
 
-When any of `server.image_model`, `server.audio_model`, `server.video_model`, or `server.pdf_model` is set, the router mounts an [MCP](https://modelcontextprotocol.io/) server at `/mcp` on the **same port** (Streamable HTTP transport). This exposes per-type understanding tools that let any MCP-capable client (e.g. Claude Code) ask questions about images, audio, video files, or PDFs.
+The router mounts an [MCP](https://modelcontextprotocol.io/) server at `/mcp` on the **same port** (Streamable HTTP transport). The exposed tool list is driven by `server.image_model`, `server.audio_model`, `server.video_model`, and `server.pdf_model`, so MCP-capable clients (e.g. Claude Code) will only see the understanding tools whose backing models are currently configured.
 
 Requests from the MCP tools go through the router's own `/v1/messages` endpoint, so they appear in usage logs and are subject to the same routing rules.
 
 ### Setup
 
-**1. Add any media model to `config.yaml`:**
+**1. Configure any media models you want in `config.yaml`:**
 
 ```yaml
 server:
@@ -480,7 +480,7 @@ server:
   pdf_model: "anthropic/claude-opus-4-5"        # enables pdf_understanding
 ```
 
-Restart the router once to mount the endpoint. After that, changing model names in config hot-reloads without restart.
+`/mcp` is always mounted. Adding, removing, or changing any of those four `server.*_model` values hot-reloads the available MCP tools without restarting the router.
 
 **2. Add to Claude Code (`~/.claude/settings.json`):**
 
@@ -545,6 +545,7 @@ python -m simple_api_router.mcp_media \
     --image-model google/gemini-2.5-flash \
     --audio-model openai/gpt-4o-audio-preview \
     --video-model google/gemini-2.5-flash \
+    --pdf-model anthropic/claude-opus-4-5 \
     --router-url http://localhost:8080 \
     --port 8081
 ```
@@ -696,7 +697,7 @@ simple_api_router/
   proxy.py            — Request routing, provider resolution, dispatch
   converter.py        — Anthropic ↔ OpenAI conversion (request/response/streaming)
   converter_google.py — Anthropic ↔ Google Gemini conversion (request/response/streaming)
-  mcp_media.py        — Media MCP server (image/audio/video understanding tools, mounted at /mcp)
+  mcp_media.py        — Media MCP server (image/audio/video/PDF understanding tools, mounted at /mcp)
   usage_db.py         — Per-request SQLite usage logging and query helpers
   usage_cli.py        — `usage` subcommand: load/aggregate/display usage stats
   service.py          — Service management (launchd / systemd install/start/stop/…)
