@@ -743,38 +743,52 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     # manager can be started inside the FastAPI lifespan context.
     # Use a list as a mutable reference so the lambdas pick up hot-reloaded
     # config values from app.state.config (set in lifespan, updated by watcher).
-    from .mcp_media import create_media_mcp, sync_media_mcp_tools
+    # The ``mcp`` package is optional — the router works fine without it,
+    # only /mcp is unavailable.
+    try:
+        from .mcp_media import create_media_mcp, sync_media_mcp_tools
+    except ImportError:
+        logger.warning(
+            "mcp package not installed; install \"mcp[cli]\" for /mcp media tools. "
+            "The router will work normally without it."
+        )
+        _media_mcp = None
+        _media_mcp_asgi = None
+        active_media_tools: list = []
 
-    _app_ref: list = []  # populated below after app is created
-    _media_mcp = create_media_mcp(
-        router_url=f"http://127.0.0.1:{config.server.port}",
-        image_model=lambda: (
-            _app_ref[0].state.config.server.image_model
-            if _app_ref else config.server.image_model
-        ),
-        audio_model=lambda: (
-            _app_ref[0].state.config.server.audio_model
-            if _app_ref else config.server.audio_model
-        ),
-        video_model=lambda: (
-            _app_ref[0].state.config.server.video_model
-            if _app_ref else config.server.video_model
-        ),
-        pdf_model=lambda: (
-            _app_ref[0].state.config.server.pdf_model
-            if _app_ref else config.server.pdf_model
-        ),
-    )
-    _media_mcp_asgi = _media_mcp.streamable_http_app()
-    active_media_tools = sync_media_mcp_tools(_media_mcp)
-    logger.info("Media MCP ready at /mcp  (tools: %s)", ", ".join(active_media_tools) or "none")
+        def _refresh_media_mcp(current_app: FastAPI) -> None:
+            pass
+    else:
+        _app_ref: list = []  # populated below after app is created
+        _media_mcp = create_media_mcp(
+            router_url=f"http://127.0.0.1:{config.server.port}",
+            image_model=lambda: (
+                _app_ref[0].state.config.server.image_model
+                if _app_ref else config.server.image_model
+            ),
+            audio_model=lambda: (
+                _app_ref[0].state.config.server.audio_model
+                if _app_ref else config.server.audio_model
+            ),
+            video_model=lambda: (
+                _app_ref[0].state.config.server.video_model
+                if _app_ref else config.server.video_model
+            ),
+            pdf_model=lambda: (
+                _app_ref[0].state.config.server.pdf_model
+                if _app_ref else config.server.pdf_model
+            ),
+        )
+        _media_mcp_asgi = _media_mcp.streamable_http_app()
+        active_media_tools = sync_media_mcp_tools(_media_mcp)
+        logger.info("Media MCP ready at /mcp  (tools: %s)", ", ".join(active_media_tools) or "none")
 
-    def _refresh_media_mcp(current_app: FastAPI) -> None:
-        current_tools = sync_media_mcp_tools(_media_mcp)
-        previous_tools = getattr(current_app.state, "media_mcp_tools", None)
-        current_app.state.media_mcp_tools = current_tools
-        if previous_tools is not None and previous_tools != current_tools:
-            logger.info("Media MCP tools updated at /mcp  (tools: %s)", ", ".join(current_tools) or "none")
+        def _refresh_media_mcp(current_app: FastAPI) -> None:
+            current_tools = sync_media_mcp_tools(_media_mcp)
+            previous_tools = getattr(current_app.state, "media_mcp_tools", None)
+            current_app.state.media_mcp_tools = current_tools
+            if previous_tools is not None and previous_tools != current_tools:
+                logger.info("Media MCP tools updated at /mcp  (tools: %s)", ", ".join(current_tools) or "none")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -797,7 +811,10 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
             )
             logger.info("Watching config file for changes: %s", config_path)
 
-        async with _media_mcp.session_manager.run():
+        if _media_mcp is not None:
+            async with _media_mcp.session_manager.run():
+                yield
+        else:
             yield
 
         if watch_task is not None:
@@ -1719,7 +1736,8 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
     # Media MCP — mount LAST so FastAPI routes take priority.
     # session_manager is started in lifespan above.
     # ------------------------------------------------------------------
-    _app_ref.append(app)          # let the lambdas above read live config
-    app.mount("/", _media_mcp_asgi)
+    if _media_mcp is not None:
+        _app_ref.append(app)          # let the lambdas above read live config
+        app.mount("/", _media_mcp_asgi)
 
     return app
