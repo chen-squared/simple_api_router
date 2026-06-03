@@ -31,6 +31,7 @@ dependencies = [
     "pydantic>=2.0",
     "anyio>=4.0",
     "watchfiles>=0.21",
+    "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -38,9 +39,6 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "requests>=2.31",
-]
-mcp = [
-    "mcp>=1.0.0",
 ]
 
 [project.scripts]
