@@ -963,17 +963,10 @@ class TestRouterConfigMultimodalityParsing(unittest.TestCase):
         self.assertIsNone(entry.image_fallback)
 
 
-try:
-    from mcp.server.fastmcp import FastMCP as _FastMCP
-    _mcp_available = True
-except ImportError:
-    _mcp_available = False
-
 # ===========================================================================
 # create_media_mcp factory
 # ===========================================================================
 
-@unittest.skipUnless(_mcp_available, "mcp package not installed")
 class TestCreateMediaMcp(unittest.TestCase):
     def _run_async(self, coro):
         try:
@@ -1046,7 +1039,6 @@ class TestCreateMediaMcp(unittest.TestCase):
         self.assertEqual(self._tool_names(mcp), [])
 
 
-@unittest.skipUnless(_mcp_available, "mcp package not installed")
 class TestMediaMcpAppIntegration(unittest.TestCase):
     def _run_async(self, coro):
         try:
