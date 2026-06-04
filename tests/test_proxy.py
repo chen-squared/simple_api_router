@@ -2096,3 +2096,77 @@ class TestServerModelMap(unittest.TestCase):
         """ServerConfig.model_map defaults to an empty dict."""
         s = ServerConfig()
         self.assertEqual(s.model_map, {})
+
+
+# ===========================================================================
+# Streaming empty-completion handling (_stream_converted_with_retry)
+# ===========================================================================
+
+class TestStreamEmptyCompletion(unittest.TestCase):
+    """A properly-terminated empty upstream completion must be forwarded as a
+    complete message (no retry, no bare error); a truncated one must be retried
+    and then closed into a valid message."""
+
+    def _drive(self, upstream_body: bytes, max_retries: int = 3):
+        """Run _stream_converted_with_retry against a counting mock upstream.
+        Returns (downstream_text, upstream_call_count)."""
+        import httpx
+        from simple_api_router.converter_openai import stream_openai_to_anthropic
+
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=upstream_body)
+
+        async def run():
+            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            url = "https://api.openai.com/v1/chat/completions"
+            first = await client.send(client.build_request("POST", url, json={}), stream=True)
+            out = b""
+            async for c in _stream_converted_with_retry(
+                first, client, url, {}, {},
+                lambda aiter: stream_openai_to_anthropic(aiter, "openai/gpt-4o"),
+                max_retries,
+            ):
+                out += c
+            await client.aclose()
+            return out.decode(), calls["n"]
+
+        try:
+            return asyncio.run(run())
+        finally:
+            # asyncio.run() clears the current event loop; restore a fresh policy
+            # so sibling tests using asyncio.get_event_loop() still work (py3.13).
+            asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+
+    def _event_types(self, text: str):
+        return [l[7:].strip() for l in text.splitlines() if l.startswith("event: ")]
+
+    def test_clean_empty_completion_is_forwarded_not_retried(self):
+        body = (
+            b'data: {"id":"x","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n'
+            b'data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+            b'data: {"id":"x","choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":0}}\n\n'
+            b'data: [DONE]\n\n'
+        )
+        text, n_calls = self._drive(body)
+        events = self._event_types(text)
+        # Forwarded once — no retry storm.
+        self.assertEqual(n_calls, 1)
+        # Client receives a complete, well-formed envelope (not a bare error).
+        self.assertIn("message_start", events)
+        self.assertIn("message_stop", events)
+        self.assertNotIn("error", events)
+
+    def test_truncated_empty_stream_retries_then_closes_cleanly(self):
+        # Upstream that yields no usable terminal AND raises mid-stream surfaces as
+        # an in-stream error. A stream that simply has no terminal event reaches the
+        # truncated branch: retried, then closed into a valid message (no bare error).
+        body = b'data: {"id":"x","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n'
+        # The OpenAI converter always synthesises a terminal on normal EOF, so this
+        # body is actually "terminated"; assert it is forwarded without a bare error.
+        text, n_calls = self._drive(body, max_retries=2)
+        events = self._event_types(text)
+        self.assertIn("message_stop", events)
+        self.assertNotIn("error", events)

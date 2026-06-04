@@ -358,26 +358,36 @@ async def _stream_converted_with_retry(
                 buffer.clear()
 
         if not early_error:
-            # If no real content arrived (committed=False), treat as retryable —
-            # upstream returned 200 with an empty body (0/0 tokens, no content blocks).
-            if not committed and attempt < max_retries:
-                logger.warning(
-                    "Stream completed without content from %s — events: [%s] — retrying %d/%d in %.1fs",
-                    url, _buffer_event_summary(buffer), attempt + 1, max_retries, _backoff(attempt),
-                )
-                await asyncio.sleep(_backoff(attempt))
-                # buffer (preamble) is discarded; resp already closed by _stream_converted
-                continue
-            # Retries exhausted with empty response — return error instead of empty preamble.
             if not committed:
+                # No content blocks arrived. Distinguish a *properly terminated*
+                # empty completion (a message_stop / message_delta with a real
+                # stop_reason, just 0 content — a legitimate "the model said
+                # nothing" answer) from a *truncated* stream that ended without any
+                # terminal event (a broken upstream). Legit empty → forward the
+                # envelope as-is. Truncated → retry, then finish it cleanly.
+                if _buffer_has_terminal(buffer):
+                    for c in buffer:
+                        yield c
+                    return
+                if attempt < max_retries:
+                    logger.warning(
+                        "Stream truncated without terminal from %s — events: [%s] — retrying %d/%d in %.1fs",
+                        url, _buffer_event_summary(buffer), attempt + 1, max_retries, _backoff(attempt),
+                    )
+                    await asyncio.sleep(_backoff(attempt))
+                    # buffer (preamble) is discarded; resp already closed by _stream_converted
+                    continue
+                # Retries exhausted on a truncated stream — finish the message with a
+                # complete terminal so the client gets a well-formed turn instead of a
+                # bare error event (which clients like Claude Code silently drop).
                 logger.error(
-                    "All %d attempts returned empty response from %s — events: [%s]",
+                    "All %d attempts truncated without terminal from %s — events: [%s]",
                     max_retries + 1, url, _buffer_event_summary(buffer),
                 )
-                yield _sse_bytes("error", {
-                    "type": "error",
-                    "error": {"type": "api_error", "message": "Upstream returned empty response after retries"},
-                })
+                for c in buffer:
+                    yield c
+                for c in _close_truncated_stream(buffer):
+                    yield c
                 return
             # Normal completion — flush buffer.
             for c in buffer:
@@ -403,6 +413,64 @@ def _sse_event_type(chunk: bytes) -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def _buffer_has_terminal(buffer: List[bytes]) -> bool:
+    """True if the buffered Anthropic SSE already contains a stream terminator:
+    a ``message_stop`` event, or a ``message_delta`` carrying a non-null
+    ``stop_reason``. Used to tell a legitimate empty completion (normal ending,
+    0 content) apart from a truncated stream that died before finishing.
+    """
+    for chunk in buffer:
+        try:
+            for line in chunk.decode(errors="replace").split("\n"):
+                if not line.startswith("data: "):
+                    continue
+                evt = json.loads(line[6:])
+                if evt.get("type") == "message_stop":
+                    return True
+                if evt.get("type") == "message_delta" and (evt.get("delta") or {}).get("stop_reason") is not None:
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def _close_truncated_stream(buffer: List[bytes]) -> List[bytes]:
+    """Events that turn a truncated (terminator-less) empty stream into a valid,
+    complete Anthropic message, so the client receives a well-formed turn instead
+    of a bare error event (which clients silently drop). Adds a ``message_start``
+    only if the buffer didn't already emit one.
+    """
+    notice = "[Upstream returned a truncated empty response after retries.]"
+    events: List[bytes] = []
+    if not any(_sse_event_type(c) == "message_start" for c in buffer):
+        events.append(_sse_bytes("message_start", {
+            "type": "message_start",
+            "message": {
+                "id": f"msg_{secrets.token_hex(6)}", "type": "message", "role": "assistant",
+                "model": "", "content": [], "stop_reason": None, "stop_sequence": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            },
+        }))
+    events += [
+        _sse_bytes("content_block_start", {
+            "type": "content_block_start", "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        }),
+        _sse_bytes("content_block_delta", {
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": notice},
+        }),
+        _sse_bytes("content_block_stop", {"type": "content_block_stop", "index": 0}),
+        _sse_bytes("message_delta", {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+            "usage": {"output_tokens": 0},
+        }),
+        _sse_bytes("message_stop", {"type": "message_stop"}),
+    ]
+    return events
 
 
 def _buffer_event_summary(buffer: List[bytes]) -> str:
