@@ -54,3 +54,6 @@ router.log
 .DS_Store
 Thumbs.db
 router.log*
+
+# Working notes (local scratch)
+notes/
