@@ -676,6 +676,36 @@ Client sends `model: "myapi/fast"`; backend receives `gpt-4o-mini`.
 | `tools` | `functionDeclarations` |
 | `tool_choice` | `functionCallingConfig` (AUTO / NONE / ANY / specific) |
 
+### Mid-conversation system messages
+
+Anthropic's Messages API supports **mid-conversation system messages** —
+`{"role": "system"}` entries placed *inside* the `messages` array (not just the
+top-level `system` field). Claude Code uses these to relay a message the user
+typed **while the model was still working** (it appears right after a tool
+result as *"The user sent a new message while you were working: …"*).
+
+- **Anthropic backend (passthrough):** these are forwarded **verbatim** — the
+  feature works natively on models that support it (e.g. Claude Opus 4.8).
+- **Converted backends (`openai_chat` / `openai_responses` / `google`):** the
+  target models have no equivalent, and a non-leading `system` message is
+  unreliable there — weaker models silently ignore it, and some strict
+  OpenAI-compatible providers (e.g. MiniMax) **reject the whole request**
+  (`invalid message role: system`). So the router **folds each mid-conversation
+  `system` message into the adjacent `user` turn** as plain text, preserving its
+  order and full content.
+
+  Concretely, a `system` message is merged into the **preceding** `user`/tool-result
+  turn (where Anthropic requires it to sit); if there is no preceding user turn it
+  is prepended to the next one. Merging (rather than emitting a standalone `user`
+  message) guarantees the request never contains two consecutive same-role turns,
+  which backends like `deepseek-reasoner` and Gemini reject.
+
+  **Effect you will observe:** with a converted backend, an operator/queued
+  message keeps full **content** but loses its system-level **priority** (it is
+  seen as user input). The model still receives it at the correct position in the
+  conversation; whether it acts on it immediately or after finishing the current
+  task depends on the model. The top-level `system` field is never affected.
+
 ---
 
 ## Development

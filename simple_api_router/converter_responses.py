@@ -21,6 +21,7 @@ from .converter import (
 from .converter_openai import _tool_result_content
 from .converter_utils import (
     is_anthropic_server_tool as _is_anthropic_server_tool,
+    fold_midstream_system_into_user as _fold_midstream_system_into_user,
     sse as _sse_bytes,
     thinking_close_events as _thinking_close_events,
 )
@@ -50,7 +51,7 @@ def _messages_to_responses_input(messages: List[Dict]) -> List[Dict[str, Any]]:
     """Convert Anthropic messages to the Responses API ``input`` array."""
     result: List[Dict[str, Any]] = []
 
-    for msg in messages:
+    for msg in _fold_midstream_system_into_user(messages):
         role = msg.get("role", "user")
         content = msg.get("content", [])
 

@@ -21,6 +21,7 @@ from .converter import (
 )
 from .converter_utils import (
     is_anthropic_server_tool as _is_anthropic_server_tool,
+    fold_midstream_system_into_user as _fold_midstream_system_into_user,
     sse as _sse_bytes,
     thinking_close_events as _thinking_close_events,
 )
@@ -64,7 +65,7 @@ def anthropic_to_openai_request(
                 messages.append({"role": "system", "content": merged})
 
     # --- conversation messages ---
-    for msg in body.get("messages", []):
+    for msg in _fold_midstream_system_into_user(body.get("messages", [])):
         role = msg["role"]
         content = msg.get("content", [])
 

@@ -15,6 +15,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 from .converter_utils import (
     ANTHROPIC_SERVER_TOOL_RE as _ANTHROPIC_SERVER_TOOL_RE,
     is_anthropic_server_tool as _is_anthropic_server_tool,
+    fold_midstream_system_into_user as _fold_midstream_system_into_user,
     sse as _sse,
     thinking_close_events as _google_thinking_close_events,
 )
@@ -220,7 +221,7 @@ def _content_block_to_gemini_part(
 
 def anthropic_to_google_request(body: Dict[str, Any], model: str) -> Dict[str, Any]:
     """Convert an Anthropic Messages request body to Google Gemini generateContent format."""
-    messages: List[Dict[str, Any]] = body.get("messages", [])
+    messages: List[Dict[str, Any]] = _fold_midstream_system_into_user(body.get("messages", []))
     tool_id_map = _build_tool_id_map(messages)
 
     # Build contents list
