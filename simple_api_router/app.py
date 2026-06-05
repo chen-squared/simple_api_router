@@ -721,12 +721,28 @@ async def _watch_config(
         async for _ in awatch(str(config_path)):
             new_config = await _try_load_config(config_path, logger)
             if new_config is not None:
+                old_config = app.state.config
                 app.state.config = new_config
                 if on_reload is not None:
                     on_reload(app)
+                _reapply_debug_log(old_config, new_config, logger)
                 logger.info("Config reloaded from %s", config_path)
     except asyncio.CancelledError:
         pass
+
+
+def _reapply_debug_log(old_config: Optional[RouterConfig], new_config: RouterConfig, logger) -> bool:
+    """(Re)apply the debug_log setting from config. Enables, disables, or
+    re-paths the debug logger. No-op (and silent) when the value is unchanged.
+    Returns True if the setting changed.
+    """
+    old_debug = old_config.server.debug_log if old_config is not None else None
+    new_debug = new_config.server.debug_log
+    if new_debug == old_debug:
+        return False
+    configure_debug_log(new_debug)  # None/"" disables
+    logger.info("Debug logging %s", f"enabled → {new_debug}" if new_debug else "disabled")
+    return True
 
 
 def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> FastAPI:
@@ -735,9 +751,7 @@ def create_app(config: RouterConfig, config_path: Optional[Path] = None) -> Fast
         log_file=config.server.log_file,
     )
     setup_usage_db(LOG_DIR / "router_usage.db")
-    if config.server.debug_log:
-        configure_debug_log(config.server.debug_log)
-        logger.info("Debug logging enabled → %s", config.server.debug_log)
+    _reapply_debug_log(None, config, logger)
 
     # Create media MCP instance early (before lifespan) so its session
     # manager can be started inside the FastAPI lifespan context.

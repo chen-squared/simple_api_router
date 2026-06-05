@@ -28,9 +28,16 @@ _lock = threading.Lock()
 _path: Optional[Path] = None
 
 
-def configure(path: str) -> None:
-    """Set the debug log file path. Creates parent directories if needed."""
+def configure(path: Optional[str]) -> None:
+    """Set the debug log file path, or pass None/"" to disable logging.
+
+    Creates parent directories if needed. Safe to call repeatedly (e.g. on
+    config hot-reload) to enable, disable, or re-path the debug log.
+    """
     global _path
+    if not path:
+        _path = None
+        return
     _path = Path(path)
     _path.parent.mkdir(parents=True, exist_ok=True)
 
