@@ -192,13 +192,70 @@ def infer_pricing(model_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
     p: Dict[str, Any] = {
         "currency": "USD",
-        "input": float(cost["input"]),
-        "output": float(cost["output"]),
     }
-    if "cache_read" in cost:
-        p["cache_read"] = float(cost["cache_read"])
-    if "cache_write" in cost:
-        p["cache_write"] = float(cost["cache_write"])
+
+    tiers_raw = cost.get("tiers")
+    if tiers_raw and isinstance(tiers_raw, list) and len(tiers_raw) > 0:
+        # Build a tiers list: base rates + each tier from the source data.
+        # The config-side PricingEntry ignores flat input/output when tiers is
+        # present, so we fold everything into the tiers list.
+        tiers: List[Dict[str, Any]] = []
+
+        # Base tier (threshold=0) from top-level pricing if available.
+        base_input = cost.get("input")
+        base_output = cost.get("output")
+        if base_input is not None and base_output is not None:
+            base_tier: Dict[str, Any] = {
+                "threshold": 0,
+                "input": float(base_input),
+                "output": float(base_output),
+            }
+            cr = cost.get("cache_read")
+            if cr is not None:
+                base_tier["cache_read"] = float(cr)
+            cw = cost.get("cache_write")
+            if cw is not None:
+                base_tier["cache_write"] = float(cw)
+            tiers.append(base_tier)
+
+        # Additional tiers — map models.dev tier.size → PricingTier.threshold
+        for t in tiers_raw:
+            if not isinstance(t, dict) or "input" not in t or "output" not in t:
+                continue
+            ti = t.get("tier") or {}
+            size = ti.get("size", 0) if isinstance(ti, dict) else 0
+            threshold = int(size) if isinstance(size, (int, float)) else 0
+
+            tier_entry: Dict[str, Any] = {
+                "threshold": threshold,
+                "input": float(t["input"]),
+                "output": float(t["output"]),
+            }
+            if "cache_read" in t:
+                tier_entry["cache_read"] = float(t["cache_read"])
+            if "cache_write" in t:
+                tier_entry["cache_write"] = float(t["cache_write"])
+            tiers.append(tier_entry)
+
+        # Sort by threshold ascending so the 0-tier comes first.
+        tiers.sort(key=lambda x: x["threshold"])
+        p["tiers"] = tiers
+    else:
+        # Flat pricing (no tiers) — current behaviour.
+        base_input = cost.get("input")
+        base_output = cost.get("output")
+        if base_input is None or base_output is None:
+            return None
+        p["input"] = float(base_input)
+        p["output"] = float(base_output)
+
+        cr = cost.get("cache_read")
+        if cr is not None:
+            p["cache_read"] = float(cr)
+        cw = cost.get("cache_write")
+        if cw is not None:
+            p["cache_write"] = float(cw)
+
     return p
 
 
@@ -382,6 +439,9 @@ def list_models(provider_id: str, provider_data: Dict[str, Any]) -> None:
                 parts.append(f"cr={cost['cache_read']:.2f}")
             if cost.get("cache_write") is not None:
                 parts.append(f"cw={cost['cache_write']:.2f}")
+            tiers = cost.get("tiers")
+            if tiers and isinstance(tiers, list) and len(tiers) > 0:
+                parts.append(f"+{len(tiers)}tier")
             cost_str = " ".join(parts)
         else:
             cost_str = GREY + "n/a" + RESET
