@@ -24,7 +24,9 @@ from simple_api_router.proxy import (
     _graceful_stream_termination,
     _stream_converted_with_retry,
     _upstream_error_sse,
+    count_tokens_request,
     parse_model,
+    prepare_request_body,
     resolve_provider,
 )
 
@@ -305,11 +307,115 @@ class TestParseModel(unittest.TestCase):
             return MagicMock()
 
         with patch("simple_api_router.proxy._proxy_openai", side_effect=fake_proxy):
-            asyncio.get_event_loop().run_until_complete(route_request(fake_request, body, config, MagicMock()))
+            asyncio.run(route_request(fake_request, body, config, MagicMock()))
 
         logged_model = fake_request.state.usage_meta["model"]
         self.assertNotIn("[1m]", logged_model, "usage_meta should not contain bracket suffixes")
         self.assertEqual(logged_model, "openai/gpt-4o")
+
+
+# ---------------------------------------------------------------------------
+# prepare_request_body + count_tokens alignment
+# ---------------------------------------------------------------------------
+
+class TestCountTokensAlignment(unittest.TestCase):
+    def test_prepare_request_body_resolves_model_map(self):
+        ep = EndpointConfig(models=["claude-opus-4-5"])
+        prov = ProviderConfig(api_key="sk-test", endpoints={"anthropic": ep})
+        config = RouterConfig(
+            server=ServerConfig(model_map={"claude": "anthropic/claude-opus-4-5"}),
+            providers={"anthropic": prov},
+        )
+        body = {
+            "model": "claude",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+        prepared, model_str, *_ = asyncio.run(
+            prepare_request_body(body, config, AsyncMock()),
+        )
+        self.assertEqual(model_str, "anthropic/claude-opus-4-5")
+        self.assertEqual(prepared["model"], "anthropic/claude-opus-4-5")
+
+    def test_count_tokens_uses_model_map_and_tiktoken_for_openai(self):
+        ep = EndpointConfig(models=["gpt-4o"])
+        prov = ProviderConfig(api_key="sk-test", endpoints={"openai_chat": ep})
+        config = RouterConfig(
+            server=ServerConfig(model_map={"fast": "openai/gpt-4o"}),
+            providers={"openai": prov},
+        )
+        fake_request = MagicMock()
+        fake_request.headers = {}
+        body = {
+            "model": "fast",
+            "messages": [{"role": "user", "content": "Hello there"}],
+        }
+
+        # Provider has no /v1/responses/input_tokens → fall back to tiktoken.
+        mock_client = AsyncMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.text = "not found"
+        mock_resp.request = MagicMock()
+        mock_client.post.return_value = mock_resp
+
+        response = asyncio.run(
+            count_tokens_request(fake_request, body, config, mock_client),
+        )
+        self.assertIsInstance(response, JSONResponse)
+        payload = json.loads(response.body)
+        self.assertIn("input_tokens", payload)
+        self.assertGreater(payload["input_tokens"], 5)
+        self.assertLess(payload["input_tokens"], 200)
+
+    def test_count_tokens_describes_unsupported_image_like_messages(self):
+        ep = EndpointConfig(models=[ModelEntry(name="deepseek-chat", multimodality=[])])
+        prov = ProviderConfig(api_key="sk-test", endpoints={"openai_chat": ep})
+        config = RouterConfig(
+            server=ServerConfig(image_fallback="openai/gpt-4o"),
+            providers={"openai": prov},
+        )
+        fake_request = MagicMock()
+        fake_request.headers = {}
+        body = {
+            "model": "openai/deepseek-chat",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "url", "url": "https://example.com/x.png"}},
+                    {"type": "text", "text": "describe"},
+                ],
+            }],
+        }
+
+        with patch(
+            "simple_api_router.proxy._describe_media_in_body",
+            new_callable=AsyncMock,
+        ) as mock_describe:
+            mock_describe.return_value = {
+                "model": "openai/deepseek-chat",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "[Image: a red square]"},
+                        {"type": "text", "text": "describe"},
+                    ],
+                }],
+            }
+            mock_client = AsyncMock()
+            mock_resp = MagicMock()
+            mock_resp.status_code = 404
+            mock_resp.text = "not found"
+            mock_resp.request = MagicMock()
+            mock_client.post.return_value = mock_resp
+
+            response = asyncio.run(
+                count_tokens_request(fake_request, body, config, mock_client),
+            )
+
+        mock_describe.assert_awaited_once()
+        payload = json.loads(response.body)
+        self.assertGreater(payload["input_tokens"], 0)
 
 
 # ---------------------------------------------------------------------------

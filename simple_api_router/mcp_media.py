@@ -41,6 +41,9 @@ from mcp.server.fastmcp import FastMCP
 
 MaybeGetter = Union[str, Callable[[], Optional[str]], None]
 
+# Align with Claude Code CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT default (5 minutes).
+_MCP_STREAM_READ_TIMEOUT = 300.0
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -129,7 +132,12 @@ async def _call_model_streaming(
             "content": content_blocks + [{"type": "text", "text": question}],
         }],
     }
-    timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=5.0)
+    timeout = httpx.Timeout(
+        connect=30.0,
+        read=_MCP_STREAM_READ_TIMEOUT,
+        write=30.0,
+        pool=5.0,
+    )
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream(
             "POST",

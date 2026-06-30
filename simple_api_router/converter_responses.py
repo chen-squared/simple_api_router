@@ -173,14 +173,18 @@ def anthropic_to_responses_request(
     output_config = body.get("output_config") or {}
     explicit_effort = body.get("effort") or output_config.get("effort")
     if thinking:
-        if thinking.get("type") == "adaptive":
+        thinking_type = thinking.get("type")
+        if thinking_type == "disabled":
+            pass  # omit reasoning — thinking is off
+        elif thinking_type == "adaptive":
             effort = _normalize_effort(explicit_effort or "high", max_reasoning_effort)
+            result["reasoning"] = {"effort": effort, "summary": "auto"}
         else:
             effort = _normalize_effort(
                 explicit_effort or _reasoning_effort_from_budget(thinking.get("budget_tokens", 8192)),
                 max_reasoning_effort,
             )
-        result["reasoning"] = {"effort": effort, "summary": "auto"}
+            result["reasoning"] = {"effort": effort, "summary": "auto"}
 
     # tools (skip Anthropic server tools like web_search, computer_use, etc.)
     tools = body.get("tools")

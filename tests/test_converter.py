@@ -587,6 +587,26 @@ class TestAnthropicToOpenAIExtended(unittest.TestCase):
         self.assertIn("real_tool", names)
         self.assertNotIn("BatchTool", names)
 
+    def test_computer_use_tool_filtered(self):
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "go"}],
+            "tools": [
+                {"name": "real_tool", "description": "ok", "input_schema": {}},
+                {
+                    "name": "computer",
+                    "type": "computer_use_20250124",
+                    "description": "control computer",
+                    "input_schema": {},
+                },
+            ],
+        }
+        result = anthropic_to_openai_request(body, "gpt-4o")
+        names = [t["function"]["name"] for t in result["tools"]]
+        self.assertIn("real_tool", names)
+        self.assertNotIn("computer", names)
+
     def test_uri_format_stripped_from_tool_schema(self):
         body = {
             "model": "x",
@@ -652,6 +672,17 @@ class TestAnthropicToOpenAIExtended(unittest.TestCase):
         }
         self.assertEqual(anthropic_to_openai_request(body, "gpt-5.4").get("reasoning_effort"), "high")
         self.assertEqual(anthropic_to_openai_request(body, "deepseek-r1").get("reasoning_effort"), "high")
+
+    def test_disabled_thinking_omits_reasoning_effort(self):
+        """thinking.type == 'disabled' must not enable reasoning on converted backends."""
+        body = {
+            "model": "x",
+            "max_tokens": 1024,
+            "thinking": {"type": "disabled", "display": "omitted"},
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        result = anthropic_to_openai_request(body, "gpt-4o")
+        self.assertNotIn("reasoning_effort", result)
 
     def test_adaptive_thinking_with_output_config_effort(self):
         """output_config.effort overrides the adaptive default; 'max' maps to 'xhigh'."""
@@ -1846,6 +1877,16 @@ class TestResponsesAPIRequest(unittest.TestCase):
         }
         result = anthropic_to_responses_request(body, "gpt-5")
         self.assertEqual(result["reasoning"]["effort"], "medium")
+
+    def test_disabled_thinking_omits_reasoning_responses(self):
+        body = {
+            "model": "x",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Think"}],
+            "thinking": {"type": "disabled", "display": "omitted"},
+        }
+        result = anthropic_to_responses_request(body, "gpt-5")
+        self.assertNotIn("reasoning", result)
 
     def test_tool_choice_any_becomes_required(self):
         body = {
@@ -3613,6 +3654,28 @@ class TestGoogleConverter(unittest.TestCase):
                        and d.get("delta", {}).get("type") == "text_delta"]
         combined = "".join(d["delta"]["text"] for d in text_deltas)
         self.assertEqual(combined, "ABCDEF")
+
+
+class TestStreamIdlePing(unittest.TestCase):
+    def test_emits_ping_when_upstream_is_silent(self):
+        from simple_api_router.converter_utils import stream_with_idle_ping
+
+        async def _slow_source() -> AsyncIterator[bytes]:
+            yield b"event: message_start\ndata: {}\n\n"
+            await asyncio.sleep(0.05)
+            yield b"event: content_block_delta\ndata: {}\n\n"
+
+        async def _collect() -> list[bytes]:
+            out: list[bytes] = []
+            async for chunk in stream_with_idle_ping(_slow_source(), idle_seconds=0.02):
+                out.append(chunk)
+            return out
+
+        chunks = asyncio.run(_collect())
+        joined = b"".join(chunks)
+        self.assertIn(b"event: ping", joined)
+        self.assertIn(b"event: message_start", joined)
+        self.assertIn(b"event: content_block_delta", joined)
 
 
 if __name__ == "__main__":

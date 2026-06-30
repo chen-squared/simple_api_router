@@ -1,17 +1,23 @@
 """Shared SSE helpers used by both OpenAI and Google converters."""
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-from typing import Any, Dict, List
+from typing import Any, AsyncIterator, Dict, List
 
 # Anthropic server-executed tool types — handled by Anthropic's infrastructure
 # and must NOT be forwarded to third-party backends.  Pattern covers all versioned
 # variants, e.g. web_search_20260209, code_execution_20250522, mcp_toolset, etc.
 ANTHROPIC_SERVER_TOOL_RE = re.compile(
-    r"^(web_search|web_fetch|code_execution|mcp_toolset|advisor|tool_search_tool_|BatchTool)",
+    r"^(web_search|web_fetch|code_execution|computer_use|mcp_toolset|advisor|tool_search_tool_|BatchTool)",
     re.IGNORECASE,
 )
+
+# Emit a downstream ping when a converted stream is silent this long (seconds).
+# Claude Code's stream idle watchdog aborts after 5 minutes with no SSE events;
+# periodic pings keep long upstream thinking gaps alive.
+STREAM_IDLE_PING_SECONDS = 60.0
 
 
 def is_anthropic_server_tool(tool: Dict) -> bool:
@@ -96,6 +102,30 @@ def fold_midstream_system_into_user(messages: List[Dict[str, Any]]) -> List[Dict
 def sse(event: str, data: Any) -> bytes:
     """Encode a single SSE event as bytes."""
     return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
+
+
+async def stream_with_idle_ping(
+    source: AsyncIterator[bytes],
+    idle_seconds: float = STREAM_IDLE_PING_SECONDS,
+) -> AsyncIterator[bytes]:
+    """Wrap a converted SSE byte stream, emitting Anthropic pings during upstream silence."""
+    ait = source.__aiter__()
+    pending: asyncio.Task[Any] = asyncio.create_task(ait.__anext__())
+    try:
+        while True:
+            done, _ = await asyncio.wait({pending}, timeout=idle_seconds)
+            if not done:
+                yield sse("ping", {"type": "ping"})
+                continue
+            try:
+                chunk = pending.result()
+            except StopAsyncIteration:
+                break
+            yield chunk
+            pending = asyncio.create_task(ait.__anext__())
+    finally:
+        if not pending.done():
+            pending.cancel()
 
 
 def thinking_close_events(index: int) -> List[bytes]:

@@ -3,6 +3,24 @@
 ## [Unreleased]
 
 ### Added
+- **`prepare_request_body`** — shared preprocessing for `/v1/messages` and `/v1/messages/count_tokens` (model aliases, media fallback, placeholders)
+- **`token_count` module** — accurate non-Anthropic token counting: OpenAI `POST /v1/responses/input_tokens` (with tiktoken fallback), Gemini `countTokens`, tiktoken for Chat Completions
+- **Stream idle ping** — converted SSE streams emit Anthropic `ping` every 60s during upstream silence (keeps Claude Code's 5-minute stream watchdog alive)
+- **`tiktoken` dependency** — used for OpenAI Chat Completions estimates and local fallbacks
+
+### Fixed
+- **`thinking.type: disabled`** no longer maps to `reasoning_effort` / `reasoning` on converted OpenAI/Responses backends
+- **`computer_use` server tools** filtered from tool lists forwarded to non-Anthropic backends
+- **MCP media timeout** raised to 300s to align with Claude Code `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`
+- **`count_tokens` alignment** — uses the same body mutations as live routing so CC cache/context planning matches forwarded requests
+- **Streaming errors return correct HTTP status codes** — upstream 401/403/404 now propagate as the actual HTTP status instead of always 200
+- **Retry exhaustion returns last upstream status code** — persistent 429/503 now propagated correctly instead of always 502
+- **Unexpanded `${VAR}` placeholders raise at startup** — `load_config` detects unset env vars and raises `ValueError` listing all affected paths
+- **Dual auth headers for Anthropic-type providers** — both `x-api-key` and `Authorization: Bearer` sent (fixes ollama.com compatibility)
+- **Non-JSON upstream error bodies handled** — plain-text error responses no longer cause 500
+- **Cache token fallback** — if `cache_read`/`cache_write` pricing is absent, those tokens are billed at the `input` rate
+
+### Added
 - **Multi-format provider endpoints** — a single provider can now expose multiple API formats (`anthropic`, `openai_chat`, `openai_responses`, `google`) under one `api_key`. Each format has its own `base_url` and `models` list. Replaces the old flat `type`/`api_format` field on `ProviderConfig`.
 - **Google Gemini native format support** (`google` endpoint) — full bidirectional Anthropic ↔ Gemini `generateContent` conversion:
   - Text messages, system prompt → `systemInstruction`
@@ -21,14 +39,6 @@
 - **Service management CLI** (`install`, `uninstall`, `start`, `stop`, `restart`, `status`, `log`) — replaces `scripts/service.sh`; supports both macOS launchd and Linux systemd
 - `EndpointConfig` model with `base_url`, `models`, `model_map`, `deepseek_reasoning`, default URL resolution per format
 - `ProviderConfig.find_model()` — exact match first, wildcard (empty `models`) as fallback; duplicate model detection across endpoints
-
-### Fixed
-- **Streaming errors return correct HTTP status codes** — upstream 401/403/404 now propagate as the actual HTTP status instead of always 200
-- **Retry exhaustion returns last upstream status code** — persistent 429/503 now propagated correctly instead of always 502
-- **Unexpanded `${VAR}` placeholders raise at startup** — `load_config` detects unset env vars and raises `ValueError` listing all affected paths
-- **Dual auth headers for Anthropic-type providers** — both `x-api-key` and `Authorization: Bearer` sent (fixes ollama.com compatibility)
-- **Non-JSON upstream error bodies handled** — plain-text error responses no longer cause 500
-- **Cache token fallback** — if `cache_read`/`cache_write` pricing is absent, those tokens are billed at the `input` rate
 
 ## [0.1.0] — Initial Release
 

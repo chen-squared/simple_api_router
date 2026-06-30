@@ -106,7 +106,10 @@ def anthropic_to_openai_request(
     output_config = body.get("output_config") or {}
     explicit_effort = body.get("effort") or output_config.get("effort")  # "max"/"xhigh"/"high"/"medium"/"low"
     if thinking:
-        if thinking.get("type") == "adaptive":
+        thinking_type = thinking.get("type")
+        if thinking_type == "disabled":
+            pass  # omit reasoning_effort — thinking is off
+        elif thinking_type == "adaptive":
             # Respect explicit effort; default is "high" per Anthropic docs
             oai["reasoning_effort"] = _normalize_effort(explicit_effort or "high", max_reasoning_effort)
         else:

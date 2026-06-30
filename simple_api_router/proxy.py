@@ -26,6 +26,7 @@ from . import debug_log as _dlog
 from .converter import (
     is_deepseek_model,
 )
+from .converter_utils import stream_with_idle_ping
 from .converter_openai import (
     anthropic_to_openai_request,
     openai_to_anthropic_response,
@@ -38,6 +39,12 @@ from .converter_responses import (
     stream_responses_to_anthropic,
 )
 from .logger import get_logger
+from .token_count import (
+    count_google_tokens,
+    count_openai_chat_tokens,
+    count_openai_responses_api_tokens,
+    count_responses_tokens,
+)
 
 logger = get_logger("proxy")
 
@@ -225,7 +232,8 @@ async def _stream_converted(
             yield chunk
 
     try:
-        async for chunk in make_stream(_raw()):
+        converted = make_stream(_raw())
+        async for chunk in stream_with_idle_ping(converted):
             yield chunk
     except _UPSTREAM_ERRORS as exc:
         logger.warning("Upstream error mid-stream for %s: %s", url, exc)
@@ -1091,22 +1099,24 @@ def _build_openai_headers(api_key: str) -> Dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Main dispatcher
+# Shared request preparation (used by /v1/messages and /v1/messages/count_tokens)
 # ---------------------------------------------------------------------------
 
-async def route_request(
-    request: Request,
+async def prepare_request_body(
     body: Dict[str, Any],
     config: RouterConfig,
     client: httpx.AsyncClient,
-) -> Any:
-    """Route an Anthropic /v1/messages request to the appropriate backend."""
+) -> Tuple[Dict[str, Any], str, Optional[str], str, ProviderConfig, EndpointConfig, str, str]:
+    """Resolve routing and apply the same body mutations as ``route_request``.
+
+    Returns
+    -------
+    body, model_str, provider_name, model, provider, endpoint, api_format, backend_model
+    """
     model_str: str = body.get("model", "")
     if not model_str:
         raise HTTPException(status_code=400, detail="'model' field is required")
 
-    # Resolve server-level model alias (e.g. "claude" → "anthropic/claude-opus-4-5").
-    # Check after stripping bracket suffixes so "claude[1m]" still matches "claude".
     _alias_key = strip_model_suffixes(model_str)
     if config.server.model_map and _alias_key in config.server.model_map:
         resolved = config.server.model_map[_alias_key]
@@ -1116,16 +1126,13 @@ async def route_request(
 
     provider_name, model = parse_model(model_str)
     provider, endpoint, api_format, backend_model = resolve_provider(provider_name, model, config)
-    max_retries = config.server.max_retries
 
-    # Multimodal handling: for each media type in the request that the model
-    # doesn't natively support, auto-describe using the appropriate *_fallback.
     media_present = _media_types_in_body(body)
     if media_present:
         entry = endpoint.get_model_entry(model)
         supported = set(entry.multimodality)
         unsupported = media_present - supported
-        for mtype in sorted(unsupported):   # deterministic order
+        for mtype in sorted(unsupported):
             fallback = (
                 getattr(entry, f"{mtype}_fallback", None)
                 or getattr(config.server, f"{mtype}_fallback", None)
@@ -1149,8 +1156,6 @@ async def route_request(
                     )
                     body = _replace_media_with_placeholder(body, mtype)
                 elif mtype == "pdf":
-                    # PDF blocks will cause hard errors on non-PDF models; strip
-                    # them to a safe placeholder regardless of MCP configuration.
                     logger.info(
                         "model '%s' doesn't support pdf and no pdf_fallback or "
                         "pdf_model is configured; stripping binary document blocks",
@@ -1163,6 +1168,45 @@ async def route_request(
                         "and no %s_fallback or %s_model is configured — forwarding as-is",
                         model, mtype, mtype, mtype,
                     )
+
+    return body, model_str, provider_name, model, provider, endpoint, api_format, backend_model
+
+
+def _resolve_openai_conversion_options(
+    endpoint: EndpointConfig,
+    model: str,
+    backend_model: str,
+) -> Tuple[bool, str]:
+    """Return (use_reasoning_content, max_reasoning_effort) for OpenAI conversion."""
+    entry = endpoint.get_model_entry(model)
+    use_reasoning = (
+        entry.deepseek_reasoning
+        if entry.deepseek_reasoning is not None
+        else (
+            endpoint.deepseek_reasoning
+            if endpoint.deepseek_reasoning is not None
+            else is_deepseek_model(backend_model)
+        )
+    )
+    max_effort = endpoint.resolve_max_reasoning_effort(model)
+    return use_reasoning, max_effort
+
+
+# ---------------------------------------------------------------------------
+# Main dispatcher
+# ---------------------------------------------------------------------------
+
+async def route_request(
+    request: Request,
+    body: Dict[str, Any],
+    config: RouterConfig,
+    client: httpx.AsyncClient,
+) -> Any:
+    """Route an Anthropic /v1/messages request to the appropriate backend."""
+    (
+        body, model_str, provider_name, model, provider, endpoint, api_format, backend_model,
+    ) = await prepare_request_body(body, config, client)
+    max_retries = config.server.max_retries
 
     # Stash routing metadata so app.py can log usage after the response is done.
     # Use the clean "provider/model" form (bracket suffixes stripped) so pricing lookup works.
@@ -1291,19 +1335,10 @@ async def _proxy_openai(
     max_retries: int,
     debug_id: Optional[str] = None,
 ) -> Any:
-    # Precedence: model-level flag → endpoint-level flag → auto-detect from model name
     _, _req_model = parse_model(original_model)
-    _model_entry = endpoint.get_model_entry(_req_model)
-    use_reasoning = (
-        _model_entry.deepseek_reasoning
-        if _model_entry.deepseek_reasoning is not None
-        else (
-            endpoint.deepseek_reasoning
-            if endpoint.deepseek_reasoning is not None
-            else is_deepseek_model(backend_model)
-        )
+    use_reasoning, max_effort = _resolve_openai_conversion_options(
+        endpoint, _req_model, backend_model,
     )
-    max_effort = endpoint.resolve_max_reasoning_effort(_req_model)
 
     base_url = endpoint.resolve_base_url(api_format, provider.base_url)
     headers = _build_openai_headers(provider.api_key)
@@ -1468,16 +1503,17 @@ async def count_tokens_request(
 ) -> Any:
     """Handle POST /v1/messages/count_tokens.
 
-    For Anthropic backends the request is forwarded to the backend's own
-    count_tokens endpoint.  For OpenAI / Google backends (which have no
-    equivalent) we return a rough character-based estimate (~4 chars/token).
-    """
-    model_str: str = body.get("model", "")
-    if not model_str:
-        raise HTTPException(status_code=400, detail="'model' field is required")
+    Applies the same preprocessing as ``route_request`` (model aliases, media
+    fallback, placeholders) so token counts match the body actually forwarded.
 
-    provider_name, model = parse_model(model_str)
-    provider, endpoint, api_format, backend_model = resolve_provider(provider_name, model, config)
+    Anthropic backends use the provider's ``count_tokens`` API.  OpenAI Responses
+    backends prefer ``POST /v1/responses/input_tokens`` (official counter) with
+    tiktoken fallback.  OpenAI Chat backends use tiktoken (no official HTTP
+    count API for Chat Completions).  Google uses Gemini ``countTokens``.
+    """
+    (
+        body, model_str, provider_name, model, provider, endpoint, api_format, backend_model,
+    ) = await prepare_request_body(body, config, client)
 
     if api_format == "anthropic":
         patched = {**body, "model": backend_model}
@@ -1495,13 +1531,78 @@ async def count_tokens_request(
             raise HTTPException(status_code=resp.status_code, detail=detail)
         return JSONResponse(content=resp.json())
 
-    # Non-Anthropic backend: estimate from input size (~4 chars per token)
-    total_chars = len(json.dumps(body.get("messages", [])))
-    sys = body.get("system")
-    if sys:
-        total_chars += len(sys) if isinstance(sys, str) else len(json.dumps(sys))
-    if "tools" in body:
-        total_chars += len(json.dumps(body["tools"]))
-    estimated = max(1, total_chars // 4)
-    logger.debug("count_tokens model=%s: estimated %d tokens (non-Anthropic backend)", model_str, estimated)
+    use_reasoning, max_effort = _resolve_openai_conversion_options(
+        endpoint, model, backend_model,
+    )
+    base_url = endpoint.resolve_base_url(api_format, provider.base_url)
+    headers = _build_openai_headers(provider.api_key)
+
+    count_source = "local"
+
+    try:
+        if api_format == "google":
+            from .converter_google import anthropic_to_google_request
+
+            google_body = anthropic_to_google_request(body, backend_model)
+            estimated = await count_google_tokens(
+                google_body, backend_model, base_url, headers, client,
+            )
+            count_source = "google_api"
+        elif api_format == "openai_responses":
+            converted = anthropic_to_responses_request(
+                body, backend_model, max_reasoning_effort=max_effort,
+            )
+            try:
+                estimated = await count_openai_responses_api_tokens(
+                    converted, base_url, headers, client,
+                )
+                count_source = "openai_responses_api"
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (404, 405, 501):
+                    logger.debug(
+                        "responses/input_tokens unsupported for %s (%s); using tiktoken",
+                        base_url, exc.response.status_code,
+                    )
+                    estimated = count_responses_tokens(converted, backend_model)
+                    count_source = "tiktoken"
+                else:
+                    raise
+        else:
+            converted = anthropic_to_openai_request(
+                body,
+                backend_model,
+                use_reasoning_content=use_reasoning,
+                max_reasoning_effort=max_effort,
+            )
+            # Chat Completions has no official count endpoint.  Try the Responses
+            # counter when the provider implements it (OpenAI proper); otherwise tiktoken.
+            responses_body = anthropic_to_responses_request(
+                body, backend_model, max_reasoning_effort=max_effort,
+            )
+            try:
+                estimated = await count_openai_responses_api_tokens(
+                    responses_body, base_url, headers, client,
+                )
+                count_source = "openai_responses_api"
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (404, 405, 501):
+                    estimated = count_openai_chat_tokens(converted, backend_model)
+                    count_source = "tiktoken"
+                else:
+                    raise
+            except httpx.HTTPError:
+                estimated = count_openai_chat_tokens(converted, backend_model)
+                count_source = "tiktoken"
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=exc.response.text,
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Token count upstream error: {exc}") from exc
+
+    logger.debug(
+        "count_tokens model=%s backend=%s format=%s source=%s: %d tokens",
+        model_str, backend_model, api_format, count_source, estimated,
+    )
     return JSONResponse({"input_tokens": estimated})
