@@ -33,6 +33,7 @@ dependencies = [
     "watchfiles>=0.21",
     "mcp>=1.0.0",
     "tiktoken>=0.7.0",
+    "jinja2>=3.1.0",
 ]
 
 [project.optional-dependencies]
@@ -54,3 +55,6 @@ Issues = "https://github.com/chen-squared/simple_api_router/issues"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["simple_api_router*"]
+
+[tool.setuptools.package-data]
+simple_api_router = ["templates/**/*", "static/**/*"]

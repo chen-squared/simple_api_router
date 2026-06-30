@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Router Config</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='css/config.css') }}">
+</head>
+<body data-monaco-version="{{ monaco_version }}">
+  <h1>Simple API Router</h1>
+  <p class="subhead">Config: <code>{{ config_path }}</code></p>
+  <nav class="nav">
+    <a href="/stats">&#128202; Stats</a>
+    <a href="/config" class="active">&#9881; Config</a>
+    <a href="/health">&#129322; Health</a>
+  </nav>
+  <div class="layout" id="config-layout">
+    <div class="panel panel-models" id="config-models-panel">
+      <div class="panel-hdr">
+        <h2>Models</h2>
+        <button class="btn" id="test-all-btn" onclick="testAll()">Test All</button>
+      </div>
+      <div class="table-scroll-top" id="models-scroll-top" hidden>
+        <div class="table-scroll-top-inner" id="models-scroll-top-inner"></div>
+      </div>
+      <div class="table-wrap table-wrap-models" id="models-table-wrap">
+        <table id="models-table">
+          <thead>
+            <tr>
+              <th class="col-provider">Provider</th>
+              <th class="col-model">Model</th>
+              <th class="col-format">Format</th>
+              <th class="col-modality">Modality</th>
+              <th class="col-test">Test</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% if models %}
+            {% for model in models %}
+            <tr data-model="{{ model.full_id }}">
+              <td class="pc col-provider">{{ model.provider }}</td>
+              <td class="col-model">{{ model.name }}</td>
+              <td class="col-format"><code class="fmt-badge">{{ model.format }}</code></td>
+              <td class="col-modality">
+                <span class="badge bg">{{ modality_emoji.text }} text</span>
+                {% for mt in model.extra_modalities %}
+                <span class="badge bb">{{ modality_emoji[mt] }} {{ mt }}</span>
+                {% endfor %}
+              </td>
+              <td class="test-cell">
+                <div class="test-row">
+                  <button class="test-btn" onclick="testModel(this, '{{ model.full_id }}')">Test</button>
+                  <span class="test-result"></span>
+                </div>
+              </td>
+            </tr>
+            {% endfor %}
+            {% else %}
+            <tr><td colspan="5" class="empty">No models configured</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="layout-resizer" id="config-layout-resizer" role="separator" aria-orientation="vertical" aria-label="Resize panels"></div>
+    <div class="panel panel-editor">
+      <div class="panel-hdr"><h2>YAML Config</h2></div>
+      {% if not has_config_path %}
+      <p class="notice warn">Config path unknown — cannot save.</p>
+      {% endif %}
+      <div id="editor-wrap">
+        <div id="editor" style="display:none;"></div>
+        <textarea id="editor-fallback" spellcheck="false" placeholder="Loading..." style="display:none;"></textarea>
+      </div>
+      <div class="save-bar">
+        <button class="btn btn-primary" id="yaml-save-btn" onclick="saveYaml()"{% if not has_config_path %} disabled{% endif %}>Save YAML</button>
+        <button class="btn" onclick="fetch('/config/yaml').then(r=>r.text()).then(t=>_setEditorContent(t));">&#8635; Reload</button>
+        <span class="save-status" id="yaml-status"></span>
+      </div>
+    </div>
+  </div>
+  <script src="{{ url_for('static', path='js/config.js') }}"></script>
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@{{ monaco_version }}/min/vs/loader.js"></script>
+  <script src="{{ url_for('static', path='js/config-monaco.js') }}"></script>
+</body>
+</html>

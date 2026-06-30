@@ -1,0 +1,20 @@
+{% macro usage_row(label, row, row_class='', indent='') %}
+<tr{% if row_class %} class="{{ row_class }}"{% endif %}>
+  <td>{% if row_class in ('day-hdr', 'prov-hdr') %}<strong>{{ indent | safe }}{{ label }}</strong>{% else %}{{ indent | safe }}{{ label }}{% endif %}</td>
+  <td>{{ row.requests }}</td>
+  <td>{{ row.input_tokens | fmt_tokens }}</td>
+  <td>{{ row.output_tokens | fmt_tokens }}</td>
+  <td>{{ row.cache_write_tokens | fmt_tokens }}</td>
+  <td>{{ row.cache_read_tokens | fmt_tokens }}</td>
+  <td>{{ row.cost_cny | fmt_cost('¥') }}</td>
+  <td>{{ row.cost_usd | fmt_cost('$') }}</td>
+</tr>
+{% endmacro %}
+
+{% macro hidden_inputs(params, exclude=()) %}
+{% for key, value in params.items() %}
+{% if key not in exclude and value %}
+<input type="hidden" name="{{ key }}" value="{{ value }}">
+{% endif %}
+{% endfor %}
+{% endmacro %}

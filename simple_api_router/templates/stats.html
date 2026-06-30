@@ -1,0 +1,189 @@
+{% from "macros.html" import usage_row, hidden_inputs %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Router Stats</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='css/stats.css') }}">
+</head>
+<body>
+  <div class="top">
+    <div>
+      <h1 style="margin:0 0 6px 0;font-size:28px;">Usage Stats</h1>
+      <div class="muted">{{ period.label }}</div>
+    </div>
+    <div class="top-links">
+      <a class="tab-link" href="{{ urls.data_json }}">JSON data</a>
+      <a class="tab-link" href="/config">Config</a>
+    </div>
+  </div>
+  <div class="ctrl-row">
+    <div class="tab-group">
+      <a class="tab{% if period.mode == 'days' and days == 1 %} active{% endif %}" href="{{ urls.period(1) }}">Today</a>
+      <a class="tab{% if period.mode == 'days' and days == 7 %} active{% endif %}" href="{{ urls.period(7) }}">7 days</a>
+      <a class="tab{% if period.mode == 'days' and days == 30 %} active{% endif %}" href="{{ urls.period(30) }}">30 days</a>
+      <form class="ctrl-form" method="GET" action="/stats">
+        {{ hidden_inputs(base_query, ('days', 'from', 'to', 'page')) }}
+        <span class="ctrl-label">Last</span>
+        <input type="number" name="days" value="{{ days }}" min="1" max="365" placeholder="days">
+        <span class="ctrl-label">days</span>
+        <button type="submit">Go</button>
+      </form>
+      <form class="ctrl-form" method="GET" action="/stats">
+        {{ hidden_inputs(base_query, ('from', 'to', 'page')) }}
+        <span class="ctrl-label">From</span>
+        <input type="date" name="from" value="{{ period.date_from or period.day }}">
+        <span class="ctrl-label">To</span>
+        <input type="date" name="to" value="{{ period.date_to or period.day }}">
+        <button type="submit">Go</button>
+      </form>
+    </div>
+    <div class="tab-group">
+      <span class="tab-sep">View:</span>
+      <a class="tab{% if view == 'summary' %} active{% endif %}" href="{{ urls.view('summary') }}">Summary</a>
+      <a class="tab{% if view == 'daily' %} active{% endif %}" href="{{ urls.view('daily') }}">Daily</a>
+    </div>
+  </div>
+
+  <section class="summary">
+    <div class="card"><div class="label">Requests</div><div class="value">{{ summary.requests }}</div></div>
+    <div class="card"><div class="label">Input Tokens</div><div class="value">{{ summary.input_tokens | fmt_tokens }}</div></div>
+    <div class="card"><div class="label">Output Tokens</div><div class="value">{{ summary.output_tokens | fmt_tokens }}</div></div>
+    <div class="card"><div class="label">Cache Write</div><div class="value">{{ summary.cache_write_tokens | fmt_tokens }}</div></div>
+    <div class="card"><div class="label">Cache Read</div><div class="value">{{ summary.cache_read_tokens | fmt_tokens }}</div></div>
+    <div class="card"><div class="label">¥ Cost</div><div class="value">{{ summary.cost_cny | fmt_cost('¥') }}</div></div>
+    <div class="card"><div class="label">$ Cost</div><div class="value">{{ summary.cost_usd | fmt_cost('$') }}</div></div>
+  </section>
+
+  {% if view == 'daily' %}
+  <section class="panel">
+    <h2>By Day — Provider &amp; Model Breakdown</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Day / Model</th><th>Req</th><th>Input</th><th>Output</th><th>Cache↑</th><th>Cache↓</th><th>¥ Cost</th><th>$ Cost</th></tr></thead>
+        <tbody>
+          {% if daily_detail_rows %}
+          {% for block in daily_detail_rows %}
+          {{ usage_row(block.day_label, block.day_total, 'day-hdr') }}
+          {% for prov in block.providers %}
+          {{ usage_row(prov.label, prov.total, 'prov-hdr') }}
+          {% for model in prov.models %}
+          {{ usage_row(model.label, model.row, '', '&emsp;&ensp;') }}
+          {% endfor %}
+          {% endfor %}
+          <tr class="day-gap" aria-hidden="true"><td colspan="8"></td></tr>
+          {% endfor %}
+          {% else %}
+          <tr><td colspan="8" class="empty">No usage data</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% else %}
+  <section class="panel">
+    <h2>By Model</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Model</th><th>Req</th><th>Input</th><th>Output</th><th>Cache↑</th><th>Cache↓</th><th>¥ Cost</th><th>$ Cost</th></tr></thead>
+        <tbody>
+          {% if by_model_sections %}
+          {% for section in by_model_sections %}
+          {{ usage_row(section.label, section.total, 'prov-hdr') }}
+          {% for model in section.models %}
+          {{ usage_row(model.label, model.row, '', '&ensp;') }}
+          {% endfor %}
+          {% endfor %}
+          {% else %}
+          <tr><td colspan="8" class="empty">No usage data</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>By Day</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Day</th><th>Req</th><th>Input</th><th>Output</th><th>Cache↑</th><th>Cache↓</th><th>¥ Cost</th><th>$ Cost</th></tr></thead>
+        <tbody>
+          {% if by_day_rows %}
+          {% for row in by_day_rows %}
+          {{ usage_row(row.label, row) }}
+          {% endfor %}
+          {% else %}
+          <tr><td colspan="8" class="empty">No usage data</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
+
+  <section class="panel" id="recent-requests">
+    <h2>Recent Requests</h2>
+    <div class="filter-bar">
+      <form class="ctrl-form" method="GET" action="/stats#recent-requests">
+        {{ hidden_inputs(base_query, ('provider', 'model', 'page')) }}
+        <span class="ctrl-label">Provider</span>
+        <select name="provider" id="recent-provider-select">
+          <option value=""{% if not recent_provider %} selected{% endif %}>All providers</option>
+          {% for prov in provider_options %}
+          <option value="{{ prov }}"{% if prov == recent_provider %} selected{% endif %}>{{ prov }}</option>
+          {% endfor %}
+        </select>
+        <span class="ctrl-label">Model</span>
+        <select name="model" id="recent-model-select">
+          <option value=""{% if not recent_model %} selected{% endif %}>All models</option>
+          {% for item in recent_model_options %}
+          <option value="{{ item.value }}"{% if item.value == recent_model %} selected{% endif %}>{{ item.label }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit">Apply</button>
+        <a class="tab-link" href="{{ urls.reset_filters }}">Reset</a>
+      </form>
+      <div class="muted">{{ recent_filter_summary }}</div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Time</th><th>Provider</th><th>Model</th><th>In</th><th>Out</th><th>Cache↑</th><th>Cache↓</th><th>Cost</th><th>Stream</th><th>Status</th><th>ms</th></tr></thead>
+        <tbody>
+          {% if recent_rows %}
+          {% for row in recent_rows %}
+          <tr>
+            <td>{{ row.ts }}</td>
+            <td>{{ row.provider }}</td>
+            <td>{{ row.model }}</td>
+            <td>{{ row.input_tokens | fmt_tokens }}</td>
+            <td>{{ row.output_tokens | fmt_tokens }}</td>
+            <td>{{ row.cache_write_tokens | fmt_tokens }}</td>
+            <td>{{ row.cache_read_tokens | fmt_tokens }}</td>
+            <td>{{ row.cost }}</td>
+            <td>{{ row.streaming }}</td>
+            <td>{{ row.status }}</td>
+            <td>{{ row.duration_ms }}</td>
+          </tr>
+          {% endfor %}
+          {% else %}
+          <tr><td colspan="11" class="empty">No usage data</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+    {% if pagination %}
+    <div class="pagination">
+      {% if pagination.first_href %}<a class="page-btn" href="{{ pagination.first_href }}">«</a>{% else %}<span class="page-btn disabled">«</span>{% endif %}
+      {% if pagination.prev_href %}<a class="page-btn" href="{{ pagination.prev_href }}">‹ Prev</a>{% else %}<span class="page-btn disabled">‹ Prev</span>{% endif %}
+      <span class="page-info">Page {{ pagination.page }} / {{ pagination.total_pages }} ({{ pagination.total_recent }} total)</span>
+      {% if pagination.next_href %}<a class="page-btn" href="{{ pagination.next_href }}">Next ›</a>{% else %}<span class="page-btn disabled">Next ›</span>{% endif %}
+      {% if pagination.last_href %}<a class="page-btn" href="{{ pagination.last_href }}">»</a>{% else %}<span class="page-btn disabled">»</span>{% endif %}
+    </div>
+    {% endif %}
+  </section>
+
+  <script type="application/json" id="recent-model-index">{{ recent_model_index_json | safe }}</script>
+  <script src="{{ url_for('static', path='js/stats.js') }}"></script>
+</body>
+</html>

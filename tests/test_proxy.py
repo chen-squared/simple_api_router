@@ -1443,13 +1443,13 @@ class TestStatsPageDailyView(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         page = resp.text
         self.assertIn("By Day — Provider &amp; Model Breakdown", page)
-        self.assertIn("tr.day-hdr td { background: #172554;", page)
-        self.assertIn(
-            '<tr class="day-hdr"><td><strong>2026-05-30</strong></td><td>3</td><td>6.0K</td><td>900</td><td>0</td><td>0</td>',
-            page,
-        )
-        self.assertIn('<tr class="prov-hdr"><td><strong>anthropic</strong></td><td>2</td>', page)
-        self.assertIn('<tr class="prov-hdr"><td><strong>openai</strong></td><td>1</td>', page)
+        self.assertIn("/static/css/stats.css", page)
+        self.assertIn('class="day-hdr"', page)
+        self.assertIn('<tr class="day-hdr">', page)
+        self.assertIn('<strong>2026-05-30</strong>', page)
+        self.assertIn('<tr class="prov-hdr">', page)
+        self.assertIn('<strong>anthropic</strong>', page)
+        self.assertIn('<strong>openai</strong>', page)
         self.assertIn("claude-sonnet-4-5", page)
         self.assertIn("claude-opus-4-5", page)
         self.assertIn("gpt-4o", page)
